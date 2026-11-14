@@ -1,0 +1,30 @@
+[package]
+name = "postman-plugins"
+description = "Набор плагинов протоколов отдельными процессами (ADR 0013): postman-plugins --plugin=<id>"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "postman-plugins"
+path = "src/main.rs"
+
+[dependencies]
+# Договор, сторона плагина (`backend::remote::serve_channel`) и сообщения обмена.
+postman-core.workspace = true
+# Запирание песочницы, сторож смерти хоста, связь — общий механизм процессов.
+postman-proc.workspace = true
+# Демо-канал — первый плагин отдельным процессом (PLG-02): без сети, для тестов и замера.
+postman-demo.workspace = true
+tracing = "0.1"
+# Журнал процесса — строками с уровнем в stderr (хост пишет их в журнал приложения); уровень — из `Hello` и смены
+# настройки (`reload`). Та же копия, что у pets-shell.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Хранилище хоста в тесте процесса (`tests/process.rs`): состояние плагина — в базе хоста, не в файлах процесса.
+postman-cache.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "time", "sync", "macros"] }

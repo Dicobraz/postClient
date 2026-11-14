@@ -1,7 +1,8 @@
 //! Слои рабочей области (S2-01, `docs/specs/S2.md`; плагины путей — ADR 0004): ниже интерфейса нет
 //! UI-зависимостей, слой ниже не зависит от слоя выше, у каждого крейта есть слой; `core` не знает протоколов,
-//! плагин знает `core` и только свой протокол, интерфейс — плагины, но не протоколы. Проверка по `cargo tree`
-//! (обычные зависимости, по Cargo.lock, без сети; один вызов на процесс).
+//! плагин знает `core` и только свой протокол, интерфейс — плагины, но не протоколы. Набор плагинов `postman-plugins`
+//! (ADR 0013) — корень плагинов без интерфейса; интерфейс плагинов не линкует (кроме списка переходного периода).
+//! Проверка по `cargo tree` (обычные зависимости, по Cargo.lock, без сети; один вызов на процесс).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -14,10 +15,12 @@ const L1: u8 = 1;
 const L2: u8 = 2;
 /// L2b — плагины путей к серверам (ADR 0004): над `core`, под интерфейсом.
 const L2B: u8 = 3;
-const L3: u8 = 4;
+/// Корень плагинов (ADR 0013): набор `postman-plugins` — плагины и ядро, без интерфейса.
+const L3P: u8 = 4;
+const L3: u8 = 5;
 
-/// Крейт → слой. L0 `ir`; L1 — без UI; L2 `core`; L2b — плагины путей (`backend-*`); L3 — интерфейс. `demo` —
-/// данные для демо и тестов: без UI, от него зависит только интерфейс.
+/// Крейт → слой. L0 `ir`; L1 — без UI; L2 `core`; L2b — плагины путей (`backend-*`); L3p — набор плагинов; L3 —
+/// интерфейс. `demo` — данные для демо и тестов и демо-канал: без UI, от него зависят только корни (интерфейс и набор).
 const LAYERS: &[(&str, u8)] = &[
     ("postman-ir", L0),
     ("postman-smime", L1),
@@ -43,6 +46,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("postman-backend-telegram", L2B),
     // Канал Matrix (ADR 0012 п. 12, CH-05): плагин канала бесед, Client-Server API и шифрование — matrix-sdk.
     ("postman-backend-matrix", L2B),
+    // Набор плагинов отдельными процессами (ADR 0013, PLG-02): `postman-plugins --plugin=<id>`.
+    ("postman-plugins", L3P),
     ("postman-gpui", L3),
     // Сборка поставки (S8-47): программа CI, от крейтов рабочей области не зависит.
     ("postman-pack", L1),
@@ -70,6 +75,20 @@ const PLUGINS: &[(&str, &str)] = &[
 ];
 
 const CORE: &str = "postman-core";
+const SET: &str = "postman-plugins";
+const UI: &str = "postman-gpui";
+
+/// Плагины, которые интерфейс пока линкует сам (ADR 0013, переходный период): вынесенный в набор плагин уходит отсюда,
+/// к PLG-11 список пуст.
+const LINKED_FOR_NOW: &[&str] = &[
+    "postman-backend-jmap",
+    "postman-backend-imap",
+    "postman-backend-dav",
+    "postman-backend-ews",
+    "postman-backend-ldap",
+    "postman-backend-telegram",
+    "postman-backend-matrix",
+];
 /// Выгрузка в файлы (S8): из байтов письма и свойств MAPI. От неё зависят `core` и `worker` (свойства MAPI заполняет
 /// воркер, S8-29), сама — ни от них, ни от протоколов.
 const EXPORT: &str = "postman-export";
@@ -158,7 +177,7 @@ fn layer(name: &str) -> Option<u8> {
 }
 
 fn label(l: u8) -> &'static str {
-    ["L0", "L1", "L2", "L2b", "L3"].get(usize::from(l)).copied().unwrap_or("L?")
+    ["L0", "L1", "L2", "L2b", "L3p", "L3"].get(usize::from(l)).copied().unwrap_or("L?")
 }
 
 fn is_ui(name: &str) -> bool {
@@ -192,7 +211,7 @@ fn lower_layers_do_not_depend_on_higher() {
         for dep in &graph().direct(name) {
             let Some(dl) = layer(dep) else { continue };
             assert!(dl <= l, "{name} ({}) зависит от {dep} ({})", label(l), label(dl));
-            assert!(dep != "postman-demo" || l == UI_LAYER, "{name} ({}) зависит от демо-данных", label(l));
+            assert!(dep != "postman-demo" || l >= L3P, "{name} ({}) зависит от демо-данных", label(l));
         }
     }
 }
@@ -236,6 +255,29 @@ fn interface_does_not_know_protocols() {
         let known: Vec<_> = PROTOCOL_CRATES.iter().filter(|p| deps.contains(**p)).collect();
         assert!(known.is_empty(), "{name} зависит от протокольных крейтов (только через плагины backend-*): {known:?}");
     }
+}
+
+/// Интерфейс не линкует плагины (ADR 0013): ни набор, ни `backend-*` сверх списка переходного периода; список не
+/// отстаёт от дерева.
+#[test]
+fn interface_does_not_link_plugins() {
+    let all = graph().all(UI);
+    assert!(!all.contains(SET), "{UI} зависит от набора плагинов {SET}: набор — отдельный процесс");
+    let linked: BTreeSet<&str> = all.iter().map(String::as_str).filter(|d| d.starts_with("postman-backend-")).collect();
+    let extra: Vec<_> = linked.iter().filter(|d| !LINKED_FOR_NOW.contains(d)).collect();
+    assert!(extra.is_empty(), "{UI} линкует плагины, которых нет в LINKED_FOR_NOW (новый плагин — в набор {SET}): {extra:?}");
+    let stale: Vec<_> = LINKED_FOR_NOW.iter().filter(|p| !linked.contains(**p)).collect();
+    assert!(stale.is_empty(), "плагины вынесены из {UI} — убрать из LINKED_FOR_NOW: {stale:?}");
+}
+
+/// Набор плагинов — корень без интерфейса: ядро и плагины, процессы — `postman-proc`.
+#[test]
+fn plugin_set_is_a_root_without_interface() {
+    let direct = graph().direct(SET);
+    assert!(direct.contains(CORE) && direct.contains("postman-proc"), "{SET} должен зависеть от {CORE} и postman-proc: {direct:?}");
+    assert!(!graph().all(SET).contains(UI), "{SET} зависит от интерфейса");
+    let users: BTreeSet<String> = graph().users_of(SET, "").into_iter().filter(|u| u != SET).collect();
+    assert!(users.is_empty(), "от набора плагинов зависят: {users:?}");
 }
 
 /// Разборщик MIME — только в зависимостях воркера (S8-36): без поддерева воркера он не нужен ни одному крейту —

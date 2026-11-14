@@ -7885,6 +7885,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "postman-plugins"
+version = "0.1.0-beta.7"
+dependencies = [
+ "postman-cache",
+ "postman-core",
+ "postman-demo",
+ "postman-proc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "postman-proc"
 version = "0.1.0-beta.7"
 dependencies = [
