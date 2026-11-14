@@ -325,6 +325,10 @@ pub const IDLE_OFFLINE_VAR: &str = "POSTMAN_BENCH_IDLE_OFFLINE";
 /// перерисовки календаря (линия «сейчас», виды), контактов и задач (напоминания) попадают в `idle_cpu_pct`.
 pub const IDLE_SECTION_VAR: &str = "POSTMAN_BENCH_IDLE_SECTION";
 
+/// Демо-канал отдельным процессом в замере (ADR 0013, PLG-02): задан — `--bench --demo` поднимает плагин после первого
+/// кадра (`plugin_start_ms`, `plugins_rss_mb`); без него замер — как прежде, без каналов.
+pub const PLUGINS_VAR: &str = "POSTMAN_BENCH_PLUGINS";
+
 /// Порог рабочего набора в простое, МБ (S4-08): задан и превышен — бенч выходит с кодом 1 (для CI и стенда).
 pub const MAX_IDLE_RSS_VAR: &str = "POSTMAN_BENCH_MAX_IDLE_RSS_MB";
 

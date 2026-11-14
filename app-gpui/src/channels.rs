@@ -128,7 +128,8 @@ impl Mailer {
         self.publish_channels(cx);
     }
 
-    /// Демо-канал (`--demo`): сервер в памяти, сессия — в памяти; беседы — в базу демо-ящика.
+    /// Демо-канал (`--demo`): сервер в памяти (процесса плагина или своей), сессия — в памяти; беседы — в базу
+    /// демо-ящика.
     pub(crate) fn start_demo_channel(&mut self, cx: &mut Context<Self>) {
         use postman_demo::channel as demo;
         let (id, account) = (ChannelId::new(demo::ID), AccountId::new(demo::ACCOUNT));
@@ -136,7 +137,15 @@ impl Mailer {
         if let Err(e) = secrets.put(&id, &account, &Secret::new(demo::SESSION.to_vec())) {
             return tracing::warn!("channel: demo session not stored: {e}");
         }
-        let plugin: Arc<dyn channel::ChannelPlugin> = Arc::new(demo::DemoChannel::new(demo::DemoServer::new()));
+        // Первый плагин отдельным процессом (ADR 0013): заместитель — сразу, процесс — после первого кадра.
+        let plugin: Arc<dyn channel::ChannelPlugin> = if crate::plugins::demo_remote(self.screens.is_some()) {
+            let host = crate::plugins::host();
+            let remote = host.channel(crate::plugins::DEMO);
+            host.prefer(crate::plugins::DEMO.id);
+            Arc::new(remote)
+        } else {
+            Arc::new(demo::DemoChannel::new(demo::DemoServer::new()))
+        };
         channel::Links::new(vec![plugin.clone()]).install();
         let start = Start { cache: self.cache.clone(), secrets, account, name: postman_demo::ME_NAME.into(), render: Some(render()), index: None };
         self.spawn_channel(plugin, start, cx);

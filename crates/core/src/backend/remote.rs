@@ -449,6 +449,8 @@ fn supervise(host: &Inner, plugin: &Plugin) {
         let started = Instant::now();
         let outcome = match host.launcher.launch(&plugin.row) {
             Ok(s) => hello(host, plugin, s, started),
+            // Файла набора нет (не собран, не установлен): перезапуски не помогут.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Failed::Build(format!("plugin set {} not found", plugin.row.set))),
             Err(e) => Err(Failed::Crash(format!("launch: {e}"))),
         };
         host.release();
@@ -1068,6 +1070,60 @@ mod tests {
         assert_eq!(started.len(), 2, "третий ждёт, пока двое не ответят на Hello: {started:?}");
         assert_eq!(started[0], "c", "первым — плагин активной учётки: {started:?}");
         assert_eq!(lock(&host.0.gate).queue.len(), 1);
+    }
+
+    /// Процесс другой сборки (обновление прервано): отвечает на `Hello` и только.
+    #[derive(Default)]
+    struct Stale(AtomicUsize);
+
+    impl Launcher for Stale {
+        fn launch(&self, row: &Row) -> io::Result<Started> {
+            let (from_plugin, plugin_out) = pipe()?;
+            let (plugin_in, to_plugin) = pipe()?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let id = row.id;
+            std::thread::spawn(move || {
+                let link: PluginLink = Link::new(plugin_in, plugin_out, MAX_BIN).unwrap();
+                while let Incoming::Message(ToPlugin::Ask { id: n, ask: Ask::Hello(_) }, _) = link.recv() {
+                    let build = Build { build: "other".into(), ..Build::current() };
+                    let reply = Reply::Hello(PluginHello { build, id: id.into(), kind: Kind::Channel });
+                    link.send(&FromPlugin::Answer { id: n, reply }, &[]).unwrap();
+                }
+            });
+            Ok(Started {
+                link: Link::new(from_plugin, to_plugin, MAX_BIN)?,
+                kill: Box::new(|| {}),
+                exit_code: Box::new(|| None),
+                background: Box::new(|_| Ok(())),
+            })
+        }
+    }
+
+    /// Сборки не совпали — «проблема» сразу, без перезапусков; следующий `connect` той же учётки — «Повторить».
+    #[test]
+    fn another_build_is_a_problem_until_retry() {
+        let launcher = Arc::new(Stale::default());
+        let host = Host::new(launcher.clone(), Settings::default());
+        host.first_frame();
+        let plugin = host.channel(row("demo"));
+        let connect = |plugin: &RemoteChannel| {
+            let ctx = ConnectCtx {
+                account: AccountId::new("me@example.test"),
+                secret: Secret::new(b"s".to_vec()),
+                incoming: unbounded_channel().0,
+                store: Rc::new(crate::channel::LocalStore::new(
+                    postman_cache::Cache::open_in_memory().unwrap(),
+                    &ChannelId::new("demo"),
+                    &AccountId::new("me@example.test"),
+                )),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            tokio::task::LocalSet::new().block_on(&rt, async { plugin.connect(ctx).await.err() })
+        };
+        assert!(matches!(connect(&plugin), Some(ChannelError::Plugin(e)) if e.contains("other")));
+        assert_eq!(launcher.0.load(Ordering::SeqCst), 1, "без перезапусков");
+        assert!(matches!(connect(&plugin), Some(ChannelError::Plugin(_))), "«Повторить» — новая попытка и новая проблема");
+        assert_eq!(launcher.0.load(Ordering::SeqCst), 2);
     }
 
     #[test]

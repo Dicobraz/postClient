@@ -413,7 +413,7 @@ pub(crate) fn error_text(e: &ChannelError) -> String {
         ChannelError::NotFound => tr!("chats-err-not-found"),
         ChannelError::TooLarge { .. } => tr!("chats-err-too-large"),
         ChannelError::Unsupported => tr!("chats-err-unsupported"),
-        ChannelError::Protocol(_) | ChannelError::Storage(_) => tr!("chats-err-other"),
+        ChannelError::Protocol(_) | ChannelError::Storage(_) | ChannelError::Plugin(_) => tr!("chats-err-other"),
     }
 }
 
