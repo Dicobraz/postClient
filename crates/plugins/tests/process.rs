@@ -114,6 +114,12 @@ fn demo_channel_runs_as_a_process() {
         };
         assert!(matches!(session.act(Action::Send(out)).await.unwrap(), Done::Sent { client_id: 7, .. }));
         assert!(plugin.parse_link("https://chat.example.test/g-team").is_some(), "вопросы описания — у поднятого процесса");
+        // Память процесса для `--bench`: сторож хоста спрашивает её сразу после `Hello`.
+        let deadline = std::time::Instant::now() + WAIT;
+        while remote::plugins_rss() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(remote::plugins_rss() > 0, "plugins_rss_mb: ОС не дала рабочий набор процесса плагина");
 
         // Процесс убит: сессия — «без связи», ожидающих нет; хост поднимает процесс снова.
         (last.lock().unwrap().as_mut().unwrap())();

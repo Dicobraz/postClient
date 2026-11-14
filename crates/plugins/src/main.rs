@@ -16,6 +16,21 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 #[global_allocator]
 static ALLOC: postman_proc::sandbox::Limited = postman_proc::sandbox::Limited;
 
+/// `/proc/self/status`, открытый до запирания: после него Landlock файлов не откроет, а читать открытый можно.
+#[cfg(target_os = "linux")]
+static STATUS: OnceLock<std::fs::File> = OnceLock::new();
+
+/// Рабочий набор процесса (`VmRSS`) для `plugins_rss_mb`; не вышло — 0.
+#[cfg(target_os = "linux")]
+fn rss() -> u64 {
+    use std::os::unix::fs::FileExt as _;
+    let Some(f) = STATUS.get() else { return 0 };
+    let mut buf = [0u8; 4096];
+    let n = f.read_at(&mut buf, 0).unwrap_or(0);
+    let status = String::from_utf8_lossy(&buf[..n]);
+    status.lines().find_map(|l| l.strip_prefix("VmRSS:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()).map_or(0, |kb| kb * 1024)
+}
+
 static LEVEL: OnceLock<reload::Handle<LevelFilter, tracing_subscriber::Registry>> = OnceLock::new();
 
 /// Наибольший уровень из фильтра `POSTMAN_LOG` (`warn`, `postman=debug,info`); пусто или не разобрать — `info`.
@@ -47,6 +62,11 @@ fn main() {
         eprintln!("ERROR postman-plugins: unknown plugin {id:?}");
         std::process::exit(2);
     };
+    #[cfg(target_os = "linux")]
+    if let Ok(f) = std::fs::File::open("/proc/self/status") {
+        let _ = STATUS.set(f);
+        remote::on_stats(rss);
+    }
     if let Err(e) = sandbox::isolate(entry.profile).and_then(|()| sandbox::lockdown(entry.profile)) {
         eprintln!("ERROR postman-plugins: {}{e}", postman_proc::SANDBOX_REFUSAL);
         std::process::exit(postman_proc::EXIT_SANDBOX);

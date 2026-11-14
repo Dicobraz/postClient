@@ -22,7 +22,7 @@
 
 mod serve;
 
-pub use serve::{on_log, serve_channel, settings};
+pub use serve::{on_log, on_stats, serve_channel, settings};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;

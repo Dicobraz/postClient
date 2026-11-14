@@ -26,6 +26,13 @@ const STORE_WAIT: Duration = Duration::from_secs(30);
 /// Куда процесс набора применяет уровень журнала из `Hello` и смены настроек.
 static LOG: OnceLock<fn(&str)> = OnceLock::new();
 static SETTINGS: Mutex<Option<Settings>> = Mutex::new(None);
+/// Рабочий набор процесса, если ОС отдаёт его не так, как `bench::rss` (Linux в песочнице: `/proc` закрыт).
+static STATS: OnceLock<fn() -> u64> = OnceLock::new();
+
+/// Задать замер рабочего набора процесса (процесс набора, один раз до [`serve_channel`]).
+pub fn on_stats(rss: fn() -> u64) {
+    let _ = STATS.set(rss);
+}
 
 /// Задать применение уровня журнала (процесс набора, один раз до [`serve_channel`]).
 pub fn on_log(apply: fn(&str)) {
@@ -57,7 +64,7 @@ fn quick(link: &PluginLink, id: &'static str, plugin: Option<&dyn ChannelPlugin>
             apply(h.settings.clone());
             Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Channel })
         }
-        (Ask::Stats, _) => Reply::Stats { rss: crate::bench::rss() as u64 },
+        (Ask::Stats, _) => Reply::Stats { rss: STATS.get().map_or_else(|| crate::bench::rss() as u64, |rss| rss()) },
         (Ask::Features, Some(p)) => Reply::Features(p.features()),
         (Ask::ParseLink(url), Some(p)) => Reply::Address(p.parse_link(url)),
         (Ask::Link(at), Some(p)) => Reply::Url(p.link(at)),

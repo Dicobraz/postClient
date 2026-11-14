@@ -10,6 +10,12 @@ cargo build --release -p postman-gpui -p postman-worker
 target\release\postman.exe --demo 50000 --bench                 # строка key=value; Git Bash ждёт выхода сам
 ```
 
+Плагины отдельными процессами (ADR 0013, PLG-02): `set POSTMAN_BENCH_PLUGINS=1` — `--bench --demo` поднимает
+демо-канал процессом `postman-plugins` после первого кадра (собрать: `cargo build --release -p postman-gpui
+-p postman-worker -p postman-plugins`). Поля: `plugin_start_ms` — создание процесса → ответ на `Hello` (0 — плагинов не
+было), `plugins_rss_mb` — рабочий набор процессов плагинов в простое (по опросу хоста раз в 10 с).
+Бюджет памяти — по сумме `idle_rss_mb` и `plugins_rss_mb`.
+
 Поля памяти в строке бенча:
 
 | Поле | Что это |
@@ -346,3 +352,9 @@ store6 --bench move -- --ignored`): 2,5 / 2,8 / 3,6 / 4,3 с — в цели ≤
 - Без `postman-worker.exe` рядом (сборка только `-p postman-gpui`) CPU в простое — 4–7 %: каждое открытое письмо
   запускало воркер, получало ошибку и тост. Исправлено в S8-38: воркер проверяется до первого окна, нет — одно
   предупреждение и пояснение вместо письма, простой 0,0–0,3 %.
+
+## Плагины отдельными процессами (PLG-02, 2026-11-14)
+
+Замер — на стенде, не выполнен: `first_frame_ms` до и после (5 тихих прогонов `--bench --demo 50000` на `main` до PLG-02
+и на ветке с `POSTMAN_BENCH_PLUGINS=1`), `plugin_start_ms` и `plugins_rss_mb` демо-канала. Ожидание по ADR 0013:
+первый кадр не меняется (процесс создаётся после него), старт процесса 11–20 мс в фоне.
