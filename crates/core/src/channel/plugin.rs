@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use postman_cache::{Cache, LocalPut};
+use serde::{Deserialize, Serialize};
 
 use super::{AccountId, ChannelError, ChannelFeatures, ChannelId, ConversationId, Cursor, MessageId, Page, Participant, Secret};
 use super::{Action, Address, AttachmentSource, Done, FileMeta, Uploaded, encode_segment};
@@ -84,7 +85,7 @@ pub trait Flow {
 }
 
 /// Откуда код входа.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodeVia {
     App,
     Sms,
@@ -93,7 +94,7 @@ pub enum CodeVia {
 }
 
 /// Вопрос пользователю.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prompt {
     /// Адрес сервера (Matrix).
     Server,
@@ -134,7 +135,7 @@ pub enum Prompt {
 }
 
 /// Ответ пользователя. Пароль и коды не сохраняются нигде.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Answer {
     Text(String),
     Secret(Secret),
@@ -143,7 +144,7 @@ pub enum Answer {
 }
 
 /// Поток вопросов после входа.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FlowKind {
     /// Проверка устройства (Matrix SAS).
     Verify,

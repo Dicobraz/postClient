@@ -16,6 +16,8 @@ postman-calendar.workspace = true
 png = "0.17"
 
 [dev-dependencies]
+# Демо-канал через обмен в потоке теста (`tests/remote.rs`, ADR 0013): связь — кадры `postman-proc`.
+postman-proc.workspace = true
 # Сборка и проверка подписанных образцов (S5-12, `tests/smime_samples.rs`).
 postman-smime = { workspace = true, features = ["testkit"] }
 # Проверка образцов письмами целиком: MIME S/MIME разбирает воркер (S8-36).

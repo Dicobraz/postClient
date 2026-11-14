@@ -4,6 +4,9 @@
 //!
 //! Живой ящик (`--bench --live`, S4-03): сценарий начинается после первой синхронизации; в итоге ещё
 //! `first_sync_ms` (запуск → `Status::Synced`) и `list_ms` (запуск → первый кадр со строками в списке).
+//!
+//! Плагины отдельными процессами (ADR 0013): `plugin_start_ms` — создание первого процесса плагина → его `Hello`
+//! (`0` — плагинов не запускали), `plugins_rss_mb` — рабочий набор процессов плагинов в простое.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -242,10 +245,11 @@ impl Bench {
         let marks: String = self.marks.iter().map(|(p, m)| format!(" rss_{p}_mb={:.0} private_{p}_mb={:.0}", mb(m.rss), mb(m.private))).collect();
         let live = if self.live { format!("live=1 first_sync_ms={:.0} list_ms={:.0} ", ms(self.synced_at), ms(self.list_at)) } else { String::new() };
         format!(
-            "{live}rows={rows} exe_mb={:.1} first_frame_ms={:.0} {} {} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
+            "{live}rows={rows} exe_mb={:.1} first_frame_ms={:.0} plugin_start_ms={:.0} {} {} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
              ui_cpu_p50={:.2} ui_cpu_p99={:.2} rss_peak_mb={:.0} private_peak_mb={:.0}{marks}",
             exe_mb(),
             self.first_frame.unwrap_or_default().as_secs_f32() * 1000.0,
+            crate::backend::remote::start_ms().unwrap_or_default(),
             self.scroll.report("scroll"),
             self.list.report("list"),
             r.0,
@@ -294,7 +298,13 @@ pub fn finish(line: String) {
         std::thread::sleep(IDLE);
         let m = memory();
         let extra = IDLE_FIELDS.get().map(|f| format!(" {}", f())).unwrap_or_default();
-        println!("{line} idle_cpu_pct={:.1} idle_rss_mb={:.0} idle_private_mb={:.0}{extra}", load.percent(), mb(m.rss), mb(m.private));
+        let plugins = mb(usize::try_from(crate::backend::remote::plugins_rss()).unwrap_or(usize::MAX));
+        println!(
+            "{line} idle_cpu_pct={:.1} idle_rss_mb={:.0} idle_private_mb={:.0} plugins_rss_mb={plugins:.0}{extra}",
+            load.percent(),
+            mb(m.rss),
+            mb(m.private)
+        );
         // Хранилище ещё открыто, но std открывает файлы с FILE_SHARE_DELETE: файл исчезнет, когда процесс
         // закроет его при выходе.
         remove_work_copy();

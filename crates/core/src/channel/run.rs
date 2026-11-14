@@ -42,6 +42,8 @@ pub const HISTORY_PAGE: u32 = 50;
 const CLOSING: Duration = Duration::from_secs(30);
 /// Повтор отправки после обрыва — через столько миллисекунд (или раньше: подключение перечитает очередь).
 const RESEND_MS: i64 = 5_000;
+/// Процесс плагина в «проблеме»: ждать «Повторить» не дольше (сутки — потом ещё одна попытка).
+const UNTIL_RETRY: Duration = Duration::from_secs(24 * 3600);
 
 /// Запрос интерфейса потоку учётки канала (то, что видит пользователь).
 #[derive(Debug, Clone, PartialEq)]
@@ -331,6 +333,14 @@ pub async fn run(plugin: &dyn ChannelPlugin, mut ctx: RunCtx) {
             Err(e) => e,
         };
         tracing::warn!(channel = %channel, "channel connection: {error}");
+        // Процесс плагина не работает (ADR 0013): «проблема» до «Повторить», поток не кончается.
+        if let ChannelError::Plugin(_) = error {
+            stopped(&store, &ctx, error);
+            if !wait_offline(&store, &mut ctx, UNTIL_RETRY).await {
+                return;
+            }
+            continue;
+        }
         let Some(wait) = retry_after(&error, &mut attempt) else { return stopped(&store, &ctx, error) };
         set_state(&store, &ctx, ChannelState::Offline { retry_in: wait.as_secs() });
         if !wait_offline(&store, &mut ctx, wait).await {
