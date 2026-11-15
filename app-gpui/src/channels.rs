@@ -138,14 +138,8 @@ impl Mailer {
             return tracing::warn!("channel: demo session not stored: {e}");
         }
         // Первый плагин отдельным процессом (ADR 0013): заместитель — сразу, процесс — после первого кадра.
-        let plugin: Arc<dyn channel::ChannelPlugin> = if crate::plugins::demo_remote(self.screens.is_some()) {
-            let host = crate::plugins::host();
-            let remote = host.channel(crate::plugins::DEMO);
-            host.prefer(crate::plugins::DEMO.id);
-            Arc::new(remote)
-        } else {
-            Arc::new(demo::DemoChannel::new(demo::DemoServer::new()))
-        };
+        let remote = if crate::plugins::demo_remote(self.screens.is_some()) { crate::plugins::remote_channel(demo::ID) } else { None };
+        let plugin: Arc<dyn channel::ChannelPlugin> = remote.unwrap_or_else(|| Arc::new(demo::DemoChannel::new(demo::DemoServer::new())));
         channel::Links::new(vec![plugin.clone()]).install();
         let start = Start { cache: self.cache.clone(), secrets, account, name: postman_demo::ME_NAME.into(), render: Some(render()), index: None };
         self.spawn_channel(plugin, start, cx);

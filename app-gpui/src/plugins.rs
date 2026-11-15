@@ -16,7 +16,7 @@ use postman_core::backend::remote::{Claim, Host, Launcher, ProcLauncher, Profile
 use postman_core::backend::wire::{Kind, Settings};
 
 /// Демо-канал — набором `postman-plugins` (PLG-02): без сети, для тестов и замера.
-pub(crate) const DEMO: Row = Row {
+const DEMO: Row = Row {
     id: postman_demo::channel::ID,
     kind: Kind::Channel,
     claim: Claim::Channel,
@@ -36,6 +36,16 @@ pub(crate) fn host() -> &'static Host {
         let log = std::env::var("POSTMAN_LOG").unwrap_or_default();
         Host::new(Arc::new(Beside), Settings { log, ..Settings::default() })
     })
+}
+
+/// Заместитель канала `id` по его строке ([`ROWS`]) — первым в очереди старта (активная учётка); строки нет — `None`.
+/// Процесса нет, пока заместителя не позовут.
+pub(crate) fn remote_channel(id: &str) -> Option<Arc<dyn postman_core::channel::ChannelPlugin>> {
+    let row = *ROWS.iter().find(|r| r.id == id)?;
+    let host = host();
+    let remote = host.channel(row);
+    host.prefer(row.id);
+    Some(Arc::new(remote))
 }
 
 /// Набор — рядом с `postman.exe` (как воркер); namespaces Linux — по политике `SandboxNamespaces`.
