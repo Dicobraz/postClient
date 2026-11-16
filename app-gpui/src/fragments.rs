@@ -959,35 +959,18 @@ pub(crate) mod scenes {
         Ok(())
     }
 
-    thread_local! {
-        /// Верх тела письма в прошлой проверке `letter_ready`: сцена ждёт устоявшейся раскладки — закрытие
-        /// композера прошлой сцены перекладывает область чтения, и координаты протяжки (`LINE`) должны попадать
-        /// по улёгшемуся тексту, а не по переходному кадру (флак fragment-select на macOS-раннерах, 2026-11-16).
-        static BODY_TOP: std::cell::Cell<f32> = const { std::cell::Cell::new(f32::NAN) };
-    }
-
     fn letter_ready(_: &Scene, m: &Mailer, cx: &App) -> bool {
-        // Лента беседы грузится из базы фоновой задачей (`thread::sync_thread`) и, придя, перекладывает панель
-        // чтения (сводка беседы и вложения — над телом письма): координаты протяжки, взятые по interim-кадру,
-        // попадают мимо текста — так флакал fragment-select на macOS-раннерах (2026-11-16, кадр `-fail`).
-        // Ждём ленту именно открытого письма, композер прошлой сцены закрыт, документ построен и границы тела
-        // два кадра подряд одни и те же.
+        // Лента беседы грузится из базы фоновой задачей (`thread::sync_thread` → `reload_thread`) и, придя,
+        // перекладывает панель чтения (сводка беседы и вложения — над телом письма): координаты протяжки,
+        // взятые по interim-кадру, попадают мимо текста — так флакал fragment-select на macOS-раннерах
+        // (2026-11-16, кадр `-fail`). Ждём ленту именно открытого письма; композер прошлой сцены закрыт,
+        // документ построен.
         let pane = m.reading.read(cx);
         let thread = pane.reading.as_ref().map(|r| r.row.thread_id.clone());
-        let feed_ready = pane.feed.as_ref().is_some_and(|f| thread.as_ref() == Some(&f.conv.thread));
-        let ready = m.compose.inline.is_none()
-            && feed_ready
+        m.compose.inline.is_none()
+            && pane.feed.as_ref().is_some_and(|f| thread.as_ref() == Some(&f.conv.thread))
             && pane.reading.as_ref().is_some_and(|r| r.doc.is_some())
-            && body().is_some();
-        if !ready {
-            BODY_TOP.with(|t| t.set(f32::NAN));
-            return false;
-        }
-        let top = body().map_or(f32::NAN, |b| f32::from(b.top()));
-        BODY_TOP.with(|t| {
-            let was = t.replace(top);
-            was.is_finite() && (was - top).abs() < 0.5
-        })
+            && body().is_some()
     }
 
     fn stay(_: &Scene, _: &mut Mailer, _: &mut Window, _: &mut Context<Mailer>) -> Result<(), String> {
