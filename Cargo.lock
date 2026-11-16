@@ -3178,7 +3178,7 @@ dependencies = [
  "itertools 0.13.0",
  "lsp-types",
  "markdown",
- "markup5ever_rcdom",
+ "markup5ever_rcdom 0.39.0+unofficial",
  "num-traits",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -5544,7 +5544,19 @@ dependencies = [
  "html5ever 0.39.0",
  "markup5ever 0.39.0",
  "tendril",
- "xml5ever",
+ "xml5ever 0.39.0",
+]
+
+[[package]]
+name = "markup5ever_rcdom"
+version = "0.40.1+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64206f12eb431c03d9b6f293846f8b0517578905b6c0cac266aa52f09c11ad7c"
+dependencies = [
+ "html5ever 0.40.1",
+ "markup5ever 0.40.0",
+ "tendril",
+ "xml5ever 0.40.0",
 ]
 
 [[package]]
@@ -7827,7 +7839,7 @@ name = "postman-ir"
 version = "0.1.0-beta.7"
 dependencies = [
  "html5ever 0.40.1",
- "markup5ever_rcdom",
+ "markup5ever_rcdom 0.40.1+unofficial",
  "pulldown-cmark",
  "serde",
  "serde_json",
@@ -9934,6 +9946,7 @@ dependencies = [
  "parking_lot",
  "phf_shared 0.14.0",
  "precomputed-hash",
+ "serde",
 ]
 
 [[package]]
@@ -12671,6 +12684,16 @@ checksum = "5ab627f34ff61b80d756180d556f9c68801d836d271b3b8c094504ceca69d221"
 dependencies = [
  "log",
  "markup5ever 0.39.0",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73290529dc9bc6c6155bf77fdd70ce0061f98ad387586aa3104cddab29206961"
+dependencies = [
+ "log",
+ "markup5ever 0.40.0",
 ]
 
 [[package]]
