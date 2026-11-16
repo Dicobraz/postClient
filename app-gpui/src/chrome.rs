@@ -10,6 +10,9 @@
 //! внутри зоны двигала бы окно вместо щелчка. Зазоры между кнопками — тоже заголовок окна ([`drag_gap`]).
 //! Linux (LIN-02): кнопки и рамка — свои, как на Windows (`WindowDecorations::Client`), но зоны gpui там не
 //! разбирает — кнопки и перетаскивание со своими обработчиками, край окна — [`resize_edges`].
+//! Linux (LIN-08): сторона и состав кнопок — настройка ОС `button-layout` ([`Buttons`], `sys::buttons`); кнопки
+//! слева — раскладка macOS (`MainLinuxLeft`): кнопки → вкладки, разделы над деревом, шестерёнка справа; полный
+//! экран — раскладка Windows без кнопок окна.
 
 use std::time::{Duration, Instant};
 
@@ -54,6 +57,91 @@ const W_TRAFFIC_LIGHTS: f32 = 78.0;
 #[cfg(target_os = "macos")]
 pub(crate) fn traffic_lights() -> Point<Pixels> {
     point(px(14.), px((TITLEBAR_H - 14.) / 2.))
+}
+
+/// Кнопка окна (LIN-08): какая из «─ □ ✕».
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cap {
+    Min,
+    Max,
+    Close,
+}
+
+impl Cap {
+    /// Id элемента и зона окна — одни и те же на обеих сторонах заголовка.
+    fn parts(self, max: char) -> (&'static str, char, WindowControlArea) {
+        match self {
+            Cap::Min => ("caption-min", glyph::MIN, WindowControlArea::Min),
+            Cap::Max => ("caption-max", max, WindowControlArea::Max),
+            Cap::Close => ("caption-close", glyph::CAPTION_CLOSE, WindowControlArea::Close),
+        }
+    }
+}
+
+/// Кнопки окна (LIN-08): сторона и состав по порядку — настройка ОС Linux `button-layout` (portal, `sys::buttons`);
+/// Windows и macOS — справа, все три. Смена — [`set_buttons`] с перерисовкой окон.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Buttons {
+    /// Кнопки слева — раскладка macOS (макет `MainLinuxLeft`): кнопки → вкладки, разделы — над деревом.
+    left: bool,
+    /// Кнопки по порядку настройки.
+    caps: Vec<Cap>,
+}
+
+impl Default for Buttons {
+    fn default() -> Self {
+        Buttons { left: false, caps: vec![Cap::Min, Cap::Max, Cap::Close] }
+    }
+}
+
+impl Global for Buttons {}
+
+/// Разбор настройки `button-layout` («close,minimize:maximize»): до «:» — слева, после — справа, без «:» — всё слева
+/// (как разбирает GNOME); знакомые кнопки — minimize, maximize, close, остальные (appmenu) пропускаются. Знакомая
+/// кнопка слева — кнопки слева (за ней и правые, по порядку настройки). Знакомых нет — настройка пуста: справа,
+/// все три.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_buttons(layout: &str) -> Buttons {
+    let cap = |name: &str| match name.trim() {
+        "minimize" => Some(Cap::Min),
+        "maximize" => Some(Cap::Max),
+        "close" => Some(Cap::Close),
+        _ => None,
+    };
+    let (l, r) = layout.split_once(':').unwrap_or((layout, ""));
+    let left: Vec<Cap> = l.split(',').filter_map(cap).collect();
+    let right: Vec<Cap> = r.split(',').filter_map(cap).collect();
+    if left.is_empty() {
+        if right.is_empty() {
+            return Buttons::default();
+        }
+        return Buttons { left: false, caps: right };
+    }
+    let mut caps = left;
+    caps.extend(right);
+    Buttons { left: true, caps }
+}
+
+/// Кнопки окна сейчас: Linux — из настройки ОС, прочие ОС и до ответа portal — [`Buttons::default`].
+pub(crate) fn buttons(cx: &App) -> Buttons {
+    cx.try_global::<Buttons>().cloned().unwrap_or_default()
+}
+
+/// Кнопки окна слева — раскладка macOS (LIN-08); прочие ОС — нет.
+pub(crate) fn buttons_left(cx: &App) -> bool {
+    buttons(cx).left
+}
+
+/// Поставить настройку кнопок окна (portal Linux; сцены снимков) и перерисовать окна. Та же — ничего.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_buttons(layout: &str, cx: &mut App) {
+    let buttons = parse_buttons(layout);
+    if cx.try_global::<Buttons>().is_some_and(|b| *b == buttons) {
+        return;
+    }
+    tracing::debug!(?buttons, "wm buttons: layout");
+    cx.set_global(buttons);
+    cx.refresh_windows();
 }
 
 /// Значки Segoe Fluent Icons.
@@ -162,10 +250,9 @@ const H_SECTION: f32 = 30.0;
 const W_SECTION: f32 = 36.0;
 #[cfg(target_os = "macos")]
 const H_SECTION: f32 = 32.0;
-/// macOS (макет `MainMac`): разделы над деревом папок — высота кнопки и зазор.
-#[cfg(target_os = "macos")]
+/// macOS (`MainMac`) и Linux с кнопками слева (`MainLinuxLeft`, LIN-08): разделы над деревом папок — высота кнопки
+/// и зазор.
 const H_SECTION_BAR: f32 = 32.0;
-#[cfg(target_os = "macos")]
 const SECTION_BAR_GAP: f32 = 4.0;
 const SECTION_GAP: f32 = 2.0;
 const SECTIONS_END: f32 = 10.0;
@@ -303,6 +390,58 @@ fn drag_gap(id: impl Into<ElementId>, w: f32) -> Stateful<Div> {
     drag_area(div().id(id.clone()).children(crate::screens::spot(id)).w(px(w)).h_full().flex_none())
 }
 
+/// Значок приложения слева в заголовке (раскладка Windows; macOS — «светофоры», Linux с кнопками слева — кнопки окна).
+#[cfg(not(target_os = "macos"))]
+fn app_icon() -> Stateful<Div> {
+    drag_area(
+        div()
+            .id("app-icon")
+            .children(crate::screens::spot("app-icon"))
+            .w(px(W_APP_ICON))
+            .h_full()
+            .pl(px(12.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(img(icons::APP).size(px(20.)).flex_none()),
+    )
+}
+
+/// Круглая кнопка окна 24 px слева в заголовке (Linux, LIN-08, макет `MainLinuxLeft`): нейтральная заливка, значок 14,
+/// наведение — плотнее, «✕» — красная, как у кнопок справа.
+#[cfg(target_os = "linux")]
+fn wm_button(cap: Cap, max: char, l: &Look) -> Stateful<Div> {
+    let (id, g, area) = cap.parts(max);
+    div()
+        .id(id)
+        .children(crate::screens::spot(id))
+        .size(px(24.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(l.fill())
+        .text_color(l.text())
+        .when(cap == Cap::Close, |d| d.hover(|d| d.bg(l.pm(Pm::CaptionClose)).text_color(l.pm(Pm::CaptionCloseOn))))
+        .when(cap != Cap::Close, |d| d.hover(|d| d.bg(l.pressed())))
+        .window_control_area(area)
+        .child(icon(g, 14.))
+        .on_click(cap_click(area))
+}
+
+/// Linux (LIN-02, LIN-08): щелчок по своей кнопке окна — действие системы; «✕» — как красная кнопка macOS (почта
+/// живёт): сначала трей, без него — закрыть окно.
+#[cfg(target_os = "linux")]
+fn cap_click(area: WindowControlArea) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+    move |_, window, cx| match area {
+        WindowControlArea::Min => window.minimize_window(),
+        WindowControlArea::Max => window.zoom_window(),
+        _ if crate::tray::close_to_tray(window, cx) => {}
+        _ => window.remove_window(),
+    }
+}
+
 /// Зона перетаскивания окна. Windows — `WindowControlArea::Drag` (нажатие обрабатывает система, Snap и двойной щелчок
 /// — её). macOS (MAC-02) — зону заголовка AppKit не знает: нажатие двигает окно (`start_window_move`), двойной
 /// щелчок — как в настройках системы («Увеличить» или «Свернуть»). Linux (LIN-02) — зоны заголовка gpui на Linux не
@@ -406,9 +545,10 @@ impl Mailer {
         }
     }
 
-    /// Заголовок окна: [значок][разделы][вкладки][перетаскивание][настройки][─ □ ✕].
-    /// Заголовок окна. `bar_sections` — macOS (макет `MainMac`): разделы стоят над деревом папок в строке команд,
-    /// в заголовке их нет; иначе (полный экран, вкладка без строки команд, другие ОС) — в заголовке.
+    /// Заголовок окна: [значок или кнопки окна][разделы][вкладки][перетаскивание][настройки][─ □ ✕].
+    /// Заголовок окна. `bar_sections` — macOS (макет `MainMac`) и Linux с кнопками слева (LIN-08, `MainLinuxLeft`):
+    /// разделы стоят над деревом папок в строке команд, в заголовке их нет; иначе (полный экран, вкладка без строки
+    /// команд, другие ОС) — в заголовке.
     pub(crate) fn titlebar(&self, l: &Look, window: &Window, bar_sections: bool, cx: &mut Context<Self>) -> Div {
         let active = self.tabs.active().id;
         let mac = cfg!(target_os = "macos");
@@ -489,7 +629,10 @@ impl Mailer {
                 .children(close)
                 .on_click(cx.listener(move |this, _, window, cx| this.activate_tab(id, window, cx)))
         });
-        let caption = |id: &'static str, g: char, area: WindowControlArea, close: bool| {
+        let max = if window.is_maximized() { glyph::RESTORE } else { glyph::MAX };
+        // «─ □ ✕» (Windows 11): зона 46 px на всю высоту заголовка, наведение — слабая заливка, «✕» — красная.
+        let caption = |cap: Cap| {
+            let (id, g, area) = cap.parts(max);
             let d = div()
                 .id(id)
                 .children(crate::screens::spot(id))
@@ -500,21 +643,15 @@ impl Mailer {
                 .items_center()
                 .justify_center()
                 .text_color(l.text())
-                .when(close, |d| d.hover(|d| d.bg(l.pm(Pm::CaptionClose)).text_color(l.pm(Pm::CaptionCloseOn))))
-                .when(!close, |d| d.hover(|d| d.bg(l.hover())))
+                .when(cap == Cap::Close, |d| d.hover(|d| d.bg(l.pm(Pm::CaptionClose)).text_color(l.pm(Pm::CaptionCloseOn))))
+                .when(cap != Cap::Close, |d| d.hover(|d| d.bg(l.hover())))
                 .window_control_area(area)
                 .child(icon(g, 10.));
             // Linux (LIN-02): кнопки окна свои, как на Windows, но система их не разбирает — щелчок делает действие.
             #[cfg(target_os = "linux")]
-            let d = d.on_click(move |_, window, cx| match area {
-                WindowControlArea::Min => window.minimize_window(),
-                WindowControlArea::Max => window.zoom_window(),
-                _ if crate::tray::close_to_tray(window, cx) => {}
-                _ => window.remove_window(),
-            });
+            let d = d.on_click(cap_click(area));
             d
         };
-        let max = if window.is_maximized() { glyph::RESTORE } else { glyph::MAX };
         // macOS (MAC-02, макеты `MainMac`, `MainMacFull`): слева — место «светофоров» системы вместо значка приложения,
         // справа своих «─ □ ✕» и шестерёнки нет (настройки — меню приложения, ⌘,). В полном экране «светофоров» нет:
         // на их месте — разделы.
@@ -524,21 +661,39 @@ impl Mailer {
         } else {
             drag_area(div().id("traffic-lights").children(crate::screens::spot("traffic-lights")).w(px(W_TRAFFIC_LIGHTS)).h_full().flex_none())
         };
-        #[cfg(not(target_os = "macos"))]
-        let _ = bar_sections;
-        #[cfg(not(target_os = "macos"))]
-        let leading = drag_area(
-            div()
-                .id("app-icon")
-                .children(crate::screens::spot("app-icon"))
-                .w(px(W_APP_ICON))
-                .h_full()
-                .pl(px(12.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(img(icons::APP).size(px(20.)).flex_none()),
-        );
+        // Linux (LIN-08): кнопки окна слева — раскладка macOS (`MainLinuxLeft`); в полном экране — раскладка Windows
+        // без кнопок окна.
+        let left = buttons_left(cx) && !window.is_fullscreen();
+        #[cfg(target_os = "linux")]
+        let leading = if left {
+            let wm = buttons(cx);
+            // Кнопки слева — круги 24 px (значок 14) через 8, поля 14; зазоры между ними — заголовок окна.
+            let mut row: Vec<AnyElement> = vec![drag_gap("wm-lead", 14.).into_any_element()];
+            for (i, cap) in wm.caps.iter().enumerate() {
+                row.push(wm_button(*cap, max, l).into_any_element());
+                let last = i + 1 == wm.caps.len();
+                row.push(drag_gap(("wm-gap", i), if last { 14. } else { 8. }).into_any_element());
+            }
+            div().children(crate::screens::spot("wm-buttons")).h_full().flex_none().flex().items_center().children(row).into_any_element()
+        } else {
+            app_icon().into_any_element()
+        };
+        #[cfg(target_os = "macos")]
+        let leading = if window.is_fullscreen() {
+            drag_gap("traffic-lights", TABS_START)
+        } else {
+            drag_area(div().id("traffic-lights").children(crate::screens::spot("traffic-lights")).w(px(W_TRAFFIC_LIGHTS)).h_full().flex_none())
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let leading = app_icon();
+        // «─ □ ✕» справа: Windows — все три; Linux (LIN-08) — состав и порядок из настройки ОС, а при кнопках слева и в
+        // полном экране — их нет (раскладка macOS / раскладка Windows без кнопок); macOS — своих нет.
+        #[cfg(not(target_os = "linux"))]
+        let caps: Vec<Cap> = vec![Cap::Min, Cap::Max, Cap::Close];
+        #[cfg(target_os = "linux")]
+        let caps: Vec<Cap> = if left || window.is_fullscreen() { Vec::new() } else { buttons(cx).caps };
+        // Вкладки по середине заголовка — macOS (`MainMac`) и Linux с кнопками слева (`MainLinuxLeft`), иначе — по низу.
+        let mid = mac || left;
         div()
             .h(px(TITLEBAR_H))
             .w_full()
@@ -554,8 +709,8 @@ impl Mailer {
                 div()
                     .h_full()
                     .flex()
-                    .when(!mac, |d| d.items_end())
-                    .when(mac, |d| d.items_center())
+                    .when(!mid, |d| d.items_end())
+                    .when(mid, |d| d.items_center())
                     .gap(px(2.))
                     .min_w_0()
                     .overflow_x_hidden()
@@ -583,11 +738,7 @@ impl Mailer {
             // Пустое место — заголовок окна: перетаскивание, двойной щелчок — развернуть.
             .child(drag_area(div().id("drag").children(crate::screens::spot("drag")).flex_1().min_w(px(48.)).h_full()))
             .children(self.settings_button(l, cx).filter(|_| !mac))
-            .when(!mac, |d| {
-                d.child(caption("caption-min", glyph::MIN, WindowControlArea::Min, false))
-                    .child(caption("caption-max", max, WindowControlArea::Max, false))
-                    .child(caption("caption-close", glyph::CAPTION_CLOSE, WindowControlArea::Close, true))
-            })
+            .when(!mac, |d| d.children(caps.iter().map(|cap| caption(*cap))))
             .when(mac, |d| d.child(drag_gap("caption-end", 8.)))
     }
 
@@ -623,8 +774,8 @@ impl Mailer {
         out
     }
 
-    /// macOS (макет `MainMac`): разделы над деревом папок, в строке команд — кнопки поровну на ширину `w`.
-    #[cfg(target_os = "macos")]
+    /// macOS (`MainMac`) и Linux с кнопками слева (`MainLinuxLeft`, LIN-08): разделы над деревом папок, в строке
+    /// команд — кнопки поровну на ширину `w`.
     pub(crate) fn bar_sections(&self, l: &Look, w: f32, cx: &App) -> Div {
         let buttons = self.section_buttons(l, cx).into_iter().map(|b| b.flex_1().h(px(H_SECTION_BAR)));
         div().flex_none().w(px(w)).flex().items_center().gap(px(SECTION_BAR_GAP)).children(buttons)
@@ -1356,6 +1507,7 @@ const COMMANDS: &[pets_commands::Command] = {
 pub(crate) mod scenes {
     use gpui_kit::*;
 
+    use super::{Buttons, buttons_left};
     use crate::screens::{self, Scene};
     use crate::tabs::TabKind;
     use crate::{Mailer, Section};
@@ -1366,10 +1518,16 @@ pub(crate) mod scenes {
     ];
 
     /// Вкладка почты сцены `tab-mail` — только в ней: дальше — главная со своим состоянием (как Ctrl+W).
+    /// Сцена `list-left` (LIN-08) ставила кнопки окна слева — дальше снимки идут в раскладке по умолчанию.
     pub(crate) fn reset(s: &Scene, m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
         let mail_tab = m.tabs.iter().find(|t| t.kind == TabKind::Mail).map(|t| t.id);
         if let Some(id) = mail_tab.filter(|_| s.name != "tab-mail") {
             m.close_tab(id, window, cx);
+        }
+        if s.name != "list-left" && buttons_left(cx) {
+            cx.set_global(Buttons::default());
+            cx.refresh_windows();
+            cx.notify();
         }
     }
 
@@ -1421,6 +1579,26 @@ pub(crate) fn worker_notice(t: &mut crate::notices::Notices, cx: &mut Context<cr
 #[cfg(test)]
 mod tests {
     use super::MoreMenu;
+
+    /// LIN-08: разбор `button-layout` — сторона и состав кнопок; незнакомые имена (appmenu) пропускаются, без «:» —
+    /// всё слева (как разбирает GNOME), знакомых кнопок нет — справа, все три.
+    #[test]
+    fn button_layout_parse() {
+        use super::{Buttons, Cap, parse_buttons};
+        let b = |left: bool, caps: &[Cap]| Buttons { left, caps: caps.to_vec() };
+        assert_eq!(parse_buttons("close,minimize:maximize"), b(true, &[Cap::Close, Cap::Min, Cap::Max]));
+        assert_eq!(parse_buttons(":minimize,maximize,close"), b(false, &[Cap::Min, Cap::Max, Cap::Close]));
+        assert_eq!(parse_buttons("appmenu:minimize,maximize,close"), b(false, &[Cap::Min, Cap::Max, Cap::Close]));
+        assert_eq!(parse_buttons("close:"), b(true, &[Cap::Close]));
+        assert_eq!(parse_buttons(":close"), b(false, &[Cap::Close]));
+        assert_eq!(parse_buttons("minimize:maximize,close"), b(true, &[Cap::Min, Cap::Max, Cap::Close]), "правые — за левыми");
+        assert_eq!(parse_buttons("close,minimize"), b(true, &[Cap::Close, Cap::Min]), "без «:» — всё слева");
+        assert_eq!(parse_buttons(" close , maximize "), b(true, &[Cap::Close, Cap::Max]), "пробелы не мешают");
+        assert_eq!(parse_buttons(""), Buttons::default());
+        assert_eq!(parse_buttons(":"), Buttons::default());
+        assert_eq!(parse_buttons("appmenu:spacer"), Buttons::default());
+        assert_eq!(Buttons::default(), b(false, &[Cap::Min, Cap::Max, Cap::Close]));
+    }
 
     /// LIN-02: край и угол окна своей рамки; прижатый к экрану край не тянется, середина окна — не край.
     #[test]

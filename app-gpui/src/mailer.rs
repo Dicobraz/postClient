@@ -737,12 +737,9 @@ impl Render for Mailer {
         let first_run = self.section == Section::Mail && self.live.signin.is_some();
         // Командная строка и полоса автоответа — у почты; во вкладках «Настройки», письма и при первом запуске их нет.
         let bars = free && !first_run && letter.is_none() && meeting.is_none();
-        // macOS (макет `MainMac`): разделы — над деревом папок, в строке команд; в полном экране (`MainMacFull`) и без
-        // строки команд — в заголовке.
-        #[cfg(target_os = "macos")]
-        let bar_sections = bars && !window.is_fullscreen();
-        #[cfg(not(target_os = "macos"))]
-        let bar_sections = false;
+        // macOS (макет `MainMac`) и Linux с кнопками окна слева (LIN-08, `MainLinuxLeft`): разделы — над деревом папок,
+        // в строке команд; в полном экране (`MainMacFull`) и без строки команд — в заголовке.
+        let bar_sections = bars && !window.is_fullscreen() && (cfg!(target_os = "macos") || crate::chrome::buttons_left(cx));
         let lead = if bar_sections { self.panes.0 } else { 0. };
         if self.bar.read(cx).lead != lead {
             self.bar.update(cx, |b, cx| {
@@ -1066,9 +1063,9 @@ impl Mailer {
     }
 
     /// Командная строка: своя у календаря и контактов (вкладка «Почта»), иначе — строка почты.
-    /// macOS (`lead`, макет `MainMac`): слева — разделы над деревом папок, по его ширине с полями 8.
+    /// `lead` — macOS (`MainMac`) и Linux с кнопками окна слева (`MainLinuxLeft`, LIN-08): слева — разделы над деревом
+    /// папок, по его ширине с полями 8.
     fn section_bar(&self, l: &crate::roles::Look, free: bool, lead: bool, cx: &App) -> AnyElement {
-        #[cfg(target_os = "macos")]
         if lead {
             let w = (self.panes.0 - 16.).max(0.);
             return div()
@@ -1081,7 +1078,6 @@ impl Mailer {
                 .child(div().flex_1().min_w_0().h_full().child(self.command_bar(free)))
                 .into_any_element();
         }
-        let _ = (l, lead, cx);
         self.command_bar(free)
     }
 
