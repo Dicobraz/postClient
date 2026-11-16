@@ -1,7 +1,7 @@
 # BUG-fragment-select: сцена снимков падает на macOS-раннерах GitHub
 
 lane: app-gpui
-status: in-progress        # фикс едет веткой fix/screens-drag; ручная проверка — manual-tests/BUG-fragment-select.md
+status: done                # фикс в main (PR #4); ручная проверка на MacBook — по желанию, manual-tests/BUG-fragment-select.md
 deps: []
 class: A
 files: [app-gpui/src/screens.rs, app-gpui/src/fragments.rs, docs/manual-tests/BUG-fragment-select.md]
@@ -36,6 +36,8 @@ manual: yes
    Режим `POSTMAN_SCREENS_SHOT_ON_FAIL` («снять и продолжить») не изменился.
 
 ## Готово
+Локально 3/3 (Windows); ×3 со сторожем кадров на macOS-раннере — снимки зелёные 3/3 (run 43936382299, job bundle
+success, 202 кадра); PR #4 смержен в main. Флак больше не воспроизводился ни на одном прогоне после фикса.
 
 `×3` диагностика ветки с фиксом — 3/3 зелёные (run — см. PR); сцены `reply-inline, fragment-select,
 reply-fragments` — зелёные на Windows dev-сборкой; ручная проверка на MacBook владельца — `docs/manual-tests/
