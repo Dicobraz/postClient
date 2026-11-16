@@ -1,27 +1,24 @@
 //! Вход в Matrix (ADR 0012 «Проверка договора»: `Server` → `Login` и `Password` или `Browser`). Сервер — имя
 //! (`example.test`, адрес находится по `.well-known/matrix/client`), адрес `https://…` или сразу `@user:server`.
-//! Пароль — `m.login.password`; браузер — SSO (`m.login.sso`; на серверах с MAS — его слой совместимости): Postman
-//! слушает `127.0.0.1` на свободном порту, сервер возвращает браузер туда с `loginToken`, вход — `m.login.token`.
+//! Пароль — `m.login.password`; браузер — SSO (`m.login.sso`; на серверах с MAS — его слой совместимости): ссылка
+//! возврата — на `127.0.0.1`, слушает ядро и передаёт токен плагину (ADR 0013: песочница входящих не принимает),
+//! вход — `m.login.token`.
 //!
 //! Вход идёт прямым запросом `/login`, без своего хранилища шифрования: устройство и его ключи заводит подключение
 //! (`connect`) уже со своим хранилищем в базе профиля — ключи нового устройства не теряются между входом и
 //! подключением. Пароль и токен входа нигде не сохраняются; в журнал — только коды отказов.
 
-use std::time::Duration;
+use std::rc::Rc;
 
 use matrix_sdk::Client;
 use matrix_sdk::ruma::api::client::session::get_login_types::v3::LoginType;
 use matrix_sdk::ruma::api::client::session::login;
 use postman_core::backend::BoxFuture;
-use postman_core::channel::{AccountId, Answer, ChannelError, Flow, Prompt};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpListener;
+use postman_core::channel::{AccountId, Answer, ChannelError, Flow, Prompt, Sso};
 
 use crate::secret::Session;
-use crate::{BAD_LOGIN, BAD_PASSWORD, BAD_SERVER, BROWSER_TIMEOUT, NO_LOGIN_FLOW};
+use crate::{BAD_LOGIN, BAD_PASSWORD, BAD_SERVER, NO_LOGIN_FLOW};
 
-/// Сколько ждать возврата из браузера.
-pub const BROWSER_WAIT: Duration = Duration::from_secs(5 * 60);
 /// Имя устройства на сервере (видно в списке сеансов учётки).
 const DEVICE_NAME: &str = "Postman";
 
@@ -37,23 +34,19 @@ enum Step {
     Server,
     Login { client: Client, ways: Ways, user: Option<String> },
     Password { client: Client, ways: Ways, user: String },
-    Browser { client: Client, ways: Ways, listener: TcpListener, user: Option<String> },
+    /// Порт возврата слушает ядро ([`Sso`]); повтор входа ждёт тот же порт.
+    Browser { client: Client, ways: Ways, port: u16, user: Option<String> },
     Over,
 }
 
 pub struct SignIn {
     step: Step,
-}
-
-impl Default for SignIn {
-    fn default() -> Self {
-        Self::new()
-    }
+    sso: Option<Rc<dyn Sso>>,
 }
 
 impl SignIn {
-    pub fn new() -> Self {
-        Self { step: Step::Start }
+    pub fn new(sso: Option<Rc<dyn Sso>>) -> Self {
+        Self { step: Step::Start, sso }
     }
 }
 
@@ -112,49 +105,12 @@ async fn login(client: &Client, info: login::v3::LoginInfo, bad: &str) -> Result
     done(client, r)
 }
 
-/// Начать вход через браузер: слушать loopback, ссылка SSO с возвратом туда.
-async fn browser(client: &Client) -> Result<(TcpListener, String), ChannelError> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| ChannelError::Storage(format!("loopback: {e}")))?;
-    let port = listener.local_addr().map_err(|e| ChannelError::Storage(format!("loopback: {e}")))?.port();
+/// Начать вход через браузер: порт возврата — у ядра, ссылка SSO ведёт туда.
+async fn browser(client: &Client, sso: &Rc<dyn Sso>) -> Result<(u16, String), ChannelError> {
+    let port = sso.port()?;
     let redirect = format!("http://127.0.0.1:{port}/");
     let url = client.matrix_auth().get_sso_login_url(&redirect, None).await.map_err(crate::client::err)?;
-    Ok((listener, url))
-}
-
-/// Страница в браузере после возврата: закрыть её и вернуться в Postman (на двух языках интерфейса).
-const BACK_PAGE: &str =
-    "<!doctype html><meta charset=utf-8><title>Postman</title><p>Вход выполнен — вернитесь в Postman.</p><p>Signed in — return to Postman.</p>";
-
-/// Ждать возврата браузера: `GET /?loginToken=…`; прочие запросы (значок сайта) — 404.
-async fn wait_token(listener: &TcpListener) -> Result<String, ChannelError> {
-    let wait = async {
-        loop {
-            let (mut sock, _) = listener.accept().await.map_err(|e| ChannelError::Network(format!("loopback: {e}")))?;
-            let mut buf = vec![0u8; 8192];
-            let n = match tokio::time::timeout(Duration::from_secs(10), sock.read(&mut buf)).await {
-                Ok(Ok(n)) => n,
-                _ => continue,
-            };
-            let head = String::from_utf8_lossy(&buf[..n]);
-            let token = head.lines().next().and_then(|line| line.split(' ').nth(1)).and_then(|path| {
-                let query = path.split_once('?')?.1;
-                query.split('&').find_map(|kv| kv.strip_prefix("loginToken=")).and_then(postman_core::channel::decode_segment)
-            });
-            let reply = match &token {
-                Some(_) => format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BACK_PAGE}",
-                    BACK_PAGE.len()
-                ),
-                None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
-            };
-            let _ = sock.write_all(reply.as_bytes()).await;
-            let _ = sock.shutdown().await;
-            if let Some(t) = token.filter(|t| !t.is_empty()) {
-                return Ok(t);
-            }
-        }
-    };
-    tokio::time::timeout(BROWSER_WAIT, wait).await.map_err(|_| ChannelError::Denied(BROWSER_TIMEOUT.into()))?
+    Ok((port, url))
 }
 
 impl SignIn {
@@ -177,8 +133,9 @@ impl SignIn {
                     return Err(ChannelError::Denied(NO_LOGIN_FLOW.into()));
                 }
                 if !ways.password {
-                    let (listener, url) = browser(&client).await?;
-                    self.step = Step::Browser { client, ways, listener, user };
+                    let sso = self.sso().cloned()?;
+                    let (port, url) = browser(&client, &sso).await?;
+                    self.step = Step::Browser { client, ways, port, user };
                     return Ok(Prompt::Browser { url });
                 }
                 match user {
@@ -193,14 +150,15 @@ impl SignIn {
                 }
             }
             (Step::Login { client, ways, user }, Some(Answer::Confirm(true))) if ways.sso => {
-                let (listener, url) = match browser(&client).await {
+                let sso = self.sso().cloned()?;
+                let (port, url) = match browser(&client, &sso).await {
                     Ok(x) => x,
                     Err(e) => {
                         self.step = Step::Login { client, ways, user };
                         return Err(e);
                     }
                 };
-                self.step = Step::Browser { client, ways, listener, user };
+                self.step = Step::Browser { client, ways, port, user };
                 Ok(Prompt::Browser { url })
             }
             (Step::Login { client, ways, .. }, Some(Answer::Text(user))) => {
@@ -222,19 +180,23 @@ impl SignIn {
                 self.step = Step::Login { client, ways, user: None };
                 Ok(Prompt::Login)
             }
-            (Step::Browser { client, ways, listener, user }, Some(Answer::Confirm(true))) => match wait_token(&listener).await {
-                Ok(token) => match login(&client, login::v3::LoginInfo::Token(login::v3::Token::new(token)), BAD_LOGIN).await {
+            (Step::Browser { client, ways, port, user }, Some(Answer::Confirm(true))) => {
+                let sso = self.sso().cloned()?;
+                let token = match sso.token().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.step = Step::Browser { client, ways, port, user };
+                        return Err(e);
+                    }
+                };
+                match login(&client, login::v3::LoginInfo::Token(login::v3::Token::new(token)), BAD_LOGIN).await {
                     Ok(p) => Ok(p),
                     Err(e) => {
-                        self.step = Step::Browser { client, ways, listener, user };
+                        self.step = Step::Browser { client, ways, port, user };
                         Err(e)
                     }
-                },
-                Err(e) => {
-                    self.step = Step::Browser { client, ways, listener, user };
-                    Err(e)
                 }
-            },
+            }
             // Передумал: обратно к имени и паролю (если сервер их даёт).
             (Step::Browser { client, ways, user, .. }, Some(Answer::Confirm(false))) if ways.password => {
                 self.step = Step::Login { client, ways, user };
@@ -249,6 +211,11 @@ impl SignIn {
                 Err(ChannelError::Protocol(format!("unexpected answer {}", answer_kind(other.as_ref()))))
             }
         }
+    }
+
+    /// Услуга возврата SSO у ядра; нет её (вход в процессе ядра без обмена) — через браузер нельзя.
+    fn sso(&self) -> Result<&Rc<dyn Sso>, ChannelError> {
+        self.sso.as_ref().ok_or_else(|| ChannelError::Plugin("sso service is not available".into()))
     }
 
     async fn password(&mut self, client: Client, ways: Ways, user: String, password: String) -> Result<Prompt, ChannelError> {

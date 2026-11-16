@@ -335,7 +335,7 @@ mod tests {
         let p = TelegramChannel::with_dial(Arc::new(NoKey));
         assert!(!p.has_key());
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let r = rt.block_on(p.sign_in(FlowCtx { store: std::rc::Rc::new(Mem) }));
+        let r = rt.block_on(p.sign_in(FlowCtx { store: std::rc::Rc::new(Mem), sso: None }));
         assert!(matches!(r, Err(ChannelError::Denied(ref c)) if c == NO_API_KEY));
     }
 }

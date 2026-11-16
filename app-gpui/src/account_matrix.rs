@@ -3,10 +3,12 @@
 //! месте: сервер → имя и пароль или «Войти через браузер»; и «Шифрованные беседы» — где держать расшифрованный текст
 //! (ADR 0012, решение владельца п. 1). Вид бесед — CH-04.
 //!
-//! Канал собран признаком `matrix` (в release — с `matrix-release`), включается настройкой (`Prefs::channels.matrix`,
-//! по умолчанию выключен) и политикой `AllowChannelMatrix`; выбор «Шифрованные беседы» закрепляет политика
-//! `ChannelE2EStorePlaintext`. Вход — своим потоком (`account_telegram::flow_thread`); проверка устройства и ключ
-//! резервной копии — потоком учётки (`channel::Request::Flow`), ответы — глобалом [`FlowReply`].
+//! Канал — отдельным процессом набора `postman-plugins-matrix` (PLG-04, ADR 0013): признака сборки нет,
+//! `matrix-sdk` не в дереве `postman.exe`; включается настройкой (`Prefs::channels.matrix`, по умолчанию выключен) и
+//! политикой `AllowChannelMatrix`, выбор «Шифрованные беседы» закрепляет политика `ChannelE2EStorePlaintext`. Файл
+//! набора — компонент установки (PLG-03; в выпуск 0.2.0 не входит): нет файла — канал «без связи» с причиной.
+//! Вход — своим потоком (`account_telegram::flow_thread`); проверка устройства и ключ резервной копии — потоком
+//! учётки (`channel::Request::Flow`), ответы — глобалом [`FlowReply`].
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
@@ -14,6 +16,7 @@ use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::Metric;
 use postman_core::channel::e2e::E2eStore;
+use postman_core::channel::matrix as mx;
 use postman_core::channel::{AccountId, Answer, ChanAccount, ChannelError, ChannelState, FlowKind, Prompt, Secret};
 use postman_core::prefs::Prefs;
 
@@ -25,8 +28,9 @@ use crate::settings_tab::{link, row, seg, seg_group, toggle};
 /// Id канала.
 pub(crate) const MATRIX: &str = "matrix";
 
-/// Канал Matrix есть в этой сборке: в dev — всегда, в release — с признаком `matrix-release` (docs/SIZE.md №11).
-pub(crate) const BUILT: bool = cfg!(all(feature = "matrix", any(debug_assertions, feature = "matrix-release")));
+/// Канал Matrix есть в этой сборке всегда (PLG-04): код — в процессе набора, не в `postman.exe`; включают настройка
+/// и политика, файл набора — компонент установки.
+pub(crate) const BUILT: bool = true;
 
 /// Политика организации запретила канал: его нет в настройках.
 pub(crate) fn forbidden() -> bool {
@@ -491,18 +495,19 @@ fn error_code(e: &ChannelError) -> String {
     }
 }
 
-/// «Проблема → причина» словами (Fluent); коды — `postman_backend_matrix::BAD_*`.
+/// «Проблема → причина» словами (Fluent); коды — в ядре (`postman_core::channel::matrix`, PLG-04): интерфейс от
+/// крейта плагина не зависит.
 pub(crate) fn error_text(e: &ChannelError) -> String {
     match e {
         ChannelError::Denied(code) => match code.as_str() {
-            "server-invalid" => tr!("mx-err-server"),
-            "login-invalid" => tr!("mx-err-login"),
-            "password-invalid" => tr!("mx-err-password"),
-            "login-unsupported" => tr!("mx-err-unsupported"),
-            "browser-timeout" => tr!("mx-err-browser"),
-            "no-cross-signing" => tr!("mx-err-cross-signing"),
-            "verification-cancelled" => tr!("mx-err-verify"),
-            "recovery-key-invalid" => tr!("mx-err-recovery"),
+            mx::BAD_SERVER => tr!("mx-err-server"),
+            mx::BAD_LOGIN => tr!("mx-err-login"),
+            mx::BAD_PASSWORD => tr!("mx-err-password"),
+            mx::NO_LOGIN_FLOW => tr!("mx-err-unsupported"),
+            mx::BROWSER_TIMEOUT => tr!("mx-err-browser"),
+            mx::NO_CROSS_SIGNING => tr!("mx-err-cross-signing"),
+            mx::VERIFY_CANCELLED => tr!("mx-err-verify"),
+            mx::BAD_RECOVERY_KEY => tr!("mx-err-recovery"),
             _ => tr!("mx-err-denied"),
         },
         ChannelError::Wait { secs } => tr!("mx-err-wait", secs = secs.to_string()),

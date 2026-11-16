@@ -31,8 +31,9 @@ paths = ["crates/proc/*", "crates/worker/*", "crates/smime/*"]
 paths = ["crates/core/*"]
 
 [lane.backends]
-# L2b: плагины путей к серверам; L3p: их набор отдельными процессами (`postman-plugins`, ADR 0013).
-paths = ["crates/backend-*", "crates/plugins/*"]
+# L2b: плагины путей к серверам; L3p: их наборы отдельными процессами (`postman-plugins`, `postman-plugins-matrix`,
+# ADR 0013; Matrix — свой файл, PLG-04).
+paths = ["crates/backend-*", "crates/plugins/*", "crates/plugins-matrix/*"]
 
 [lane.app-gpui]
 # L3: интерфейс, postman.exe.

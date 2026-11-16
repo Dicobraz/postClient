@@ -46,8 +46,10 @@ const LAYERS: &[(&str, u8)] = &[
     ("postman-backend-telegram", L2B),
     // Канал Matrix (ADR 0012 п. 12, CH-05): плагин канала бесед, Client-Server API и шифрование — matrix-sdk.
     ("postman-backend-matrix", L2B),
-    // Набор плагинов отдельными процессами (ADR 0013, PLG-02): `postman-plugins --plugin=<id>`.
+    // Наборы плагинов отдельными процессами (ADR 0013): общий `postman-plugins` (PLG-02) и Matrix — свой файл
+    // `postman-plugins-matrix` (PLG-04, решение владельца 2026-11-16): `--plugin=<id>`.
     ("postman-plugins", L3P),
+    ("postman-plugins-matrix", L3P),
     ("postman-gpui", L3),
     // Сборка поставки (S8-47): программа CI, от крейтов рабочей области не зависит.
     ("postman-pack", L1),
@@ -75,7 +77,8 @@ const PLUGINS: &[(&str, &str)] = &[
 ];
 
 const CORE: &str = "postman-core";
-const SET: &str = "postman-plugins";
+/// Файлы наборов плагинов (ADR 0013): общий и Matrix (PLG-04, решение владельца 2026-11-16).
+const SETS: &[&str] = &["postman-plugins", "postman-plugins-matrix"];
 const UI: &str = "postman-gpui";
 
 /// Плагины, которые интерфейс пока линкует сам (ADR 0013, переходный период): вынесенный в набор плагин уходит отсюда,
@@ -87,7 +90,6 @@ const LINKED_FOR_NOW: &[&str] = &[
     "postman-backend-ews",
     "postman-backend-ldap",
     "postman-backend-telegram",
-    "postman-backend-matrix",
 ];
 /// Выгрузка в файлы (S8): из байтов письма и свойств MAPI. От неё зависят `core` и `worker` (свойства MAPI заполняет
 /// воркер, S8-29), сама — ни от них, ни от протоколов.
@@ -257,27 +259,31 @@ fn interface_does_not_know_protocols() {
     }
 }
 
-/// Интерфейс не линкует плагины (ADR 0013): ни набор, ни `backend-*` сверх списка переходного периода; список не
+/// Интерфейс не линкует плагины (ADR 0013): ни наборы, ни `backend-*` сверх списка переходного периода; список не
 /// отстаёт от дерева.
 #[test]
 fn interface_does_not_link_plugins() {
     let all = graph().all(UI);
-    assert!(!all.contains(SET), "{UI} зависит от набора плагинов {SET}: набор — отдельный процесс");
+    for set in SETS {
+        assert!(!all.contains(*set), "{UI} зависит от набора плагинов {set}: набор — отдельный процесс");
+    }
     let linked: BTreeSet<&str> = all.iter().map(String::as_str).filter(|d| d.starts_with("postman-backend-")).collect();
     let extra: Vec<_> = linked.iter().filter(|d| !LINKED_FOR_NOW.contains(d)).collect();
-    assert!(extra.is_empty(), "{UI} линкует плагины, которых нет в LINKED_FOR_NOW (новый плагин — в набор {SET}): {extra:?}");
+    assert!(extra.is_empty(), "{UI} линкует плагины, которых нет в LINKED_FOR_NOW (новый плагин — в набор): {extra:?}");
     let stale: Vec<_> = LINKED_FOR_NOW.iter().filter(|p| !linked.contains(**p)).collect();
     assert!(stale.is_empty(), "плагины вынесены из {UI} — убрать из LINKED_FOR_NOW: {stale:?}");
 }
 
-/// Набор плагинов — корень без интерфейса: ядро и плагины, процессы — `postman-proc`.
+/// Наборы плагинов — корни без интерфейса: ядро и плагины, процессы — `postman-proc`.
 #[test]
-fn plugin_set_is_a_root_without_interface() {
-    let direct = graph().direct(SET);
-    assert!(direct.contains(CORE) && direct.contains("postman-proc"), "{SET} должен зависеть от {CORE} и postman-proc: {direct:?}");
-    assert!(!graph().all(SET).contains(UI), "{SET} зависит от интерфейса");
-    let users: BTreeSet<String> = graph().users_of(SET, "").into_iter().filter(|u| u != SET).collect();
-    assert!(users.is_empty(), "от набора плагинов зависят: {users:?}");
+fn plugin_sets_are_roots_without_interface() {
+    for set in SETS {
+        let direct = graph().direct(set);
+        assert!(direct.contains(CORE) && direct.contains("postman-proc"), "{set} должен зависеть от {CORE} и postman-proc: {direct:?}");
+        assert!(!graph().all(set).contains(UI), "{set} зависит от интерфейса");
+        let users: BTreeSet<String> = graph().users_of(set, "").into_iter().filter(|u| u != set).collect();
+        assert!(users.is_empty(), "от набора плагинов {set} зависят: {users:?}");
+    }
 }
 
 /// Разборщик MIME — только в зависимостях воркера (S8-36): без поддерева воркера он не нужен ни одному крейту —

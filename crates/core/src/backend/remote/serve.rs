@@ -14,14 +14,18 @@ use std::time::Duration;
 use postman_proc::link::Incoming;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::super::wire::{Ask, Build, Call, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, StoreOp, ToPlugin};
-use super::{MAX_BIN, PluginLink};
+use super::super::wire::{Ask, Build, Call, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin};
+use super::{BROWSER_WAIT as HOST_BROWSER_WAIT, MAX_BIN, PluginLink};
+use super::{Claim, Profile, Row};
+use crate::backend::BoxFuture;
 use crate::channel::{
-    AccountId, Answer, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelPlugin, ChannelSession, ConnectCtx, FlowCtx, PluginStore, Secret,
+    AccountId, Answer, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelPlugin, ChannelSession, ConnectCtx, FlowCtx, PluginStore, Secret, Sso,
 };
 
 /// Вызов хранилища ядра ждёт ответа не дольше.
 const STORE_WAIT: Duration = Duration::from_secs(30);
+/// Ожидание возврата браузера у ядра ([`HOST_BROWSER_WAIT`]) плюс запас на обмен.
+const SSO_WAIT: Duration = Duration::from_secs(HOST_BROWSER_WAIT.as_secs() + 30);
 
 /// Куда процесс набора применяет уровень журнала из `Hello` и смены настроек.
 static LOG: OnceLock<fn(&str)> = OnceLock::new();
@@ -193,6 +197,38 @@ impl PluginStore for RemoteStore {
     }
 }
 
+/// Возврат SSO из браузера — услуга ядра по обмену (ADR 0013): листенер loopback у хоста. Ожидание браузера — до
+/// получаса, вызов связи не занимает рантайм плагина: блокирующий вызов — в потоке пула.
+struct RemoteSso {
+    link: Arc<PluginLink>,
+    flow: u64,
+}
+
+impl Sso for RemoteSso {
+    fn port(&self) -> Result<u16, ChannelError> {
+        match self.link.call(&FromPlugin::Sso { flow: self.flow, op: SsoOp::Listen }, &[], STORE_WAIT) {
+            Ok((ToPlugin::SsoReply(Ok(SsoDone::Port(port))), _)) => Ok(port),
+            Ok((ToPlugin::SsoReply(Err(e)), _)) => Err(e),
+            Ok(_) => Err(ChannelError::Protocol("unexpected sso reply".into())),
+            Err(e) => Err(ChannelError::Storage(format!("sso: {e}"))),
+        }
+    }
+
+    fn token<'a>(&'a self) -> BoxFuture<'a, Result<String, ChannelError>> {
+        let link = Arc::clone(&self.link);
+        let flow = self.flow;
+        Box::pin(async move {
+            let asked = tokio::task::spawn_blocking(move || link.call(&FromPlugin::Sso { flow, op: SsoOp::Wait }, &[], SSO_WAIT));
+            match asked.await.map_err(|e| ChannelError::Plugin(format!("sso wait: {e}")))? {
+                Ok((ToPlugin::SsoReply(Ok(SsoDone::Token(token))), _)) => Ok(token),
+                Ok((ToPlugin::SsoReply(Err(e)), _)) => Err(e),
+                Ok(_) => Err(ChannelError::Protocol("unexpected sso reply".into())),
+                Err(e) => Err(ChannelError::Storage(format!("sso: {e}"))),
+            }
+        })
+    }
+}
+
 struct Sink(Vec<u8>);
 
 impl ByteSink for Sink {
@@ -246,8 +282,9 @@ impl Served {
                     self.flows.borrow_mut().remove(&flow);
                 }
                 ToPlugin::Settings(s) => apply(s),
-                // Каналы исходящего не держат: очередь отправки — у ядра.
-                ToPlugin::Leave | ToPlugin::Stored(_) => {}
+                // Каналы исходящего не держат: очередь отправки — у ядра. `SsoReply` — только ответ на вызов услуги,
+                // сюда сообщением не приходит.
+                ToPlugin::Leave | ToPlugin::Stored(_) | ToPlugin::SsoReply(_) => {}
             }
         }
     }
@@ -310,8 +347,9 @@ impl Served {
 
     async fn sign_in(self: Rc<Self>, id: u64, flow: u64) {
         let store: Rc<dyn PluginStore> = Rc::new(RemoteStore { link: Arc::clone(&self.link), scope: flow });
+        let sso: Rc<dyn Sso> = Rc::new(RemoteSso { link: Arc::clone(&self.link), flow });
         let plugin = Arc::clone(&self.plugin);
-        match plugin.sign_in(FlowCtx { store }).await {
+        match plugin.sign_in(FlowCtx { store, sso: Some(sso) }).await {
             Ok(mut f) => {
                 answer(&self.link, id, Reply::Unit(Ok(())), &[]);
                 self.steps(flow, &mut *f).await;
@@ -362,4 +400,68 @@ fn refused(call: &Call, e: ChannelError) -> Reply {
         Call::Upload(_) => Reply::Uploaded(Err(e)),
         Call::CatchUp(_) | Call::Download(_) | Call::Flow { .. } | Call::SignOut => Reply::Unit(Err(e)),
     }
+}
+
+/// Плагин набора для запуска процессом: то, что нужно файлу набора (`postman-plugins`, `postman-plugins-matrix`, ADR
+/// 0013) без интерфейса. Строки тех же плагинов в композиционном корне (`app-gpui/src/plugins.rs`) сверяет с мнением
+/// самого плагина тест корня.
+#[derive(Clone, Copy)]
+pub struct SetEntry {
+    pub id: &'static str,
+    pub kind: Kind,
+    /// Профиль песочницы процесса; вшит в набор, аргументом его не понизить.
+    pub profile: Profile,
+    /// Как плагин узнаёт свой адрес — тот же [`Claim`], что в строке корня: тест сверяет мнения.
+    pub claim: Claim,
+    /// Точка входа процесса: связь с хостом уже открыта, песочница заперта. Ответ — код выхода.
+    pub serve: fn(PluginLink) -> i32,
+}
+
+impl SetEntry {
+    /// Адрес — этого плагина по мнению самого набора; то же правило, что у строки корня ([`Row::claims`]).
+    pub fn claims(&self, url: &str) -> bool {
+        Row { id: self.id, kind: self.kind, claim: self.claim, set: "", profile: self.profile }.claims(url)
+    }
+}
+
+/// Общий `main` файла набора плагинов: `postman-plugins* --plugin=<id>` (ADR 0013). До первого сообщения — только
+/// запирание песочницы (профиль — из набора) и ответ на `Hello`; рантайм и сам плагин — при первом настоящем вопросе
+/// хоста. Своих файлов процесс не пишет: состояние плагина — услуга ядра по обмену. Журнал процесса — строками с
+/// уровнем в stderr (настройку делает `log`, уровень приходит в `Hello` и сменами). Ответ — код выхода.
+pub fn set_main(set: &'static str, find: fn(&str) -> Option<&'static SetEntry>, log: fn()) -> i32 {
+    let id = std::env::args().find_map(|a| a.strip_prefix("--plugin=").map(str::to_owned));
+    let Some(entry) = id.as_deref().and_then(find) else {
+        eprintln!("ERROR {set}: unknown plugin {id:?}");
+        return 2;
+    };
+    #[cfg(target_os = "linux")]
+    if let Ok(f) = std::fs::File::open("/proc/self/status") {
+        static STATUS: OnceLock<std::fs::File> = OnceLock::new();
+        /// `/proc/self/status`, открытый до запирания: после него Landlock файлов не откроет, а читать открытый можно.
+        fn rss() -> u64 {
+            use std::os::unix::fs::FileExt as _;
+            let Some(f) = STATUS.get() else { return 0 };
+            let mut buf = [0u8; 4096];
+            let n = f.read_at(&mut buf, 0).unwrap_or(0);
+            let status = String::from_utf8_lossy(&buf[..n]);
+            status.lines().find_map(|l| l.strip_prefix("VmRSS:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()).map_or(0, |kb| kb * 1024)
+        }
+        let _ = STATUS.set(f);
+        on_stats(rss);
+    }
+    if let Err(e) = postman_proc::sandbox::isolate(entry.profile).and_then(|()| postman_proc::sandbox::lockdown(entry.profile)) {
+        eprintln!("ERROR {set}: {}{e}", postman_proc::SANDBOX_REFUSAL);
+        return postman_proc::EXIT_SANDBOX;
+    }
+    // Сторож смерти хоста и связь — после запирания: запреты Linux действуют на потоки, созданные после него.
+    let _watchdog = postman_proc::watchdog(None);
+    log();
+    let link = match PluginLink::stdio(MAX_BIN) {
+        Ok(link) => link,
+        Err(e) => {
+            eprintln!("ERROR {set}: link: {e}");
+            return 1;
+        }
+    };
+    (entry.serve)(link)
 }

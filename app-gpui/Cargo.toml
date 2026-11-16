@@ -11,18 +11,16 @@ name = "postman"
 path = "src/main.rs"
 
 [features]
-default = ["telegram", "matrix"]
+default = ["telegram"]
 # Считающий распределитель для замера кучи Rust в `--bench` (S4-08, docs/MEMORY.md); в обычной сборке выключен.
 alloc-count = []
 # Канал Telegram (ADR 0012, CH-03): плагин `postman-backend-telegram`, QR-код входа. В обычной сборке есть; включает
 # настройка «Каналы бесед» и политика `AllowChannelTelegram`. Ключ приложения — `POSTMAN_TG_API_ID`/`POSTMAN_TG_API_HASH`
 # при сборке.
 telegram = ["dep:postman-backend-telegram", "dep:qrcodegen"]
-# Канал Matrix (ADR 0012, CH-05): плагин `postman-backend-matrix` (matrix-sdk, сквозное шифрование). Включает настройка
-# «Каналы бесед» и политика `AllowChannelMatrix`. В dev-сборке есть всегда; в release — только с `matrix-release`
-# (рост postman.exe — на решение владельца, docs/SIZE.md №11): без него код канала в exe не попадает.
-matrix = ["dep:postman-backend-matrix"]
-matrix-release = ["matrix"]
+# Канал Matrix (CH-05, PLG-04) — отдельным процессом набора `postman-plugins-matrix` (ADR 0013): признака сборки нет,
+# `matrix-sdk` не в дереве `postman.exe`; включает настройка «Каналы бесед» и политика `AllowChannelMatrix`, файл
+# набора — компонент установки (в выпуск 0.2.0 не входит, PLG-03).
 
 [dependencies]
 # Отчёт для поддержки (S5-30): архив журнала и настроек; тот же крейт, что у воркера.
@@ -46,7 +44,6 @@ postman-backend-ews.workspace = true
 # Каталог сертификатов адресатов (S5-12 Ф5): плагин ядра, LDAP знает только он.
 postman-backend-ldap.workspace = true
 postman-backend-telegram = { workspace = true, optional = true }
-postman-backend-matrix = { workspace = true, optional = true }
 # QR-код входа в Telegram с другого устройства (MIT, без зависимостей).
 qrcodegen = { version = "1.8", optional = true }
 # Поток входа в канал (CH-03): шаги входа — в своём рантайме, ответы — каналом (та же копия, что у ядра).
@@ -102,9 +99,10 @@ embed-resource = "3"
 
 [dev-dependencies]
 tempfile = "3"
-# Строки плагинов корня (`src/plugins.rs`) сверяются с набором `postman-plugins` (ADR 0013); в сборку интерфейса набор
-# не входит — отдельный процесс.
+# Строки плагинов корня (`src/plugins.rs`) сверяются с наборами `postman-plugins` и `postman-plugins-matrix`
+# (ADR 0013); в сборку интерфейса наборы не входят — отдельные процессы.
 postman-plugins.workspace = true
+postman-plugins-matrix.workspace = true
 # Каналы команд синхронизации в тестах маршрутизации (S7-03б); та же версия, что у postman-core.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 

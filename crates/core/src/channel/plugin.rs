@@ -53,6 +53,40 @@ pub struct ConnectCtx {
 
 pub struct FlowCtx {
     pub store: Rc<dyn PluginStore>,
+    /// Возврат SSO из браузера через ядро ([`Sso`]); `None` — плагин в процессе ядра (без песочницы) слушает сам.
+    pub sso: Option<Rc<dyn Sso>>,
+}
+
+/// Возврат SSO из браузера на `127.0.0.1` слушает ядро и передаёт токен плагину (ADR 0013 «Договор»): песочница
+/// плагина входящих соединений не принимает. Плагин просит порт для ссылки возврата и ждёт токен входа; страница
+/// ответа браузеру — у ядра.
+pub trait Sso {
+    /// Свободный порт на `127.0.0.1`, который ядро будет слушать до конца входа.
+    fn port(&self) -> Result<u16, ChannelError>;
+    /// Ждать возврата браузера (`loginToken`).
+    fn token<'a>(&'a self) -> BoxFuture<'a, Result<String, ChannelError>>;
+}
+
+/// Коды отказов входа и проверок Matrix в [`ChannelError::Denied`](super::ChannelError) (ADR 0012 «Проверка
+/// договора», CH-05): интерфейс переводит их в слова (Fluent), не завися от крейта плагина (PLG-04 — плагин в
+/// отдельном процессе).
+pub mod matrix {
+    /// Сервер не найден или не отвечает.
+    pub const BAD_SERVER: &str = "server-invalid";
+    /// Имя пустое или неверное.
+    pub const BAD_LOGIN: &str = "login-invalid";
+    /// Пароль не подошёл.
+    pub const BAD_PASSWORD: &str = "password-invalid";
+    /// Сервер не даёт войти ни паролем, ни через браузер.
+    pub const NO_LOGIN_FLOW: &str = "login-unsupported";
+    /// Вход через браузер не завершён за отведённое время.
+    pub const BROWSER_TIMEOUT: &str = "browser-timeout";
+    /// Проверка устройства: кросс-подпись учётки не настроена (настраивается в другом приложении).
+    pub const NO_CROSS_SIGNING: &str = "no-cross-signing";
+    /// Проверка устройства: символы не совпали или другое устройство отменило.
+    pub const VERIFY_CANCELLED: &str = "verification-cancelled";
+    /// Ключ резервной копии или фраза не подошли.
+    pub const BAD_RECOVERY_KEY: &str = "recovery-key-invalid";
 }
 
 /// Подключённая учётка канала. Методы — `&self`: ядро держит несколько вызовов сразу (большая загрузка не задерживает

@@ -1,7 +1,11 @@
 //! Канал Matrix (ADR 0012, CH-05): плагин `ChannelPlugin` ядра поверх `matrix-sdk` (Apache-2.0). Канал — только
-//! протокол: вход паролем или через браузер (SSO, возврат по loopback; [`signin`]), сессия (секрет ядра —
-//! [`secret`]), sync с курсором и поток событий, история, поиск на сервере, действия, файлы (`session`), перевод
-//! событий в общую модель и обратно ([`convert`]), проверка устройства и резервная копия ключей ([`verify`]).
+//! протокол: вход паролем или через браузер (SSO, возврат по loopback — слушает ядро и передаёт токен плагину,
+//! ADR 0013; [`signin`]), сессия (секрет ядра — [`secret`]), sync с курсором и поток событий, история, поиск на
+//! сервере, действия, файлы (`session`), перевод событий в общую модель и обратно ([`convert`]), проверка устройства
+//! и резервная копия ключей ([`verify`]).
+//!
+//! Отдельным процессом (PLG-04, ADR 0013): файл набора `postman-plugins-matrix`, точка входа — [`serve`]; из
+//! `postman.exe` канал ушёл, в реестре — заместитель. Хранилища и услуги — по обмену с ядром.
 //!
 //! - **Сквозное шифрование** — в клиенте (`vodozemac`): не расшифровалось — `MessageKind::Undecryptable`, пришёл
 //!   ключ (другое устройство, резервная копия) — то же сообщение заново, тот же `MessageId`.
@@ -10,11 +14,13 @@
 //! - **Сеть** — только для учёток, которые добавил пользователь, и по его действию (вход); ни телеметрии, ни
 //!   запросов при старте без учётки. Мосты к другим сетям — не в клиенте (ADR 0012 «Что не входит»).
 //! - **Тесты без сети**: подставной сервер `fake` (признак `testkit`) отвечает как Client-Server API на loopback;
-//!   канал проходит `postman_core::channel::conformance` (`tests/conformance.rs`).
+//!   канал проходит `postman_core::channel::conformance` (`tests/conformance.rs`) и те же проверки через обмен
+//!   (`tests/remote.rs`).
 
 use std::sync::Arc;
 
 use postman_core::backend::BoxFuture;
+use postman_core::backend::remote::{PluginLink, serve_channel};
 use postman_core::channel::{
     AccountId, Address, ChannelError, ChannelFeatures, ChannelId, ChannelPlugin, ChannelSession, ConnectCtx, ConversationId, E2e, Flow, FlowCtx,
     Limit, MessageId, Participant, Reactions,
@@ -34,20 +40,17 @@ pub mod verify;
 /// Id канала: адрес `postman://matrix/…`, ключ политики `AllowChannelMatrix`.
 pub const ID: &str = "matrix";
 
-/// Коды отказов входа и проверок в `ChannelError::Denied` — интерфейс переводит их в слова (Fluent).
-pub const BAD_SERVER: &str = "server-invalid";
-pub const BAD_LOGIN: &str = "login-invalid";
-pub const BAD_PASSWORD: &str = "password-invalid";
-/// Сервер не даёт войти ни паролем, ни через браузер.
-pub const NO_LOGIN_FLOW: &str = "login-unsupported";
-/// Вход через браузер не завершён за отведённое время.
-pub const BROWSER_TIMEOUT: &str = "browser-timeout";
-/// Проверка устройства: кросс-подпись учётки не настроена (настраивается в другом приложении).
-pub const NO_CROSS_SIGNING: &str = "no-cross-signing";
-/// Проверка устройства: символы не совпали или другое устройство отменило.
-pub const VERIFY_CANCELLED: &str = "verification-cancelled";
-/// Ключ резервной копии или фраза не подошли.
-pub const BAD_RECOVERY_KEY: &str = "recovery-key-invalid";
+/// Коды отказов входа и проверок в `ChannelError::Denied` — слова интерфейса (Fluent) в ядре
+/// (`postman_core::channel::matrix`), интерфейс от крейта плагина не зависит (PLG-04).
+pub use postman_core::channel::matrix::{
+    BAD_LOGIN, BAD_PASSWORD, BAD_RECOVERY_KEY, BAD_SERVER, BROWSER_TIMEOUT, NO_CROSS_SIGNING, NO_LOGIN_FLOW, VERIFY_CANCELLED,
+};
+
+/// Точка входа процесса набора `postman-plugins-matrix --plugin=matrix` (ADR 0013, PLG-04): канал отвечает хосту за
+/// себя; клиент и рантайм — при первом настоящем вопросе.
+pub fn serve(link: PluginLink) -> i32 {
+    serve_channel(link, ID, || Arc::new(MatrixChannel::new()))
+}
 
 /// Длина текста: событие Matrix — не больше 64 КиБ JSON; с запасом на разметку и шифр.
 pub const MAX_TEXT: u32 = 16_000;
@@ -139,9 +142,9 @@ impl ChannelPlugin for MatrixChannel {
         links::person(p.id.as_str())
     }
 
-    fn sign_in<'a>(&'a self, _ctx: FlowCtx) -> BoxFuture<'a, Result<Box<dyn Flow + 'a>, ChannelError>> {
+    fn sign_in<'a>(&'a self, ctx: FlowCtx) -> BoxFuture<'a, Result<Box<dyn Flow + 'a>, ChannelError>> {
         Box::pin(async move {
-            let flow: Box<dyn Flow + 'a> = Box::new(signin::SignIn::new());
+            let flow: Box<dyn Flow + 'a> = Box::new(signin::SignIn::new(ctx.sso));
             Ok(flow)
         })
     }

@@ -12,10 +12,11 @@ use std::time::Duration;
 use postman_backend_matrix::fake::{self, FakeMatrix};
 use postman_backend_matrix::{BAD_PASSWORD, MatrixChannel};
 use postman_cache::Cache;
+use postman_core::backend::BoxFuture;
 use postman_core::channel::conformance::{Harness, Script, run_all};
 use postman_core::channel::{
     AccountId, Answer, ChannelError, ChannelEvent, ChannelId, ChannelPlugin, ChannelSession, ConnectCtx, ConversationKind, FlowCtx, LocalStore,
-    Prompt, Secret,
+    Prompt, Secret, Sso,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -53,6 +54,54 @@ fn store(cache: &Cache) -> Rc<dyn postman_core::channel::PluginStore> {
     Rc::new(LocalStore::new(cache.clone(), &ChannelId::new("matrix"), &AccountId::new(fake::ME)))
 }
 
+/// Возврат SSO в тесте без процесса: слушает сам тест — ядро даёт плагину ту же услугу по обмену (`FlowCtx::sso`,
+/// ADR 0013), в песочнице плагин входящих не принимает.
+struct Loopback(std::net::TcpListener);
+
+impl Loopback {
+    fn new() -> Self {
+        Self(std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap())
+    }
+}
+
+impl Sso for Loopback {
+    fn port(&self) -> Result<u16, ChannelError> {
+        self.0.local_addr().map(|a| a.port()).map_err(|e| ChannelError::Storage(e.to_string()))
+    }
+
+    fn token<'a>(&'a self) -> BoxFuture<'a, Result<String, ChannelError>> {
+        const WAIT: Duration = Duration::from_secs(5);
+        const PAGE: &str = "<!doctype html><meta charset=utf-8><title>Postman</title>";
+        let listener = self.0.try_clone().map_err(|e| ChannelError::Storage(e.to_string()));
+        Box::pin(async move {
+            let listener = tokio::net::TcpListener::from_std(listener?).map_err(|e| ChannelError::Storage(e.to_string()))?;
+            let wait = async {
+                loop {
+                    let (mut sock, _) = listener.accept().await.map_err(|e| ChannelError::Network(e.to_string()))?;
+                    let mut buf = vec![0u8; 8192];
+                    let n = match tokio::time::timeout(Duration::from_secs(10), sock.read(&mut buf)).await {
+                        Ok(Ok(n)) => n,
+                        _ => 0,
+                    };
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let token = head.lines().next().and_then(|l| l.split(' ').nth(1)).and_then(|path| {
+                        path.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix("loginToken=")).and_then(postman_core::channel::decode_segment)
+                    });
+                    let reply = match &token {
+                        Some(_) => format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}", PAGE.len()),
+                        None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                    };
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                    if let Some(t) = token.filter(|t| !t.is_empty()) {
+                        return Ok(t);
+                    }
+                }
+            };
+            tokio::time::timeout(WAIT, wait).await.map_err(|_| ChannelError::Denied(postman_core::channel::matrix::BROWSER_TIMEOUT.into()))?
+        })
+    }
+}
+
 /// Ответ браузера после входа на сервере: GET на адрес возврата с `loginToken`.
 async fn browser_returns(url: &str, token: &str) {
     let redirect = url.split("redirectUrl=").nth(1).unwrap();
@@ -73,7 +122,7 @@ fn sign_in_password_and_browser() {
     let cache = Cache::open_in_memory().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt(), async {
-        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache) }).await.unwrap();
+        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache), sso: None }).await.unwrap();
         assert_eq!(flow.step(None).await.unwrap(), Prompt::Server);
         assert!(matches!(flow.step(Some(Answer::Text("not a server".into()))).await, Err(ChannelError::Denied(_))));
         assert_eq!(flow.step(Some(Answer::Text(server.url()))).await.unwrap(), Prompt::Login);
@@ -88,8 +137,9 @@ fn sign_in_password_and_browser() {
         assert!(!format!("{secret:?}").contains("tok-"), "секрет без значения в журнале");
         drop(flow);
 
-        // Браузер: ссылка SSO с возвратом на loopback, возврат с токеном — вход.
-        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache) }).await.unwrap();
+        // Браузер: ссылка SSO с возвратом на loopback (порт — у услуги SSO), возврат с токеном — вход.
+        let sso = Rc::new(Loopback::new());
+        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache), sso: Some(sso) }).await.unwrap();
         flow.step(None).await.unwrap();
         flow.step(Some(Answer::Text(server.url()))).await.unwrap();
         let Prompt::Browser { url } = flow.step(Some(Answer::Confirm(true))).await.unwrap() else { panic!() };

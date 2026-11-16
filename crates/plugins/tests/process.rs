@@ -79,7 +79,7 @@ fn demo_channel_runs_as_a_process() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     tokio::task::LocalSet::new().block_on(&rt, async {
         // Вход — шаги в процессе плагина, секрет — ответом.
-        let mut flow = plugin.sign_in(FlowCtx { store: store() }).await.unwrap();
+        let mut flow = plugin.sign_in(FlowCtx { store: store(), sso: None }).await.unwrap();
         assert_eq!(flow.step(None).await.unwrap(), Prompt::Phone);
         assert!(matches!(flow.step(Some(Answer::Text("+70000000000".into()))).await.unwrap(), Prompt::Code { .. }));
         assert!(matches!(flow.step(Some(Answer::Text(CODE.into()))).await.unwrap(), Prompt::Password { .. }));
