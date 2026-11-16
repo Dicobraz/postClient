@@ -2,7 +2,8 @@
 # MAC-01, MAC-06: Postman.app for macOS (Apple Silicon, macOS 13+), the zip postman-<version>-macos-arm64.zip
 # (Postman.app and README.txt - the self-update replaces the bundle from it) and the disk image
 # postman-<version>-macos-arm64.dmg (Postman.app, README.txt and the "Applications" shortcut to drag it onto).
-# Contents/MacOS: postman, postman-worker, postman-viewer (the worker looks for them next to postman);
+# Contents/MacOS: postman, postman-worker, postman-viewer (the worker looks for them next to postman) and
+# postman-plugins (the plugin set, ADR 0013; signed together with the helpers);
 # Info.plist: bundle id, version from Cargo.toml, LSMinimumSystemVersion 13.0, the mailto scheme; Postman.icns made
 # from app-gpui/res/postman.ico (PNG frames).
 # Signature: ad-hoc (codesign -s -) by default - no Apple Developer ID yet (docs/decisions/2026-11-11-macos.md), the
@@ -35,7 +36,7 @@ mkdir -p "$out"
 target="$(cd "$target" && pwd)"
 out="$(cd "$out" && pwd)"
 bin="$target/$profile"
-for b in postman postman-worker postman-viewer; do
+for b in postman postman-worker postman-viewer postman-plugins; do
   if [ ! -x "$bin/$b" ]; then
     echo "no $bin/$b - run cargo build --$profile --workspace --features postman-worker/viewer first" >&2
     exit 1
@@ -69,7 +70,7 @@ dmg="$assets/$name.dmg"
 rm -rf "$stage" "$assets"
 mkdir -p "$assets"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin/postman" "$bin/postman-worker" "$bin/postman-viewer" "$app/Contents/MacOS/"
+cp "$bin/postman" "$bin/postman-worker" "$bin/postman-viewer" "$bin/postman-plugins" "$app/Contents/MacOS/"
 
 # Icon: the PNG frames of postman.ico -> iconset -> icns (iconutil takes a partial set; 512 and 1024 are absent).
 iconset="$(mktemp -d)/Postman.iconset"
@@ -133,14 +134,15 @@ if [ -n "$identity" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] &
   notarize=1
 fi
 
-# Signature of the whole bundle: helpers first, then the app (the bundle seal covers Info.plist and Resources).
-# Developer ID - hardened runtime (no entitlements needed: no JIT, the WASM viewers are interpreted) and a timestamp.
+# Signature of the whole bundle: helpers first (the worker, the viewer host and the plugin set), then the app
+# (the bundle seal covers Info.plist and Resources). Developer ID - hardened runtime (no entitlements needed:
+# no JIT, the WASM viewers are interpreted) and a timestamp.
 if [ -n "$identity" ]; then
   sign=(codesign --force --options runtime --timestamp --sign "$identity")
 else
   sign=(codesign --force --sign -)
 fi
-"${sign[@]}" "$app/Contents/MacOS/postman-worker" "$app/Contents/MacOS/postman-viewer"
+"${sign[@]}" "$app/Contents/MacOS/postman-worker" "$app/Contents/MacOS/postman-viewer" "$app/Contents/MacOS/postman-plugins"
 "${sign[@]}" "$app"
 codesign --verify --deep --strict "$app"
 
