@@ -246,6 +246,16 @@ pub(crate) fn forget_tip() {
     TIP.set(String::new());
 }
 
+/// Запомнить границы элемента по имени без обёртки `spot` — из отрисовки своего Element. Имя уже есть в этом
+/// кадре — не трогаем: рисование идёт сверху вниз, первая запись — верхний элемент (первая строка письма).
+pub(crate) fn mark_first(id: &str, b: Bounds<Pixels>) {
+    if SPOTS_ON.load(Ordering::Relaxed) {
+        SPOTS.with_borrow_mut(|s| {
+            s.entry(id.to_owned()).or_insert(b);
+        });
+    }
+}
+
 /// Границы отмеченного элемента (`spot`).
 pub(crate) fn spot_bounds(id: &str) -> Option<Bounds<Pixels>> {
     SPOTS.with_borrow(|s| s.get(id).copied())
