@@ -135,12 +135,23 @@ impl Client {
         Ok(g.list)
     }
 
-    /// Новая карточка в книге по умолчанию (иначе в первой); id карточки на сервере.
-    pub async fn create_contact(&self, card: &ContactCard) -> Result<String> {
-        let books = self.address_books().await?;
-        let book = books.iter().find(|b| b.is_default).or(books.first()).ok_or_else(|| Error::Protocol("на сервере нет адресной книги".into()))?;
+    /// Новая карточка в книге `book` (нет — по умолчанию, иначе в первой); id карточки на сервере.
+    pub async fn create_contact(&self, book: Option<&str>, card: &ContactCard) -> Result<String> {
+        let book = match book.filter(|b| !b.is_empty()) {
+            Some(b) => b.to_owned(),
+            None => {
+                let books = self.address_books().await?;
+                books
+                    .iter()
+                    .find(|b| b.is_default)
+                    .or(books.first())
+                    .ok_or_else(|| Error::Protocol("на сервере нет адресной книги".into()))?
+                    .id
+                    .clone()
+            }
+        };
         let acc = self.account_for(CONTACTS)?;
-        let args = json!({ "accountId": acc, "create": { "new": card.to_jmap(&book.id) } });
+        let args = json!({ "accountId": acc, "create": { "new": card.to_jmap(&book) } });
         let mut r = self.call(USING, &[inv("ContactCard/set", args, "s")]).await?;
         let v: Value = take(&mut r, "s")?;
         set_error(&v, "notCreated", "new", "ContactCard/set")?;

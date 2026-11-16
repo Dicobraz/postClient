@@ -1205,10 +1205,11 @@ async fn handle(
         }
         Command::Contacts => load_people(client, notify).await,
         Command::FindPeople { text, offset } => find_people(client, text, offset, notify).await,
-        Command::SaveContact { card, old, ticket } => {
+        Command::SaveContact { card, old, book, ticket } => {
+            // Книга (T2-48) — только у новой карточки: правка остаётся в своей книге.
             let saved = match &old {
                 Some(old) => client.update_contact(&old.to_jmap(), &card.to_jmap()).await.map(|()| old.id.clone()),
-                None => client.create_contact(&card.to_jmap()).await,
+                None => client.create_contact(book.as_deref(), &card.to_jmap()).await,
             };
             notify(match saved {
                 Ok(id) => Event::ContactSaved { ticket, id },
@@ -1819,12 +1820,27 @@ async fn load_more(acc: &MailAccount, cache: &mut Cache, index: &Index, mailbox:
 /// Личные контакты и справочник; чего сервер не объявил — того нет (без ошибки).
 async fn load_people(client: &Client, notify: &impl Fn(Event)) {
     load_cards(client, notify).await;
+    load_books(client, notify).await;
     if !client.has(postman_jmap::PRINCIPALS) {
         return notify(Event::DirectoryLoaded(Vec::new()));
     }
     match client.directory(DIRECTORY_LIMIT).await {
         Ok(people) => notify(Event::DirectoryLoaded(postman_core::contacts::directory(people.into_iter().map(Principal::from_jmap).collect()))),
         Err(e) => notify(Event::ContactFailed { ticket: 0, error: e.to_string() }),
+    }
+}
+
+/// Адресные книги сервера (T2-48, `AddressBook/get`): выбор книги в форме нового контакта. Контактов у сервера нет —
+/// список пустой; ошибка чтения — не помеха разделу, пишет в книгу по умолчанию.
+async fn load_books(client: &Client, notify: &impl Fn(Event)) {
+    if !client.has(postman_jmap::CONTACTS) {
+        return notify(Event::ContactBooks(Vec::new()));
+    }
+    match client.address_books().await {
+        Ok(books) => notify(Event::ContactBooks(
+            books.into_iter().map(|b| postman_core::sync::ContactBook { id: b.id, name: b.name, default: b.is_default }).collect(),
+        )),
+        Err(e) => tracing::debug!("jmap address books: {e}"),
     }
 }
 

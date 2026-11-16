@@ -494,7 +494,7 @@ async fn contacts_are_edited_and_directory_is_listed() {
         members: Vec::new(),
         services: Vec::new(),
     };
-    let id = c.client.create_contact(&new).await.unwrap();
+    let id = c.client.create_contact(None, &new).await.unwrap();
     let find = |cards: Vec<ContactCard>| cards.into_iter().find(|x| x.id == id);
     let got = find(c.client.contact_cards().await.unwrap()).expect("карточка в списке");
     // Имя — как задано (`name.full` без компонентов сервер не переписывает).
@@ -567,7 +567,7 @@ async fn contacts_through_sync() {
         (SyncEvent::ContactsLoaded(cards), None) => cards.iter().all(|c| c.id != id),
         _ => false,
     };
-    assert!(commands.send(Command::SaveContact { card: Box::new(card.clone()), old: None, ticket: 1 }).is_ok());
+    assert!(commands.send(Command::SaveContact { card: Box::new(card.clone()), old: None, book: None, ticket: 1 }).is_ok());
     let SyncEvent::ContactSaved { ticket: 1, id } = wait("ContactSaved", &|e| matches!(e, SyncEvent::ContactSaved { .. })) else {
         panic!("не тот тикет")
     };
@@ -575,7 +575,7 @@ async fn contacts_through_sync() {
 
     let old = ContactCard { id: id.clone(), ..card };
     let edited = ContactCard { phones: vec!["+7 495 000-00-02".into()], ..old.clone() };
-    let cmd = Command::SaveContact { card: Box::new(edited), old: Some(Box::new(old)), ticket: 2 };
+    let cmd = Command::SaveContact { card: Box::new(edited), old: Some(Box::new(old)), book: None, ticket: 2 };
     assert!(commands.send(cmd).is_ok());
     wait("ContactSaved 2", &|e| matches!(e, SyncEvent::ContactSaved { ticket: 2, .. }));
     wait("правка в списке", &|e| listed(e, &id, Some(1)));

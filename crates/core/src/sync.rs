@@ -66,6 +66,18 @@ pub struct Publication {
     pub items: bool,
 }
 
+/// Адресная книга сервера (T2-48): JMAP `AddressBook/get`, CardDAV — коллекции адресных книг, Exchange — папки
+/// контактов. Куда сохранить новый контакт; переноса между книгами нет.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactBook {
+    /// У пути: id книги JMAP, путь коллекции CardDAV, id папки Exchange.
+    pub id: String,
+    pub name: String,
+    /// Книга по умолчанию: в неё пишет Postman без выбора (у CardDAV — первая доступная для записи, у Exchange —
+    /// сама папка «Контакты»).
+    pub default: bool,
+}
+
 pub enum Command {
     Body(String),
     /// Беседа (ключ цепочки, `EmailRow::thread_id`): письма из всех папок и их тела — в кэш → `ThreadReady`.
@@ -285,9 +297,12 @@ pub enum Command {
         address: String,
     },
     /// Создать (`old: None`) или изменить карточку → `ContactSaved` или `ContactFailed`, затем `ContactsLoaded`.
+    /// `book` — адресная книга новой карточки из [`Event::ContactBooks`] (T2-48; `None` — книга по умолчанию);
+    /// у правки не используется, переноса между книгами нет.
     SaveContact {
         card: Box<ContactCard>,
         old: Option<Box<ContactCard>>,
+        book: Option<String>,
         ticket: u64,
     },
     /// Удалить карточку → `ContactDeleted` или `ContactFailed`, затем `ContactsLoaded`.
@@ -883,6 +898,9 @@ pub enum Event {
     Settings(settings::Reply),
     /// Личные контакты целиком (раздел «Контакты»).
     ContactsLoaded(Vec<ContactCard>),
+    /// Адресные книги сервера (T2-48, ответ на `Command::Contacts`): выбор книги в форме нового контакта
+    /// (`Command::SaveContact`). Пустая — книг нет или путь их не даёт: пишет в книгу по умолчанию.
+    ContactBooks(Vec<ContactBook>),
     /// Справочник: сотрудники, переговорные и ресурсы с адресами (раздел «Контакты», подсказки адресов).
     DirectoryLoaded(Vec<Principal>),
     /// Страница справочника (`Command::DirectoryPage`, T1-25б): `people` с `offset`; `total` — всего людей, если путь

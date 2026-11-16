@@ -447,7 +447,7 @@ fn carddav_round_trip() {
         phones: vec!["+7 900 000-00-00".into()],
         ..Default::default()
     };
-    live.send(Command::SaveContact { card: Box::new(card), old: None, ticket: 5 });
+    live.send(Command::SaveContact { card: Box::new(card), old: None, book: None, ticket: 5 });
     let Event::ContactSaved { id, .. } = live.wait("ContactSaved", |e| match e {
         Event::ContactFailed { error, .. } => panic!("контакт: {error}"),
         Event::ContactSaved { ticket: 5, .. } => true,
@@ -460,7 +460,7 @@ fn carddav_round_trip() {
     assert_eq!((saved.name.as_str(), saved.phones.len()), (name.as_str(), 1));
 
     let edited = ContactCard { phones: Vec::new(), title: "Директор".into(), organization: "Ромашка".into(), ..saved.clone() };
-    live.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(saved)), ticket: 6 });
+    live.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(saved)), book: None, ticket: 6 });
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 6, .. }));
     let Event::ContactsLoaded(cards) = live.wait("ContactsLoaded", |e| matches!(e, Event::ContactsLoaded(_))) else { unreachable!() };
     let after = cards.into_iter().find(|c| c.id == id).expect("карточка после правки");
