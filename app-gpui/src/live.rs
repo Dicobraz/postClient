@@ -186,6 +186,7 @@ impl Profile {
                 | Event::Contacts(_)
                 | Event::Settings(_)
                 | Event::ContactsLoaded(_)
+                | Event::ContactBooks(_)
                 | Event::DirectoryLoaded(_)
                 | Event::PeopleFound { .. }
                 | Event::ContactSaved { .. }

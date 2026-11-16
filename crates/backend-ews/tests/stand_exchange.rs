@@ -804,7 +804,7 @@ fn exchange_contacts_through_sync() {
         title: "Тестовый".into(),
         ..Default::default()
     };
-    live.send(Command::SaveContact { card: Box::new(card.clone()), old: None, ticket: 1 });
+    live.send(Command::SaveContact { card: Box::new(card.clone()), old: None, book: None, ticket: 1 });
     let Event::ContactSaved { id, .. } =
         live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 1, .. } | Event::ContactFailed { .. }))
     else {
@@ -814,7 +814,7 @@ fn exchange_contacts_through_sync() {
     assert_eq!((mine.name.as_str(), mine.emails.as_slice(), mine.title.as_str()), (card.name.as_str(), card.emails.as_slice(), "Тестовый"));
 
     let edited = ContactCard { title: "Изменённый".into(), phones: Vec::new(), ..mine.clone() };
-    live.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(mine)), ticket: 2 });
+    live.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(mine)), book: None, ticket: 2 });
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 2, .. }));
     let after = loaded(&live).into_iter().find(|c| c.id == id).expect("после правки");
     assert_eq!((after.title.as_str(), after.phones.len()), ("Изменённый", 0));

@@ -1154,10 +1154,15 @@ fn events_drive_the_sync() {
 
 // --- Личные контакты и справочник (T1-25в). ---
 
-/// Папка «Контакты» корпуса: страница `FindItem` — контакт и список рассылки, карточки — `get_item_contacts.xml`.
+/// Папка «Контакты» корпуса: страница `FindItem` — контакт и список рассылки, карточки — `get_item_contacts.xml`;
+/// сама папка и подпапки (`GetFolder`/`FindFolder`, T2-48) — `get_folder_contacts.xml` и `find_folder_contacts.xml`.
 fn contacts(body: &str) -> Option<String> {
     let op = |tag: &str| body.contains(&format!("<m:{tag}"));
-    if op("FindItem") && body.contains(r#"Id="contacts""#) {
+    if op("GetFolder") && body.contains(r#"Id="contacts""#) {
+        Some(fixture("get_folder_contacts.xml"))
+    } else if op("FindFolder") && body.contains(r#"Id="contacts""#) {
+        Some(fixture("find_folder_contacts.xml"))
+    } else if op("FindItem") && body.contains(r#"Id="contacts""#) {
         Some(
             fixture("find_item_mail_page.xml")
                 .replace("AAMkADmsg2", "AAMkADcontact1")
@@ -1195,20 +1200,36 @@ fn exchange_contacts_and_directory() {
     let cards: Vec<_> = all.into_iter().filter(|c| !c.group).collect();
     assert_eq!((cards[0].id.as_str(), cards[0].name.as_str()), ("AAMkADcontact1", "Петрова Анна"));
     assert_eq!(cards[0].emails, ["anna@example.test", "a.petrova@example.test"]);
+    // Адресные книги (T2-48): папка «Контакты» — по умолчанию, подпапка «Коллеги» — выбор в форме; прочие папки
+    // (почта, галерея) — не книги.
+    let Event::ContactBooks(books) = live.wait("ContactBooks", |e| matches!(e, Event::ContactBooks(_))) else { unreachable!() };
+    let books: Vec<_> = books.iter().map(|b| (b.id.as_str(), b.name.as_str(), b.default)).collect();
+    assert_eq!(books, [("AAMkADcontacts", "Contacts", true), ("AAMkADcolleagues", "Коллеги", false)]);
     let Event::DirectoryLoaded(dir) = live.wait("DirectoryLoaded", |e| matches!(e, Event::DirectoryLoaded(_))) else { unreachable!() };
     assert!(dir.is_empty(), "GAL целиком не читаем");
 
     let n = log.lock().unwrap().len();
     let fresh = postman_core::model::ContactCard { name: "Борис".into(), emails: vec!["boris@example.test".into()], ..Default::default() };
-    live.commands.send(Command::SaveContact { card: Box::new(fresh), old: None, ticket: 1 }).unwrap();
+    live.commands.send(Command::SaveContact { card: Box::new(fresh), old: None, book: None, ticket: 1 }).unwrap();
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 1, .. }));
     contacts_loaded(&live);
     let create = requests(&log, n, "CreateItem").pop().expect("CreateItem");
     assert!(create.contains(r#"<t:DistinguishedFolderId Id="contacts"/>"#) && create.contains("<t:DisplayName>Борис</t:DisplayName>"), "{create}");
 
+    // Новая карточка — в выбранной книге (T2-48).
+    let n = log.lock().unwrap().len();
+    let fresh = postman_core::model::ContactCard { name: "Вера".into(), ..Default::default() };
+    live.commands
+        .send(Command::SaveContact { card: Box::new(fresh), old: None, book: Some("AAMkADcolleagues".into()), ticket: 6 })
+        .unwrap();
+    live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 6, .. }));
+    contacts_loaded(&live);
+    let create = requests(&log, n, "CreateItem").pop().expect("CreateItem");
+    assert!(create.contains(r#"<t:FolderId Id="AAMkADcolleagues"/>"#) && create.contains("<t:DisplayName>Вера</t:DisplayName>"), "{create}");
+
     let n = log.lock().unwrap().len();
     let edited = postman_core::model::ContactCard { title: "Руководитель".into(), ..cards[0].clone() };
-    live.commands.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(cards[0].clone())), ticket: 2 }).unwrap();
+    live.commands.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(cards[0].clone())), book: None, ticket: 2 }).unwrap();
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 2, .. }));
     contacts_loaded(&live);
     let update = requests(&log, n, "UpdateItem").pop().expect("UpdateItem");
@@ -1223,7 +1244,7 @@ fn exchange_contacts_and_directory() {
         members: vec!["boris@example.test".into()],
         ..Default::default()
     };
-    live.commands.send(Command::SaveContact { card: Box::new(fresh), old: None, ticket: 4 }).unwrap();
+    live.commands.send(Command::SaveContact { card: Box::new(fresh), old: None, book: None, ticket: 4 }).unwrap();
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 4, .. }));
     contacts_loaded(&live);
     let create = requests(&log, n, "CreateItem").pop().expect("CreateItem");
@@ -1232,7 +1253,7 @@ fn exchange_contacts_and_directory() {
     // Правка: Антон убран, Борис добавлен; Анна — как была.
     let n = log.lock().unwrap().len();
     let edited = postman_core::model::ContactCard { members: vec!["anna@example.test".into(), "boris@example.test".into()], ..group.clone() };
-    live.commands.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(group)), ticket: 5 }).unwrap();
+    live.commands.send(Command::SaveContact { card: Box::new(edited), old: Some(Box::new(group)), book: None, ticket: 5 }).unwrap();
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 5, .. }));
     contacts_loaded(&live);
     let update = requests(&log, n, "UpdateItem").pop().expect("UpdateItem");

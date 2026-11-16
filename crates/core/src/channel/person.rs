@@ -172,7 +172,7 @@ pub fn link(cache: &Cache, links: &Links, chan: &ChanAccount, p: &Participant, c
     }
     let mut new = card.clone();
     new.services.push(url);
-    Ok(Some(Command::SaveContact { card: Box::new(new), old: Some(Box::new(card.clone())), ticket }))
+    Ok(Some(Command::SaveContact { card: Box::new(new), old: Some(Box::new(card.clone())), book: None, ticket }))
 }
 
 /// «Это другой человек»: ручная связь снимается; у личного контакта — команда убрать ссылку канала из карточки на
@@ -185,7 +185,7 @@ pub fn unlink(cache: &Cache, links: &Links, chan: &ChanAccount, p: &Participant,
     }
     let mut new = card.clone();
     new.services.retain(|s| url_key(s) != url_key(&url));
-    Ok(Some(Command::SaveContact { card: Box::new(new), old: Some(Box::new(card.clone())), ticket }))
+    Ok(Some(Command::SaveContact { card: Box::new(new), old: Some(Box::new(card.clone())), book: None, ticket }))
 }
 
 /// Ключи поиска (`index::author_key`) всех участников, связанных с тем же контактом, что и участники `keys`.

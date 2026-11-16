@@ -36,7 +36,7 @@ use postman_calendar::{Busy, BusyKind, Span};
 use postman_compose::{Address, Draft, parse_addresses};
 use postman_core::contacts::AddressBook;
 use postman_core::model::{ContactCard, Principal};
-use postman_core::sync::{Command, Event as SyncEvent};
+use postman_core::sync::{Command, ContactBook, Event as SyncEvent};
 
 use crate::buttons::plain as button;
 use crate::calendar::{add_days, avatar, chip_outline, day_start, g, hm};
@@ -631,6 +631,13 @@ impl FormText {
     }
 }
 
+/// Книга формы нового контакта (T2-48): выбранная (`None` — по умолчанию); книг у сервера нет — `None`, пишет в
+/// книгу по умолчанию. Демо-книга и запасной случай — с пустым `id`, выбора не дают.
+pub(crate) fn form_book<'a>(chosen: Option<&str>, books: &'a [ContactBook]) -> Option<&'a ContactBook> {
+    let real: Vec<&ContactBook> = books.iter().filter(|b| !b.id.is_empty()).collect();
+    real.iter().copied().find(|b| Some(b.id.as_str()) == chosen).or_else(|| real.iter().copied().find(|b| b.default)).or_else(|| real.first().copied())
+}
+
 /// Поля формы на экране.
 struct Form {
     /// Прежняя карточка (правка); `None` — новая.
@@ -642,6 +649,8 @@ struct Form {
     mobile: Entity<InputState>,
     organization: Entity<InputState>,
     title: Entity<InputState>,
+    /// Адресная книга новой карточки (T2-48): `None` — по умолчанию.
+    book: Option<String>,
     error: Option<String>,
 }
 
@@ -723,6 +732,8 @@ pub(crate) enum ContactsAction {
     Save {
         card: Box<ContactCard>,
         old: Option<Box<ContactCard>>,
+        /// Адресная книга новой карточки (T2-48); `None` — книга по умолчанию.
+        book: Option<String>,
         ticket: u64,
     },
     Delete {
@@ -799,6 +810,11 @@ pub(crate) struct ContactsView {
     groups: Vec<Entry>,
     /// Открыто меню «В группу» командной строки.
     pub(crate) group_menu: bool,
+    /// Адресные книги сервера (T2-48, `Event::ContactBooks`): выбор в форме нового контакта. Демо — одна
+    /// «Мои контакты» с пустым `id` (выбора нет).
+    books: Vec<ContactBook>,
+    /// Открыт выбор адресной книги в форме контакта.
+    book_menu: bool,
     /// Сохранение группы без формы («В группу», «Убрать из группы»): тикет и тост об успехе.
     quiet: Option<(u64, String)>,
     /// «Часто пишу»: адресаты из адресной книги по частоте и строки списка из них (S5-25) в выбранном порядке (T1-24).
@@ -875,6 +891,8 @@ impl ContactsView {
             lists: demo_directory().into_iter().filter(|e| e.kind == Kind::List).collect(),
             groups: demo_groups(),
             group_menu: false,
+            books: vec![ContactBook { id: String::new(), name: tr!("contacts-mine"), default: true }],
+            book_menu: false,
             quiet: None,
             frequent_src: Vec::new(),
             frequent: Vec::new(),
@@ -921,6 +939,9 @@ impl ContactsView {
         self.lists.clear();
         self.groups.clear();
         self.quiet = None;
+        // Книги придут с сервера (`Event::ContactBooks`, T2-48); пока их нет — пишет в книгу по умолчанию.
+        self.books.clear();
+        self.book_menu = false;
         self.presence = Presences::default();
         self.mail = Mail::default();
         self.directory_at = None;
@@ -1362,7 +1383,7 @@ impl ContactsView {
             self.close_menu(window, cx);
             return true;
         }
-        if std::mem::take(&mut self.group_menu) {
+        if std::mem::take(&mut self.group_menu) || std::mem::take(&mut self.book_menu) {
             cx.notify();
             return true;
         }
@@ -1643,7 +1664,8 @@ impl ContactsView {
             self.set_source(Source::Mine, cx);
         }
         self.pending = None;
-        self.mode = Mode::Edit(Box::new(Form { old, last, first, emails, phones, mobile, organization, title, error: None }));
+        self.book_menu = false;
+        self.mode = Mode::Edit(Box::new(Form { old, last, first, emails, phones, mobile, organization, title, book: None, error: None }));
         cx.notify();
     }
 
@@ -1665,6 +1687,8 @@ impl ContactsView {
         if let Some(old) = &form.old {
             card.services.clone_from(&old.services);
         }
+        // Книга — только у новой карточки (T2-48): правка остаётся в своей книге, переноса нет.
+        let book = (form.old.is_none()).then(|| form_book(form.book.as_deref(), &self.books).map(|b| b.id.clone())).flatten();
         form.error = None;
         let old = form.old.clone();
         if !self.live {
@@ -1672,7 +1696,17 @@ impl ContactsView {
         }
         let ticket = self.ticket();
         self.pending = Some(ticket);
-        cx.emit(ContactsAction::Save { card: Box::new(card), old: old.map(Box::new), ticket });
+        self.book_menu = false;
+        cx.emit(ContactsAction::Save { card: Box::new(card), old: old.map(Box::new), book, ticket });
+        cx.notify();
+    }
+
+    /// Книга формы нового контакта (T2-48): выбор из книг сервера.
+    fn pick_book(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.book_menu = false;
+        if let Mode::Edit(f) = &mut self.mode {
+            f.book = Some(id.to_owned());
+        }
         cx.notify();
     }
 
@@ -1740,6 +1774,10 @@ impl ContactsView {
                 self.lists.clear();
                 self.add_people(people);
                 self.directory_at = Some(jiff::Timestamp::now().as_second());
+            }
+            // Адресные книги сервера (T2-48): выбор книги в форме нового контакта.
+            SyncEvent::ContactBooks(books) if self.live => {
+                self.books = books.clone();
             }
             // Страница справочника (T1-25г): к показанному, без повторов.
             SyncEvent::DirectoryPage { offset, people, total, search_only, .. } if self.live => {
@@ -2733,23 +2771,7 @@ impl ContactsView {
             .child(div().flex().gap(px(16.)).child(field("contacts-organization", &f.organization)).child(field("contacts-title", &f.title)))
             .child(div().flex().child(field("contacts-emails", &f.emails)))
             .child(div().flex().gap(px(16.)).child(field("contacts-work-phone", &f.phones)).child(field("contacts-mobile", &f.mobile)))
-            .child(
-                // Адресная книга: Postman пишет в «Мои контакты» (книга сервера по умолчанию) — только показ.
-                div().flex().flex_col().gap(px(4.)).child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("contacts-book"))).child(
-                    div()
-                        .h(px(32.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .rounded(l.px(Metric::RadiusControl))
-                        .border_1()
-                        .border_color(l.stroke())
-                        .text_color(l.text2())
-                        .child(icon(crate::chrome::glyph::CONTACTS, 14.))
-                        .child(tr!("contacts-mine")),
-                ),
-            )
+            .child(self.book_field(f, &l, cx))
             .child(div().text_size(px(12.)).line_height(px(17.)).text_color(l.text2()).child(tr!("contacts-form-hint")))
             .when_some(f.error.clone(), |d, e| d.child(div().text_color(l.error()).child(e)))
             .child(
@@ -2764,6 +2786,80 @@ impl ContactsView {
                         this.pending = None;
                         cx.notify();
                     }))),
+            )
+            .into_any_element()
+    }
+
+    /// Поле «Адресная книга» (T2-48): у новой карточки — выбор из книг сервера (книг две и больше), правка и
+    /// единственная книга — только показ (переноса между книгами нет).
+    fn book_field(&self, f: &Form, l: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let book = form_book(f.book.as_deref(), &self.books);
+        let choice = self.books.iter().filter(|b| !b.id.is_empty()).count() > 1;
+        let value = book.map(|b| b.name.clone()).unwrap_or_else(|| tr!("contacts-mine"));
+        let label = div().flex().flex_col().gap(px(4.)).child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("contacts-book")));
+        let field = div()
+            .h(px(32.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(l.px(Metric::RadiusControl))
+            .border_1()
+            .border_color(l.stroke())
+            .text_color(l.text2())
+            .child(icon(crate::chrome::glyph::CONTACTS, 14.))
+            .child(div().flex_1().min_w_0().truncate().child(value));
+        // Книги нет или одна, карточка правится — выбора не делаем.
+        if f.old.is_some() || !choice {
+            return label.child(field).into_any_element();
+        }
+        let menu = self.book_menu.then(|| {
+            let chosen = book.map(|b| b.id.as_str());
+            let items = self
+                .books
+                .iter()
+                .filter(|b| !b.id.is_empty())
+                .enumerate()
+                .map(|(i, b)| {
+                    let id = b.id.clone();
+                    crate::composer::menu_item(ElementId::NamedInteger("form-book".into(), i as u64), l, Some(b.id.as_str()) == chosen)
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(icon(if chosen == Some(b.id.as_str()) { g::CHECK } else { crate::chrome::glyph::CONTACTS }, 12.).text_color(l.text2()))
+                        .child(div().flex_1().min_w_0().truncate().child(b.name.clone()))
+                        .on_click(cx.listener(move |this, _, _, cx| this.pick_book(&id, cx)))
+                });
+            let menu = crate::composer::menu_box("form-book-menu", l)
+                .top(px(34.))
+                .left_0()
+                .min_w(px(260.))
+                .text_size(px(13.))
+                .text_color(l.text())
+                .children(items)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.book_menu = false;
+                    cx.notify();
+                }));
+            deferred(menu).with_priority(1)
+        });
+        label
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        field
+                            .id("contact-form-book")
+                            .cursor_pointer()
+                            .when(self.book_menu, |d| d.border_color(l.text3()))
+                            .hover(|d| d.border_color(l.text3()))
+                            .child(icon(crate::chrome::glyph::CHEVRON_DOWN, 8.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.book_menu = !this.book_menu;
+                                cx.notify();
+                            })),
+                    )
+                    .children(menu),
             )
             .into_any_element()
     }
@@ -3077,7 +3173,9 @@ impl crate::Mailer {
         let command = match action {
             ContactsAction::Load => Command::Contacts,
             ContactsAction::DirectoryPage(offset) => Command::DirectoryPage { account: None, offset: *offset, max: DIR_PAGE },
-            ContactsAction::Save { card, old, ticket } => Command::SaveContact { card: card.clone(), old: old.clone(), ticket: *ticket },
+            ContactsAction::Save { card, old, book, ticket } => {
+                Command::SaveContact { card: card.clone(), old: old.clone(), book: book.clone(), ticket: *ticket }
+            }
             ContactsAction::Delete { id, ticket } => Command::DeleteContact { id: id.clone(), ticket: *ticket },
             ContactsAction::PersonDetails(email) => Command::PersonDetails { email: email.clone() },
             ContactsAction::Availability { ticket, emails, from, to } => {
@@ -3389,7 +3487,7 @@ impl ContactsView {
         }
         let ticket = self.ticket();
         self.pending = Some(ticket);
-        cx.emit(ContactsAction::Save { card: Box::new(card), old: old.map(Box::new), ticket });
+        cx.emit(ContactsAction::Save { card: Box::new(card), old: old.map(Box::new), book: None, ticket });
         cx.notify();
     }
 
@@ -3416,7 +3514,7 @@ impl ContactsView {
         }
         let ticket = self.ticket();
         self.quiet = Some((ticket, note));
-        cx.emit(ContactsAction::Save { card: Box::new(card), old: Some(Box::new(old)), ticket });
+        cx.emit(ContactsAction::Save { card: Box::new(card), old: Some(Box::new(old)), book: None, ticket });
         cx.notify();
     }
 
@@ -4217,9 +4315,10 @@ mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
     use super::{
         ContactCard, Entry, FormError, FormText, Frequent, GroupText, Item, Kind, Latest, MenuItem, Order, Presence, demo_directory, demo_groups,
-        demo_mine, feminine, filter, frequent, items, menu_items, next_window, presence,
+        demo_mine, feminine, filter, form_book, frequent, items, menu_items, next_window, presence,
     };
     use postman_calendar::{Busy, BusyKind, Span};
+    use postman_core::sync::ContactBook;
 
     fn freq(name: &str, email: &str, last: i64) -> Frequent {
         Frequent { name: name.into(), email: email.into(), last }
@@ -4227,6 +4326,21 @@ mod tests {
 
     fn names(entries: &[Entry], q: &str) -> Vec<String> {
         filter(entries, q).into_iter().map(|i| entries[i].card.name.clone()).collect()
+    }
+
+    /// Книга формы нового контакта (T2-48): выбранная, иначе по умолчанию (запасная — первая); книг нет или только
+    /// демо-книга с пустым id — `None`: пишет в книгу по умолчанию.
+    #[test]
+    fn book_of_form_is_chosen_then_default() {
+        let book = |id: &str, name: &str, default: bool| ContactBook { id: id.into(), name: name.into(), default };
+        let books = vec![book("b1", "Мои контакты", true), book("b2", "Отдел", false)];
+        assert_eq!(form_book(None, &books).map(|b| b.id.as_str()), Some("b1"), "без выбора — по умолчанию");
+        assert_eq!(form_book(Some("b2"), &books).map(|b| b.id.as_str()), Some("b2"), "выбранная");
+        assert_eq!(form_book(Some("gone"), &books).map(|b| b.id.as_str()), Some("b1"), "выбранной у сервера нет — по умолчанию");
+        assert_eq!(form_book(None, &[book("", "Мои контакты", true)]), None, "демо-книга — не выбор");
+        assert_eq!(form_book(None, &[]), None, "книг нет");
+        let no_default = [book("b1", "Первая", false), book("b2", "Вторая", false)];
+        assert_eq!(form_book(None, &no_default).map(|b| b.id.as_str()), Some("b1"), "без пометки — первая");
     }
 
     #[test]

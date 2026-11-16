@@ -31,7 +31,7 @@ use postman_core::backend::{AreaCtx, Areas, BoxFuture};
 use postman_core::model::{ContactCard, Feature, Features, Principal};
 use postman_core::schedule::{Meeting, SEARCH_LIMIT};
 use postman_core::sync::{Command, Event as SyncEvent, ListError, owned_by};
-use postman_ews::{CalendarItem, Changes, Client, DeleteMode, Error, FolderRef, ItemId, ItemKind, NewItem, Notify, Reply, SyncState, WellKnown};
+use postman_ews::{CalendarItem, Changes, Client, DeleteMode, Error, FolderId, FolderRef, ItemId, ItemKind, NewItem, Notify, Reply, SyncState, WellKnown};
 
 /// Встреч в окне календаря — не больше (месяц с запасом).
 const VIEW_LIMIT: u32 = 1000;
@@ -316,14 +316,18 @@ impl EwsAreas {
         Ok(changed && !first)
     }
 
-    /// Записать карточку: новая — `CreateItem` в «Контакты», правка — поверх прочитанной с сервера → id. Группа
-    /// (T2-47) — личный список рассылки ([`EwsAreas::save_list`]).
-    async fn save_contact(&mut self, card: &ContactCard, old: Option<&ContactCard>) -> Result<String, Error> {
+    /// Записать карточку: новая — `CreateItem` в «Контакты» или выбранную папку контактов (`book`, T2-48), правка —
+    /// поверх прочитанной с сервера → id. Группа (T2-47) — личный список рассылки ([`EwsAreas::save_list`]).
+    async fn save_contact(&mut self, card: &ContactCard, old: Option<&ContactCard>, book: Option<&str>) -> Result<String, Error> {
         if card.group {
             return self.save_list(card, old).await;
         }
         let Some(old) = old.filter(|o| !o.id.is_empty()) else {
-            let id = self.client.create_contact(&FolderRef::WellKnown(WellKnown::Contacts), &contact_data(card, None)).await?;
+            let folder = match book.filter(|b| !b.is_empty()) {
+                Some(id) => FolderRef::Id(FolderId { id: id.to_owned(), change_key: None }),
+                None => FolderRef::WellKnown(WellKnown::Contacts),
+            };
+            let id = self.client.create_contact(&folder, &contact_data(card, None)).await?;
             return Ok(id.id);
         };
         let id = ItemId::new(old.id.clone());
@@ -359,6 +363,17 @@ impl EwsAreas {
         match self.load_contacts().await {
             Ok(cards) => notify(SyncEvent::ContactsLoaded(cards)),
             Err(e) => notify(SyncEvent::ContactFailed { ticket, error: e.to_string() }),
+        }
+    }
+
+    /// Папки контактов (T2-48) → `ContactBooks`: выбор книги в форме нового контакта; «по умолчанию» — сама папка
+    /// «Контакты». Ошибка чтения — не помеха разделу: пишет в книгу по умолчанию.
+    async fn books_loaded(&mut self, notify: &dyn Fn(SyncEvent)) {
+        match self.client.contact_folders().await {
+            Ok(folders) => notify(SyncEvent::ContactBooks(
+                folders.into_iter().map(|f| postman_core::sync::ContactBook { id: f.id.id, name: f.name, default: f.parent.is_none() }).collect(),
+            )),
+            Err(e) => tracing::debug!("ews contact folders: {e}"),
         }
     }
 
@@ -663,13 +678,14 @@ impl EwsAreas {
             }),
             Command::Contacts => {
                 self.contacts_loaded(0, notify).await;
+                self.books_loaded(notify).await;
                 // Справочник — поиском с подсказкой (`FindPeople`): GAL целиком не читаем.
                 notify(SyncEvent::DirectoryLoaded(Vec::new()));
             }
             Command::DirectoryPage { account, offset, .. } => {
                 notify(SyncEvent::DirectoryPage { account, offset, people: Vec::new(), total: None, search_only: true });
             }
-            Command::SaveContact { card, old, ticket } => match self.save_contact(&card, old.as_deref()).await {
+            Command::SaveContact { card, old, book, ticket } => match self.save_contact(&card, old.as_deref(), book.as_deref()).await {
                 Ok(id) => {
                     notify(SyncEvent::ContactSaved { ticket, id });
                     self.contacts_loaded(ticket, notify).await;

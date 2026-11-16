@@ -584,8 +584,9 @@ impl Dav {
         Ok(())
     }
 
-    /// Создать (`old: None`) или изменить карточку; ответ — её id (путь).
-    pub async fn save_contact(&mut self, card: &ContactCard, old: Option<&ContactCard>) -> Result<String, Error> {
+    /// Создать (`old: None`) или изменить карточку; ответ — её id (путь). Новая — в книгу `book` (T2-48; нет —
+    /// первая доступная для записи).
+    pub async fn save_contact(&mut self, card: &ContactCard, old: Option<&ContactCard>, book: Option<&str>) -> Result<String, Error> {
         let fields = |uid: &str| -> String {
             let c = postman_compose::vcard::Card {
                 uid,
@@ -613,7 +614,10 @@ impl Dav {
                 Ok(o.id.clone())
             }
             None => {
-                let book = self.books.iter().find(|b| b.writable).ok_or_else(|| Error::Protocol("no address book".into()))?.href.clone();
+                let book = match book.filter(|b| !b.is_empty()) {
+                    Some(href) => href.to_owned(),
+                    None => self.books.iter().find(|b| b.writable).ok_or_else(|| Error::Protocol("no address book".into()))?.href.clone(),
+                };
                 let uid = new_uid();
                 let href = child_href(&book, &uid, Content::VCard);
                 self.client.put(&href, Content::VCard, &fields(&uid), Precondition::Create).await?;
@@ -932,11 +936,20 @@ impl Dav {
             }
             Command::Contacts => {
                 self.load_contacts(notify).await;
+                // Адресные книги (T2-48): коллекции CardDAV, куда можно писать; «по умолчанию» — первая из них.
+                notify(SyncEvent::ContactBooks(
+                    self.books
+                        .iter()
+                        .filter(|b| b.writable)
+                        .enumerate()
+                        .map(|(i, b)| postman_core::sync::ContactBook { id: b.href.clone(), name: b.name.clone(), default: i == 0 })
+                        .collect(),
+                ));
                 // Справочника у CardDAV нет: раздел «Справочник» скрыт (`Features`), список — пустой.
                 notify(SyncEvent::DirectoryLoaded(Vec::new()));
             }
-            Command::SaveContact { card, old, ticket } => {
-                notify(match self.save_contact(&card, old.as_deref()).await {
+            Command::SaveContact { card, old, book, ticket } => {
+                notify(match self.save_contact(&card, old.as_deref(), book.as_deref()).await {
                     Ok(id) => SyncEvent::ContactSaved { ticket, id },
                     Err(e) => SyncEvent::ContactFailed { ticket, error: e.to_string() },
                 });
