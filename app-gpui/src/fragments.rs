@@ -960,15 +960,14 @@ pub(crate) mod scenes {
     }
 
     fn letter_ready(_: &Scene, m: &Mailer, cx: &App) -> bool {
-        // Лента беседы грузится из базы фоновой задачей (`thread::sync_thread` → `reload_thread`) и, придя,
-        // перекладывает панель чтения (сводка беседы и вложения — над телом письма): координаты протяжки,
-        // взятые по interim-кадру, попадают мимо текста — так флакал fragment-select на macOS-раннерах
-        // (2026-11-16, кадр `-fail`). Ждём ленту именно открытого письма; композер прошлой сцены закрыт,
-        // документ построен.
+        // Лента беседы и её медиа-сводка приходят фоновой загрузкой (`sync_thread`, `sync_media`) и, придя,
+        // перекладывают панель чтения — координаты протяжки берём по финальной раскладке. Ждём готовности
+        // обоих источников их флагами (как `drill_mail`), композер прошлой сцены закрыт, документ построен.
         let pane = m.reading.read(cx);
         let thread = pane.reading.as_ref().map(|r| r.row.thread_id.clone());
         m.compose.inline.is_none()
-            && pane.feed.as_ref().is_some_and(|f| thread.as_ref() == Some(&f.conv.thread))
+            && pane.feed.as_ref().is_some_and(|f| thread.as_ref() == Some(&f.conv.thread) && f.ready())
+            && pane.media.as_ref().is_some_and(|media| media.read(cx).ready())
             && pane.reading.as_ref().is_some_and(|r| r.doc.is_some())
             && body().is_some()
     }
