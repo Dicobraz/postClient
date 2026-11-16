@@ -355,6 +355,9 @@ impl Element for Selectable {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Снимки: первая строка верхней переписки панели получает метку `line-first` — протяжка сцены
+        // фрагментов идёт по ней, а не по пиксельной константе от тела (та уходила мимо текста).
+        crate::screens::mark_first("line-first", bounds);
         let run = TextSelectionRun::new(self.text.clone(), self.layout.clone(), bounds).with_document_order(self.order);
         let projection = handle.update_runs(&[run], cx);
         let range = projection.ranges().first().cloned().flatten().filter(|r| r.start < r.end && r.end <= self.text.len());
@@ -922,7 +925,7 @@ pub(crate) mod scenes {
     pub(crate) const SCENES: &[Scene] = &[
         // Письмо с картинкой и цитатой (как `reply-inline`): строка его текста выделена протяжкой мыши — подсветка и
         // кнопка «Ответить на фрагмент» под концом выделения.
-        Scene::new("fragment-select", letter, letter_ready).after("reply-inline").input(SELECT),
+        Scene::new("fragment-select", letter, letter_ready).after("reply-inline").wait(first_line_into_view).input(SELECT),
         // Кнопка нажата: фрагмент — в быстрый ответ под лентой, набран ответ, второй фрагмент того же письма;
         // «Развернуть» — ответ всем в области чтения с двумя репликами, набранное — ответ на последнюю.
         Scene::new("reply-fragments", stay, fragments_ready).continues().input(REPLY),
@@ -960,7 +963,16 @@ pub(crate) mod scenes {
     }
 
     fn letter_ready(_: &Scene, m: &Mailer, cx: &App) -> bool {
-        m.reading.read(cx).reading.as_ref().is_some_and(|r| r.doc.is_some()) && body().is_some()
+        // Лента беседы грузится фоном и, придя, перекладывает панель: ждём её для открытого письма (как
+        // сверлка беседы). Композер прошлой сцены закрыт, документ построен, первая строка письма нарисована —
+        // она видна и готова к протяжке.
+        let pane = m.reading.read(cx);
+        let thread = pane.reading.as_ref().map(|r| r.row.thread_id.clone());
+        m.compose.inline.is_none()
+            && pane.feed.as_ref().is_some_and(|f| thread.as_ref() == Some(&f.conv.thread) && f.ready())
+            && pane.reading.as_ref().is_some_and(|r| r.doc.is_some())
+            && body().is_some()
+            && first_line().is_some()
     }
 
     fn stay(_: &Scene, _: &mut Mailer, _: &mut Window, _: &mut Context<Mailer>) -> Result<(), String> {
@@ -972,15 +984,33 @@ pub(crate) mod scenes {
         screens::spot_bounds("reading-body").or_else(|| screens::spots_numbered("feed-body-").first().copied())
     }
 
-    /// Вторая строка текста письма (первая у образца — подпись картинки): от левого края — до 220 px правее.
-    const LINE: f32 = 42.;
+    /// Первая строка верхнего письма панели (метка рисования `line-first`): протяжка — по ней, в любом виде
+    /// беседы и при любой высоте окна; пиксельная константа от тела уходила мимо текста (BUG-fragment-select).
+    fn first_line() -> Option<Bounds<Pixels>> {
+        crate::screens::spot_bounds("line-first")
+    }
+
+    /// Каждый кадр ожидания: первую строку письма — в видимую часть панели (на низких окнах сводка беседы
+    /// уводит её под сгиб; macOS-раннеры — 674 px). Докрутка — как у поиска (`reveal_at`): строка на трети высоты.
+    fn first_line_into_view(_: &Scene, m: &mut Mailer, cx: &mut Context<Mailer>) {
+        let Some(b) = first_line() else { return };
+        let (view, offset, max) = {
+            let r = m.reading.read(cx);
+            (r.scroll.bounds(), r.scroll.offset(), r.scroll.max_offset())
+        };
+        if b.top() >= view.top() && b.bottom() <= view.bottom() {
+            return;
+        }
+        let y = (offset.y + view.top() + view.size.height / 3. - b.top()).min(px(0.)).max(-max.y);
+        m.reading.update(cx, |r, _| r.scroll.set_offset(point(offset.x, y)));
+    }
 
     fn from(_: &Mailer, _: &Window, _: &App) -> Option<Point<Pixels>> {
-        body().map(|b| point(b.left() + px(1.), b.top() + px(LINE)))
+        first_line().map(|b| point(b.left() + px(1.), b.top() + (b.bottom() - b.top()) / 2.))
     }
 
     fn to(_: &Mailer, _: &Window, _: &App) -> Option<Point<Pixels>> {
-        body().map(|b| point(b.left() + px(220.), b.top() + px(LINE)))
+        first_line().map(|b| point(b.left() + ((b.right() - b.left()) * 0.6).min(px(220.)), b.top() + (b.bottom() - b.top()) / 2.))
     }
 
     fn selected(_: &Scene, _: &Mailer, cx: &App) -> bool {
