@@ -959,8 +959,27 @@ pub(crate) mod scenes {
         Ok(())
     }
 
+    thread_local! {
+        /// Верх тела письма в прошлой проверке `letter_ready`: сцена ждёт устоявшейся раскладки — закрытие
+        /// композера прошлой сцены перекладывает область чтения, и координаты протяжки (`LINE`) должны попадать
+        /// по улёгшемуся тексту, а не по переходному кадру (флак fragment-select на macOS-раннерах, 2026-11-16).
+        static BODY_TOP: std::cell::Cell<f32> = const { std::cell::Cell::new(f32::NAN) };
+    }
+
     fn letter_ready(_: &Scene, m: &Mailer, cx: &App) -> bool {
-        m.reading.read(cx).reading.as_ref().is_some_and(|r| r.doc.is_some()) && body().is_some()
+        // Композер прошлой сцены закрыт, документ построен и границы тела два кадра подряд одни и те же.
+        let ready = m.compose.inline.is_none()
+            && m.reading.read(cx).reading.as_ref().is_some_and(|r| r.doc.is_some())
+            && body().is_some();
+        if !ready {
+            BODY_TOP.with(|t| t.set(f32::NAN));
+            return false;
+        }
+        let top = body().map_or(f32::NAN, |b| f32::from(b.top()));
+        BODY_TOP.with(|t| {
+            let was = t.replace(top);
+            was.is_finite() && (was - top).abs() < 0.5
+        })
     }
 
     fn stay(_: &Scene, _: &mut Mailer, _: &mut Window, _: &mut Context<Mailer>) -> Result<(), String> {
