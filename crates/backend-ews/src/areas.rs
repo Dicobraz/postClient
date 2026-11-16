@@ -31,7 +31,9 @@ use postman_core::backend::{AreaCtx, Areas, BoxFuture};
 use postman_core::model::{ContactCard, Feature, Features, Principal};
 use postman_core::schedule::{Meeting, SEARCH_LIMIT};
 use postman_core::sync::{Command, Event as SyncEvent, ListError, owned_by};
-use postman_ews::{CalendarItem, Changes, Client, DeleteMode, Error, FolderId, FolderRef, ItemId, ItemKind, NewItem, Notify, Reply, SyncState, WellKnown};
+use postman_ews::{
+    CalendarItem, Changes, Client, DeleteMode, Error, FolderId, FolderRef, ItemId, ItemKind, NewItem, Notify, Reply, SyncState, WellKnown,
+};
 
 /// Встреч в окне календаря — не больше (месяц с запасом).
 const VIEW_LIMIT: u32 = 1000;

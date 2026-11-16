@@ -1219,9 +1219,7 @@ fn exchange_contacts_and_directory() {
     // Новая карточка — в выбранной книге (T2-48).
     let n = log.lock().unwrap().len();
     let fresh = postman_core::model::ContactCard { name: "Вера".into(), ..Default::default() };
-    live.commands
-        .send(Command::SaveContact { card: Box::new(fresh), old: None, book: Some("AAMkADcolleagues".into()), ticket: 6 })
-        .unwrap();
+    live.commands.send(Command::SaveContact { card: Box::new(fresh), old: None, book: Some("AAMkADcolleagues".into()), ticket: 6 }).unwrap();
     live.wait("ContactSaved", |e| matches!(e, Event::ContactSaved { ticket: 6, .. }));
     contacts_loaded(&live);
     let create = requests(&log, n, "CreateItem").pop().expect("CreateItem");

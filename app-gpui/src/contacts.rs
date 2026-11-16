@@ -635,7 +635,11 @@ impl FormText {
 /// книгу по умолчанию. Демо-книга и запасной случай — с пустым `id`, выбора не дают.
 pub(crate) fn form_book<'a>(chosen: Option<&str>, books: &'a [ContactBook]) -> Option<&'a ContactBook> {
     let real: Vec<&ContactBook> = books.iter().filter(|b| !b.id.is_empty()).collect();
-    real.iter().copied().find(|b| Some(b.id.as_str()) == chosen).or_else(|| real.iter().copied().find(|b| b.default)).or_else(|| real.first().copied())
+    real.iter()
+        .copied()
+        .find(|b| Some(b.id.as_str()) == chosen)
+        .or_else(|| real.iter().copied().find(|b| b.default))
+        .or_else(|| real.first().copied())
 }
 
 /// Поля формы на экране.
@@ -2815,21 +2819,16 @@ impl ContactsView {
         }
         let menu = self.book_menu.then(|| {
             let chosen = book.map(|b| b.id.as_str());
-            let items = self
-                .books
-                .iter()
-                .filter(|b| !b.id.is_empty())
-                .enumerate()
-                .map(|(i, b)| {
-                    let id = b.id.clone();
-                    crate::composer::menu_item(ElementId::NamedInteger("form-book".into(), i as u64), l, Some(b.id.as_str()) == chosen)
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(icon(if chosen == Some(b.id.as_str()) { g::CHECK } else { crate::chrome::glyph::CONTACTS }, 12.).text_color(l.text2()))
-                        .child(div().flex_1().min_w_0().truncate().child(b.name.clone()))
-                        .on_click(cx.listener(move |this, _, _, cx| this.pick_book(&id, cx)))
-                });
+            let items = self.books.iter().filter(|b| !b.id.is_empty()).enumerate().map(|(i, b)| {
+                let id = b.id.clone();
+                crate::composer::menu_item(ElementId::NamedInteger("form-book".into(), i as u64), l, Some(b.id.as_str()) == chosen)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon(if chosen == Some(b.id.as_str()) { g::CHECK } else { crate::chrome::glyph::CONTACTS }, 12.).text_color(l.text2()))
+                    .child(div().flex_1().min_w_0().truncate().child(b.name.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_book(&id, cx)))
+            });
             let menu = crate::composer::menu_box("form-book-menu", l)
                 .top(px(34.))
                 .left_0()

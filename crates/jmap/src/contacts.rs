@@ -141,7 +141,13 @@ impl Client {
             Some(b) => b.to_owned(),
             None => {
                 let books = self.address_books().await?;
-                books.iter().find(|b| b.is_default).or(books.first()).ok_or_else(|| Error::Protocol("на сервере нет адресной книги".into()))?.id.clone()
+                books
+                    .iter()
+                    .find(|b| b.is_default)
+                    .or(books.first())
+                    .ok_or_else(|| Error::Protocol("на сервере нет адресной книги".into()))?
+                    .id
+                    .clone()
             }
         };
         let acc = self.account_for(CONTACTS)?;

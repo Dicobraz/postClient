@@ -92,7 +92,9 @@ fn demo_links_and_people() {
     store.apply(vec![ChannelEvent::People(vec![anna.clone()])]).unwrap();
     let card = ContactCard { id: "card-anna".into(), name: "Анна Смирнова".into(), ..ContactCard::default() };
     let cmd = person::link(&cache, &links, &store.chan(), &anna, Contact::Personal(&card), 7).unwrap();
-    let Some(Command::SaveContact { card: new, old: Some(_), book: None, ticket: 7 }) = cmd else { panic!("нет записи в карточку") };
+    let Some(Command::SaveContact { card: new, old: Some(_), book: None, ticket: 7 }) = cmd else {
+        panic!("нет записи в карточку")
+    };
     assert_eq!(new.services, ["https://chat.example.test/@anna"]);
     // На другом компьютере — та же связь по адресу в карточке, автоматически.
     let other = Cache::open_in_memory().unwrap();
