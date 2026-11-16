@@ -9,7 +9,7 @@ license.workspace = true
 # IMAP (MIT OR Apache-2.0): разбор — imap-proto; рантайм — tokio, как у остального ядра.
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 # SMTP submission (Apache-2.0 OR MIT, автор mail-parser/mail-builder): без DKIM и разбора.
-mail-send = { version = "0.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+mail-send = { version = "0.7", default-features = false, features = ["aws_lc_rs", "tls12"] }
 tokio = { version = "1", features = ["net", "time", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 rustls-platform-verifier = "0.7"
