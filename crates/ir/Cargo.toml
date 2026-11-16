@@ -6,7 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-html5ever = "0.39"
+html5ever = "0.40"
 markup5ever_rcdom = "0.39.0"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde.workspace = true
