@@ -5,6 +5,9 @@
 //! Кнопки бота и опрос — довеском сообщения ([`DemoExtra`]); нажать и проголосовать — `Action::Extra` с
 //! [`DemoExtra::press`] и [`DemoExtra::vote`], ответ бота — `Done::Reply`.
 //!
+//! Первый плагин отдельным процессом (ADR 0013, PLG-02): [`serve`] — точка входа в наборе `postman-plugins`
+//! (`--plugin=demo`); сервер тогда живёт в памяти процесса плагина.
+//!
 //! Как настоящий сервер: номера сообщений уникальны на учётку, удаление в личной беседе приходит без беседы
 //! (как у Telegram), повтор отправки с тем же `client_id` не даёт дубля, курсор — номер последнего события журнала.
 
@@ -13,6 +16,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use postman_core::backend::BoxFuture;
+use postman_core::backend::remote::{self, PluginLink};
 use postman_core::channel::conformance::{self, Script, Step};
 use postman_core::channel::{
     AccountId, Action, Address, Answer, Attachment, AttachmentKind, AttachmentSource, Body, ByteSink, ByteSource, ChannelError, ChannelEvent,
@@ -587,6 +591,11 @@ fn set_reaction(m: &mut Message, key: &str, who: &str, on: bool) {
         None => {}
     }
     m.reactions.retain(|r| r.count > 0);
+}
+
+/// Точка входа процесса набора: демо-канал отвечает хосту. Сервер и плагин создаются при первом вопросе хоста.
+pub fn serve(link: PluginLink) -> i32 {
+    remote::serve_channel(link, ID, || Arc::new(DemoChannel::new(DemoServer::new())))
 }
 
 /// Плагин демо-канала.

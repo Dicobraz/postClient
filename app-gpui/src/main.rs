@@ -240,6 +240,7 @@ fn main() {
     if bench {
         bench::on_idle(sys::bench_idle_fields);
     }
+    let bench_plugins = bench && std::env::var_os(bench::PLUGINS_VAR).is_some();
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str);
     // Настройки пользователя (S5-09): замер и снимки — без файла, повторяемо; аргументы сильнее файла.
     let dir = data_dir();
@@ -397,7 +398,8 @@ fn main() {
                 let mut m = Mailer { screens, ..Mailer::new(cache, bench, window, cx) };
                 match start_with {
                     // Демо-канал бесед (ADR 0012) — только в демо: замер и снимки — без него.
-                    account::Start::Demo if m.bench.is_none() && m.screens.is_none() => m.start_demo_channel(cx),
+                    // Замер с `POSTMAN_BENCH_PLUGINS` — с ним, отдельным процессом (`plugin_start_ms`, ADR 0013).
+                    account::Start::Demo if m.screens.is_none() && (m.bench.is_none() || bench_plugins) => m.start_demo_channel(cx),
                     account::Start::Demo => {}
                     account::Start::Live(a) => match upgrading {
                         Some(rx) => m.await_store(rx, a, window, cx),
@@ -425,8 +427,16 @@ fn main() {
                         tray::init(window, &mailer, cx);
                     }
                     // Автозапуск — сразу в трей; значка нет — свёрнутым.
-                    if minimized && !tray::hide(window, false, cx) {
+                    let hidden = minimized && tray::hide(window, false, cx);
+                    if minimized && !hidden {
                         window.minimize_window();
+                    }
+                    // Плагины отдельными процессами (ADR 0013): процессы — после первого показанного кадра (второй
+                    // `on_next_frame`: первый кадр уже на экране); окно не показано — когда база открыта (уже).
+                    if minimized {
+                        plugins::host().first_frame();
+                    } else {
+                        window.on_next_frame(|window, _| window.on_next_frame(|_, _| plugins::host().first_frame()));
                     }
                     // «Последняя вкладка» (T2-11): вкладки прошлого запуска; снимки и бенч — без них и без записи.
                     if keep_tabs {

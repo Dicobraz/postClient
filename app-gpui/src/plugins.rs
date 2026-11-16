@@ -3,11 +3,70 @@
 //! адрес — URL EWS; узел без схемы — EWS узла или `autodiscover.<узел>`), затем IMAP + SMTP; пути областей — CalDAV и
 //! CardDAV, EWS (у IMAP-учётки на Exchange); каналы бесед — Telegram (признак `telegram`). Новый протокол — плагин-крейт
 //! и строка здесь; `postman-core` и экраны не меняются.
+//!
+//! Плагины отдельными процессами (ADR 0013): строка плагина ([`ROWS`]) — идентификатор, вид, как узнать свой адрес,
+//! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
+//! по запросу. В этой волне так работает демо-канал; остальные плагины — внутри `postman.exe`, как были.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use postman_core::backend::Registry;
+use postman_core::backend::remote::{Claim, Host, Launcher, ProcLauncher, Profile, Row, Started};
+use postman_core::backend::wire::{Kind, Settings};
+
+/// Демо-канал — набором `postman-plugins` (PLG-02): без сети, для тестов и замера.
+const DEMO: Row = Row {
+    id: postman_demo::channel::ID,
+    kind: Kind::Channel,
+    claim: Claim::Channel,
+    set: "postman-plugins",
+    profile: Profile::Network { enterprise_auth: false },
+};
+
+/// Плагины отдельными процессами.
+pub(crate) const ROWS: &[Row] = &[DEMO];
+
+static HOST: OnceLock<Host> = OnceLock::new();
+
+/// Хост плагинов процесса. Создание — без ввода-вывода и без процессов: каталог набора и политика namespaces читаются
+/// при запуске процесса, в фоновом потоке плагина.
+pub(crate) fn host() -> &'static Host {
+    HOST.get_or_init(|| {
+        let log = std::env::var("POSTMAN_LOG").unwrap_or_default();
+        Host::new(Arc::new(Beside), Settings { log, ..Settings::default() })
+    })
+}
+
+/// Заместитель канала `id` по его строке ([`ROWS`]) — первым в очереди старта (активная учётка); строки нет — `None`.
+/// Процесса нет, пока заместителя не позовут.
+pub(crate) fn remote_channel(id: &str) -> Option<Arc<dyn postman_core::channel::ChannelPlugin>> {
+    let row = *ROWS.iter().find(|r| r.id == id)?;
+    let host = host();
+    let remote = host.channel(row);
+    host.prefer(row.id);
+    Some(Arc::new(remote))
+}
+
+/// Набор — рядом с `postman.exe` (как воркер); namespaces Linux — по политике `SandboxNamespaces`.
+struct Beside;
+
+impl Launcher for Beside {
+    fn launch(&self, row: &Row) -> std::io::Result<Started> {
+        let dir = std::env::current_exe()?.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let namespaces = crate::security::sandbox_namespaces(crate::sys::shell::policy("SandboxNamespaces"));
+        #[cfg(not(target_os = "linux"))]
+        let namespaces = postman_core::backend::remote::Namespaces::Optional;
+        ProcLauncher { dir, namespaces }.launch(row)
+    }
+}
+
+/// Демо-канал — отдельным процессом: в dev-сборке и в замере с `POSTMAN_BENCH_PLUGINS`; снимки и release без набора в
+/// поставке (PLG-03) — в процессе, как прежде.
+pub(crate) fn demo_remote(screens: bool) -> bool {
+    !screens && (cfg!(debug_assertions) || std::env::var_os(postman_core::bench::PLUGINS_VAR).is_some())
+}
 
 /// Реестр плагинов процесса.
 pub(crate) fn registry() -> &'static Registry {
@@ -41,6 +100,9 @@ pub(crate) fn autoreply_limited(error: &str) -> bool {
 /// без ответа не держит процесс вечно.
 pub(crate) fn finish_sends() {
     use postman_core::channel::outbox;
+    if let Some(host) = HOST.get() {
+        host.leave();
+    }
     let left = || postman_backend_imap::holding() + postman_backend_ews::sync::holding() + outbox::holding();
     if left() == 0 {
         return;
@@ -58,6 +120,23 @@ const LEAVE_LIMIT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests {
+    /// Строка корня — та же, что у плагина в наборе: вид, профиль, файл и адреса по мнению самого плагина; у каждого
+    /// плагина набора есть строка.
+    #[test]
+    fn rows_match_the_plugin_set() {
+        for row in super::ROWS {
+            let entry = postman_plugins::find(row.id).unwrap_or_else(|| panic!("{}: нет в наборе", row.id));
+            assert_eq!(row.set, postman_plugins::SET);
+            assert_eq!((row.kind, row.profile), (entry.kind, entry.profile), "{}", row.id);
+            for url in ["postman://demo/me@example.test/c", "postman://telegram/1/c", "imaps://mail.example.test", "https://mail.example.test/"] {
+                assert_eq!(row.claims(url), entry.claims(url), "{} {url}", row.id);
+            }
+        }
+        for e in postman_plugins::PLUGINS {
+            assert!(super::ROWS.iter().any(|r| r.id == e.id), "{}: нет строки в корне", e.id);
+        }
+    }
+
     /// Адрес со своей схемой — путь IMAP; адрес без схемы и `https://` — ничей (проверит сеть, иначе JMAP).
     #[test]
     fn imap_scheme_is_claimed() {

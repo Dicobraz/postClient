@@ -230,7 +230,9 @@ pub struct Extra(pub Vec<u8>);
 
 /// Байты сессии или ключа: `Debug` без значения, память затирается при освобождении. Хранит их ядро — в хранилище
 /// секретов ОС ([`Secrets`]), канал отдаёт и получает только их.
-#[derive(Clone, PartialEq, Eq, Default)]
+///
+/// По обмену с процессом плагина (ADR 0013) секрет идёт байтами: секрет учётки — в `Open`, новый — событием.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Secret(Vec<u8>);
 
 impl Secret {
@@ -515,7 +517,7 @@ pub enum Reader {
 }
 
 /// Страница истории или поиска на сервере: сообщения с беседой; `more` — есть ещё (раньше или дальше).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Page {
     pub messages: Vec<(ConversationId, Message)>,
     pub more: bool,
@@ -661,7 +663,7 @@ pub enum ChannelState {
 }
 
 /// От канала к ядру (ADR 0012 п. 6).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChannelEvent {
     /// Новые и изменённые.
     Conversations(Vec<Conversation>),
@@ -737,7 +739,7 @@ pub struct Outgoing {
 ///
 /// `non_exhaustive`: канал вне ядра разбирает действия с веткой `_ => Err(ChannelError::Unsupported)` — новое действие
 /// договора не ломает его сборку, а до канала без возможности ядро его и не доносит ([`ChannelFeatures::allows`]).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Action {
     Send(Outgoing),
@@ -821,7 +823,7 @@ pub struct ExtraReply {
 }
 
 /// Итог действия.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Done {
     Ok,
     Sent {
@@ -859,6 +861,10 @@ pub enum ChannelError {
     Protocol(String),
     #[error("storage: {0}")]
     Storage(String),
+    /// Процесс плагина не работает (ADR 0013): падал пять раз за 10 минут или собран другой версией. Поток учётки не
+    /// повторяет сам — ждёт «Повторить» (`run::Request::Reconnect`).
+    #[error("plugin: {0}")]
+    Plugin(String),
 }
 
 impl From<postman_cache::Error> for ChannelError {

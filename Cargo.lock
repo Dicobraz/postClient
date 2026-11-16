@@ -7689,12 +7689,14 @@ dependencies = [
  "jiff",
  "memory-stats",
  "open",
+ "postcard",
  "postman-cache",
  "postman-calendar",
  "postman-compose",
  "postman-demo",
  "postman-export",
  "postman-ir",
+ "postman-proc",
  "postman-search",
  "postman-smime",
  "postman-worker",
@@ -7737,6 +7739,7 @@ dependencies = [
  "postman-cache",
  "postman-calendar",
  "postman-core",
+ "postman-proc",
  "postman-smime",
  "postman-worker",
  "redb",
@@ -7813,6 +7816,7 @@ dependencies = [
  "postman-core",
  "postman-demo",
  "postman-ir",
+ "postman-plugins",
  "postman-search",
  "postman-smime",
  "postman-worker",
@@ -7879,6 +7883,19 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "postman-plugins"
+version = "0.1.0-beta.7"
+dependencies = [
+ "postman-cache",
+ "postman-core",
+ "postman-demo",
+ "postman-proc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -9,6 +9,10 @@ license.workspace = true
 postman-ir.workspace = true
 postman-cache = { workspace = true, features = ["store6"] }
 postman-worker.workspace = true
+# Хост плагинов (ADR 0013, `backend::remote`): процессы, песочница и связь — общий механизм, второго нет.
+postman-proc.workspace = true
+# Сообщения хоста и плагина (`backend::wire`) — тот же кодек, что у `cache` и связи `postman-proc`.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 postman-compose.workspace = true
 postman-search.workspace = true
 postman-calendar.workspace = true

@@ -27,6 +27,12 @@ POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный
 cargo run --release -p postman-gpui                     # без окружения: сохранённый вход или строка входа; --sign-out — забыть
 ```
 
+Плагины отдельными процессами (ADR 0013): набор `postman-plugins` лежит рядом с `postman.exe`. Пока в нём только
+демо-канал: в отладочной сборке `--demo` поднимает его процессом после первого кадра — собрать набор вместе с
+программой: `cargo build -p postman-gpui -p postman-worker -p postman-plugins`. Нет файла набора — канал в «проблеме»,
+в журнале `plugin set postman-plugins not found`. Снимки и release-сборка без `POSTMAN_BENCH_PLUGINS` держат демо-канал
+в своём процессе, как прежде (набор в поставке — PLG-03). Журнал плагина — в общем журнале с меткой `plugin=<id>`.
+
 Release-сборка — без консоли (`windows_subsystem`): `--bench`, `--screens`, `--help` пишут в консоль родителя
 или в перенаправление (`> файл`, канал). Git Bash и `.cmd` ждут выхода сами; в интерактивном cmd — `start /wait`,
 в PowerShell — `| Out-Default`. Ресурсы exe (значок, версия, манифест) — `app-gpui/build.rs`, нужен rc.exe из Windows SDK.
@@ -201,6 +207,11 @@ python docs/stand/net.py serve                                   # только 
 | Linux (Ubuntu 24.04, ядро 6.18, 4 ядра; отладочная и release-сборка) | 2,6 мс | 2,2–2,5 мс (1,9–3,8) |
 | Windows | не снят: нужен стенд | — |
 | macOS | не снят: нужен MacBook | — |
+
+Плагин отдельным процессом (PLG-02): `cargo nextest run -p postman-plugins` — демо-канал настоящим процессом
+`postman-plugins --plugin=demo` в профиле «сеть без файлов»: вход, подключение, хранилище в базе хоста, отправка,
+перезапуск убитого процесса. Договор по обмену без процесса — `cargo nextest run -p postman-demo --test remote`; сторож
+запуска после первого кадра — `cargo nextest run -p postman-core backend::remote`.
 
 Какое ограничение не даёт воркеру стартовать (только отладочная сборка):
 `cargo test -p postman-worker --test windows_probe -- --ignored --nocapture`. В CI — при ручном запуске
