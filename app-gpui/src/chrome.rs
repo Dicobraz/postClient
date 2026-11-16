@@ -678,12 +678,6 @@ impl Mailer {
         } else {
             app_icon().into_any_element()
         };
-        #[cfg(target_os = "macos")]
-        let leading = if window.is_fullscreen() {
-            drag_gap("traffic-lights", TABS_START)
-        } else {
-            drag_area(div().id("traffic-lights").children(crate::screens::spot("traffic-lights")).w(px(W_TRAFFIC_LIGHTS)).h_full().flex_none())
-        };
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let leading = app_icon();
         // «─ □ ✕» справа: Windows — все три; Linux (LIN-08) — состав и порядок из настройки ОС, а при кнопках слева и в
