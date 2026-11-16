@@ -24,6 +24,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [lints]
 workspace = true
 
+# Версия exe (build.rs, rc.exe из Windows SDK) — как у воркера: MSI сверяет её с версией комплекта (PLG-03).
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 # Хранилище хоста в тесте процесса (`tests/process.rs`): состояние плагина — в базе хоста, не в файлах процесса.
 postman-cache.workspace = true
