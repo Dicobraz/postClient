@@ -454,6 +454,11 @@ pub struct Driver {
     queue: VecDeque<Event>,
     /// Когда начат текущий шаг ввода.
     moved: Instant,
+    /// Следующий снимок — момент отказа сцены (имя с `-fail`): ставит `give_up`, снимает `capture`.
+    fail_shot: bool,
+    /// Отказ сцены, уже напечатанный в stderr: после снимка момента — выход с ошибкой (снимок идёт фоном,
+    /// выходить до его сохранения нельзя).
+    fatal: Option<String>,
     /// Планировщик сроков работает и в этой сцене (`lifecycle_pass`): снимки без него повторяемы.
     pub(crate) planner: bool,
 }
@@ -480,6 +485,8 @@ impl Driver {
             input: 0,
             queue: VecDeque::new(),
             moved: Instant::now(),
+            fail_shot: false,
+            fatal: None,
             planner: false,
             undo: Vec::new(),
             overdue: None,
@@ -573,10 +580,15 @@ pub fn drive(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
 
 /// Сцена не дошла: ошибка прогона. С `POSTMAN_SCREENS_SHOT_ON_FAIL` — сообщение и снимок как есть (разбор падения сценария).
 fn give_up(m: &mut Mailer, scene: &'static Scene, e: &str, window: &Window, cx: &mut Context<Mailer>) -> bool {
-    if std::env::var_os("POSTMAN_SCREENS_SHOT_ON_FAIL").is_none() {
-        fail(scene, e);
-    }
     eprintln!("screens: {}: {e}", scene.name);
+    // Кадр момента отказа — всегда (`<сцена>-fail.png`): флаки раннеров без локального воспроизведения видны
+    // в артефакте. Прогон завершается ошибкой после сохранения снимка (он идёт фоновой задачей); режим
+    // `POSTMAN_SCREENS_SHOT_ON_FAIL` — по-прежнему «снять и продолжить сцены» для ручной диагностики.
+    let keep_going = std::env::var_os("POSTMAN_SCREENS_SHOT_ON_FAIL").is_some();
+    if let Some(d) = &mut m.screens {
+        d.fail_shot = true;
+        d.fatal = (!keep_going).then(|| e.to_owned());
+    }
     set_phase(m, Phase::Capturing);
     capture(m, scene, window, cx);
     true
@@ -841,9 +853,11 @@ pub(crate) fn settings_on(m: &Mailer, section: crate::settings_tab::Section, cx:
 
 /// PrintWindow — в фоновом потоке: он шлёт сообщения окну, и в потоке окна это повторный вход в оконную
 /// процедуру gpui посреди отрисовки.
-fn capture(m: &Mailer, scene: &'static Scene, window: &Window, cx: &mut Context<Mailer>) {
-    let Some(d) = &m.screens else { return };
-    let name = format!("{}{}", scene.name, d.suffix);
+fn capture(m: &mut Mailer, scene: &'static Scene, window: &Window, cx: &mut Context<Mailer>) {
+    let Some(d) = m.screens.as_mut() else { return };
+    let fail_shot = d.fail_shot;
+    d.fail_shot = false;
+    let name = format!("{}{}{}", scene.name, d.suffix, if fail_shot { "-fail" } else { "" });
     let path = d.dir.join(format!("{name}.png"));
     let hwnd = sys::window_id(window).unwrap_or_else(|e| fail(scene, &e));
     let handle = window.window_handle();
@@ -871,6 +885,9 @@ fn capture(m: &Mailer, scene: &'static Scene, window: &Window, cx: &mut Context<
             let Some(d) = &mut m.screens else { return };
             d.scene += 1;
             d.phase = Phase::Enter;
+            if let Some(e) = d.fatal.take() {
+                fail(scene, &e);
+            }
             if d.scene >= d.scenes().len() {
                 finish(0);
             }

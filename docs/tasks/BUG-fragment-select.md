@@ -1,0 +1,36 @@
+# BUG-fragment-select: сцена снимков падает на macOS-раннерах GitHub
+
+lane: app-gpui
+status: in-progress        # фикс едет веткой fix/screens-drag; ручная проверка — manual-tests/BUG-fragment-select.md
+deps: []
+class: A
+files: [app-gpui/src/screens.rs, app-gpui/src/fragments.rs, docs/manual-tests/BUG-fragment-select.md]
+read: [docs/tasks/MSGR-02.md]
+checks: [nextest, снимки сцен fragment-*, reply-*]
+manual: yes
+
+## Что происходит
+
+С образа macOS-раннеров GitHub 2026-11-16 (лейбл `macos-26`, понедельничный роллаут) сцена `fragment-select`
+стала падать на шаге `input step 2 not done in 30 s` — во всех PR дня (mail-send, html5ever, PLG-02), при
+зелёном main и на Windows. Диагностика (×3 со сторожем кадров, run 43875767725): 3/3 падения, **stall кадров
+нет**, кадры рисуются до таймаута; область письма в удачном и неудачном прогоне пиксельно одинакова.
+
+Причина (по коду): сцена идёт после `reply-inline` и наследует открытый композер; вход `letter` его закрывает —
+область чтения перекладывается несколько кадров. `letter_ready` срабатывало до устаканивания, координаты
+протяжки (`body.top + LINE`) брались по переходному кадру и могли попадать мимо текста — выделение пустое,
+`picked()` — `None`, сцена ждёт вечно. Тайминги нового образа расширили окно гонки.
+
+## Фикс (ветка fix/screens-drag)
+
+1. `letter_ready` ждёт устоявшейся раскладки: композер закрыт, документ построен, верх тела письма два кадра
+   подряд один и тот же (допуск 0,5 px).
+2. `give_up` всегда снимает кадр момента отказа (`<сцена>-fail.png`, в артефакт `screens-macos`) и только потом
+   завершает прогон ошибкой: у будущих флаков раннеров сразу будет улика. Режим `POSTMAN_SCREENS_SHOT_ON_FAIL`
+   («снять и продолжить») не изменился.
+
+## Готово
+
+`×3` диагностика ветки с фиксом — 3/3 зелёные (run — см. PR); сцены `reply-inline, fragment-select,
+reply-fragments` — зелёные на Windows dev-сборкой; ручная проверка на MacBook владельца — `docs/manual-tests/
+BUG-fragment-select.md` (п. 4 разбора: подтвердить причину кадром момента отказа на «живом» macOS).
