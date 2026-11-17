@@ -180,7 +180,7 @@ pub trait TaskStore {
 // ---------------------------------------------------------------------------------------------------------------
 // Запросы интерфейса и ответы.
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     /// Задачи из кэша сразу, затем сверка с сервером → `Loaded`.
     Load,
@@ -252,7 +252,7 @@ pub fn delete_local(cache: &Cache, uid: &str) -> postman_cache::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Reply {
     /// Все задачи (вход, полная загрузка).
     Loaded(Vec<Task>),

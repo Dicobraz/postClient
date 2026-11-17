@@ -14,7 +14,7 @@ use crate::model::VacationResponse;
 use crate::rules::Rule;
 
 /// Запись автоответа Postman (S5-29).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AutoReplySave {
     /// Включение и период; тема и текст — из `reply` ([`AutoReply::primary`]).
     pub vacation: VacationResponse,
@@ -26,6 +26,7 @@ pub struct AutoReplySave {
     pub zone: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     /// Автоответ, правила и квота — при входе.
     Load,
@@ -42,6 +43,7 @@ pub enum Request {
     SaveRules { rules: Vec<Rule>, replace: bool },
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Reply {
     /// Автоответ на сервере (с учётом правил: [`effective`]).
     Vacation(VacationResponse),
@@ -70,7 +72,7 @@ pub enum Reply {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Area {
     Vacation,
     Quota,
@@ -78,7 +80,7 @@ pub enum Area {
 }
 
 /// Скрипт сервера, написанный не в Postman: только показать.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Foreign {
     pub name: String,
     pub text: String,
@@ -86,7 +88,7 @@ pub struct Foreign {
 }
 
 /// Правила для экрана.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RulesState {
     pub rules: Vec<Rule>,
     /// Наш скрипт активен (правила работают).
@@ -107,7 +109,7 @@ pub fn effective(v: VacationResponse, in_rules: bool) -> VacationResponse {
 }
 
 /// Занято и всего, байт.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     pub used: u64,
     pub limit: u64,

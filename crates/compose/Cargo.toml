@@ -10,6 +10,8 @@ postman-ir.workspace = true
 postman-smime.workspace = true
 mail-builder = "1"
 pulldown-cmark = { version = "0.13", default-features = false }
+# Черновик (`Draft`) идёт по обмену `sync::Command` (PLG-07).
+serde.workspace = true
 
 [dev-dependencies]
 mail-parser = "0.11"

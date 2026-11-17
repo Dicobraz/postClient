@@ -21,8 +21,57 @@ pub use task::{
     X_MESSAGE_ID, X_ORDER, X_PROJECT, X_REPEAT_AFTER, X_SOMEDAY,
 };
 
+/// `serde_json::Value` в типах, идущих по обмену (приглашение, задача): кодек postcard — формат без самоописания,
+/// `Value` он не разбирает (`deserialize_any` не поддержан), поэтому значение едет байтами JSON — тем же значением.
+pub(crate) mod json {
+    pub mod value {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use serde_json::Value;
+
+        pub fn serialize<S: Serializer>(v: &Value, s: S) -> Result<S::Ok, S::Error> {
+            serde_json::to_vec(v).map_err(serde::ser::Error::custom)?.serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Value, D::Error> {
+            serde_json::from_slice(&Vec::<u8>::deserialize(d)?).map_err(serde::de::Error::custom)
+        }
+    }
+
+    pub mod opt {
+        use serde::{Deserialize, Deserializer, Serializer};
+        use serde_json::Value;
+
+        pub fn serialize<S: Serializer>(v: &Option<Value>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                None => s.serialize_none(),
+                Some(v) => super::value::serialize(v, s),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+            match Option::<Vec<u8>>::deserialize(d)? {
+                None => Ok(None),
+                Some(b) => serde_json::from_slice(&b).map(Some).map_err(serde::de::Error::custom),
+            }
+        }
+    }
+
+    pub mod vec {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use serde_json::Value;
+
+        pub fn serialize<S: Serializer>(v: &[Value], s: S) -> Result<S::Ok, S::Error> {
+            serde_json::to_vec(v).map_err(serde::ser::Error::custom)?.serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Value>, D::Error> {
+            serde_json::from_slice(&Vec::<u8>::deserialize(d)?).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
 /// Промежуток времени в Unix-секундах, `[start, end)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub start: i64,
     pub end: i64,

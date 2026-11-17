@@ -14,7 +14,7 @@ use postman_compose::{Address, CalendarPart, Draft};
 use serde_json::{Value, json};
 
 /// Как ушёл ответ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Delivery {
     /// Статус изменён в событии на сервере, организатору ответил сервер.
     Server,
@@ -25,7 +25,7 @@ pub enum Delivery {
 }
 
 /// Как ответить (T2-15, меню ▾ у «Принять / Под вопросом / Отклонить», как в Outlook).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Answer {
     /// «… с комментарием»: текст организатору (пустой — без комментария).
     pub comment: Option<String>,

@@ -6,7 +6,7 @@
 use crate::{Address, Attachment, Draft};
 
 /// Вложения беседы для черновика ответа.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Share {
     /// Адреса писем беседы («От», «Кому», «Копия»), в нижнем регистре.
     pub known: Vec<String>,
