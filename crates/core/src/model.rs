@@ -43,7 +43,7 @@ pub enum Filter {
 }
 
 /// Когда сервер выпускает письмо.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Release {
     /// Сразу.
     Now,
@@ -54,7 +54,7 @@ pub enum Release {
 }
 
 /// Карточка контакта. У новой (ещё не на сервере) `id` пустой.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ContactCard {
     pub id: String,
     pub name: String,
@@ -172,7 +172,7 @@ pub fn group_members(v: &Value) -> Vec<String> {
 /// Должность, отдел и телефон (S7-08) — функция ядра «карточка справочника», а не деталь протокола: их дают те пути,
 /// у кого они есть (EWS — `FindPeople`/`ResolveNames` из GAL); у JMAP (`Principal`, RFC 9670) таких свойств нет — пусто,
 /// у CardDAV справочника нет (личные карточки — [`ContactCard`] со своими должностью, организацией и телефонами).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Principal {
     pub id: String,
     /// У Stalwart — логин (адрес), а не ФИО (`docs/STALWART.md` п. 9); показывать — [`Principal::display_name`].
@@ -220,7 +220,7 @@ pub struct VacationResponse {
 }
 
 /// Род ошибки: от него зависят текст и поведение интерфейса (`Auth` — снова строка входа).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorKind {
     /// Сервер отклонил вход (HTTP 401): пароль сменён или сессия отозвана. Синхронизация останавливается.
     Auth,
@@ -452,7 +452,7 @@ impl Feature {
 ///
 /// Перенос писем между учётками (ADR 0006 п. 4) — не раздел интерфейса, а умение пути: [`Features::import`] и
 /// [`Features::server_copy`]; в [`Features::ALL`] их нет, пока путь сам не сказал.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Features(u16);
 
 /// Биты умений переноса — после битов [`Feature`].

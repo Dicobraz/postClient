@@ -6,13 +6,15 @@ use serde_json::Value;
 use crate::{Event, Partstat};
 
 /// Приглашение из вложения `text/calendar`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Invitation {
     /// REQUEST, CANCEL, REPLY, COUNTER…
     pub method: String,
     pub event: Event,
     pub sequence: i64,
-    /// Исходный объект JSCalendar Event — для импорта в календарь.
+    /// Исходный объект JSCalendar Event — для импорта в календарь. По обмену — байтами JSON (postcard `Value` не
+    /// разбирает, [`crate::json`]).
+    #[serde(with = "crate::json::value")]
     pub raw: Value,
 }
 

@@ -46,7 +46,7 @@ const RESEND_MS: i64 = 5_000;
 const UNTIL_RETRY: Duration = Duration::from_secs(24 * 3600);
 
 /// Запрос интерфейса потоку учётки канала (то, что видит пользователь).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     /// Догрузить ленту раньше `before` (прокрутка вверх, «Медиа беседы»): найденное — в базу, затем `Changed`.
     History { conversation: ConversationId, before: Option<MessageId>, limit: u32 },
@@ -76,7 +76,7 @@ pub enum Request {
 }
 
 /// Ответ потока интерфейсу.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Update {
     /// Беседы изменились (перечитать из базы); `gone` — их больше нет.
     Changed {

@@ -69,7 +69,7 @@ pub fn max_delay(advertised: u64) -> u64 {
 }
 
 /// Отправка, которую сервер держит: ключи кэша (с префиксом общего ящика) и срок.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Scheduled {
     /// EmailSubmission (ключ: аккаунт отправителя + id на сервере).
     pub submission: String,

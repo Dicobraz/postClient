@@ -2,12 +2,18 @@
 //! UI шлёт команды, в ответ получает события и перечитывает кэш. Каждая учётная запись — свой поток с tokio и
 //! своим соединением с кэшем; что внутри потока (JMAP, IMAP…) — дело плагина пути (`postman-backend-*`), `core`
 //! даёт ему поток ([`spawn_thread`]), цикл «без связи» ([`supervise`]) и этот договор.
+//!
+//! Команды и события сериализуются (serde; кодек — postcard, как у обмена каналов `backend::wire`): тест
+//! «туда и обратно» проходит каждый вариант. Атрибуты переименования не вводятся: имена полей и вариантов — и есть
+//! формат обмена.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use postman_calendar::{Busy, BusyNote, Invitation, Partstat};
 use postman_compose::{Address, Draft};
@@ -51,7 +57,7 @@ impl Account {
 }
 
 /// Кому открыт мой календарь (S8-43): адрес, имя и видит ли подробности событий (иначе — только занятость).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Access {
     pub email: String,
     pub name: String,
@@ -59,7 +65,7 @@ pub struct Access {
 }
 
 /// Ссылка публикации моего календаря (S8-45): адрес виден только при создании.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Publication {
     pub id: String,
     /// С подробностями событий, иначе — только занятость.
@@ -68,7 +74,7 @@ pub struct Publication {
 
 /// Адресная книга сервера (T2-48): JMAP `AddressBook/get`, CardDAV — коллекции адресных книг, Exchange — папки
 /// контактов. Куда сохранить новый контакт; переноса между книгами нет.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactBook {
     /// У пути: id книги JMAP, путь коллекции CardDAV, id папки Exchange.
     pub id: String,
@@ -78,13 +84,22 @@ pub struct ContactBook {
     pub default: bool,
 }
 
+/// Ключевое слово команды [`Command::Keyword`] — статика ядра ([`crate::labels`], [`crate::marks`]). Псевдоним, а
+/// не `&'static str` в поле: serde неявно «заимствует» поля-ссылки (`&str`, `&[u8]`), и у типа с такой ссылкой
+/// derive даёт только `Deserialize<'static>`; псевдоним прячет ссылку от макроса, договор не меняется.
+pub type Keyword = &'static str;
+
+/// Команда интерфейса синхронизации учётной записи: сериализуется (postcard), смысл договора — как в вариантах.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Body(String),
     /// Беседа (ключ цепочки, `EmailRow::thread_id`): письма из всех папок и их тела — в кэш → `ThreadReady`.
     Thread(String),
     Keyword {
         id: String,
-        keyword: &'static str,
+        /// По обмену — строкой, на приёме — та же статика (модуль [`keyword`]).
+        #[serde(with = "keyword")]
+        keyword: Keyword,
         on: bool,
     },
     /// Поставить `add` и снять `remove` (ключевые слова — категории, метки, флаг) у писем `ids` (ключи кэша) — по
@@ -470,6 +485,38 @@ impl Command {
     }
 }
 
+/// Ключевое слово команды [`Command::Keyword`] — статика ядра (`&'static str`, константы [`crate::labels`] и
+/// [`crate::marks`]): десериализация `&'static str` в serde невозможна (данные обмена живут меньше), поэтому по
+/// обмену слово идёт строкой, а на приёме возвращается та же статика. Слово вне таблицы (по договору их не бывает)
+/// становится новой статикой.
+mod keyword {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Слова, которыми интерфейс помечает письмо: флаги сервера и метки жизни письма.
+    const KNOWN: &[&str] = &[
+        crate::labels::SEEN,
+        crate::labels::FLAGGED,
+        crate::labels::ANSWERED,
+        crate::labels::FORWARDED,
+        crate::labels::DRAFT,
+        crate::marks::CONFIDENTIAL,
+        crate::marks::DUE,
+        crate::marks::WAIT,
+        crate::marks::REMIND,
+        crate::marks::EXPIRE,
+        crate::marks::TAKEN,
+    ];
+
+    pub fn serialize<S: Serializer>(v: &&'static str, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<&'static str, D::Error> {
+        let word = String::deserialize(d)?;
+        Ok(KNOWN.iter().copied().find(|k| *k == word).unwrap_or_else(|| Box::leak(word.into_boxed_str())))
+    }
+}
+
 /// Куда идёт команда, когда учётных записей в профиле несколько (S7-03б, `docs/specs/S7.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -487,7 +534,7 @@ fn profile_of_key(key: &str) -> Option<String> {
 }
 
 /// Чьё письмо или папка формата 6 (ADR 0006 п. 1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Home {
     /// Учётки: ключ — аккаунт ключей кэша (основной — пустая строка), как у `postman_cache::Owner::Account`.
     Account(String),
@@ -642,7 +689,7 @@ impl Command {
 }
 
 /// Что делает синхронизация. Текст — у интерфейса (`sync.ftl`), здесь только код и данные.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     Connecting {
         url: String,
@@ -664,7 +711,7 @@ impl ErrorKind {
 }
 
 /// На каком шаге синхронизации случилась ошибка (для журнала).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stage {
     Start,
     Connect,
@@ -677,7 +724,7 @@ pub enum Stage {
 
 /// Ошибка синхронизации: род, шаг и подробность. `detail` — текст ошибки как есть (может быть ответом сервера),
 /// интерфейс показывает его только как подробность после своего текста.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncError {
     pub kind: ErrorKind,
     pub stage: Stage,
@@ -718,14 +765,14 @@ impl std::fmt::Display for Status {
 /// записи началась и закончилась. Конец — всегда, в том числе когда на сервере ничего не изменилось; `error` —
 /// почему не вышло (нет связи, сервер ответил ошибкой). Без связи до входа начало — у повторного входа, конец — когда
 /// вход и первая загрузка прошли или не удались.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SendReceive {
     Started,
     Finished { error: Option<String> },
 }
 
 /// Отправитель для окна письма: свой адрес или общий ящик (S4-06).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sender {
     /// Общий ящик, из которого уходит письмо (id аккаунта, он же префикс ключей кэша); `None` — свой.
     pub account: Option<String>,
@@ -734,7 +781,7 @@ pub struct Sender {
 }
 
 /// Почему состава списка рассылки нет (`Event::ListMembers`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ListError {
     /// Путь или сервер состав списков не отдаёт — показывать список без состава.
     Unsupported,
@@ -742,6 +789,9 @@ pub enum ListError {
     Failed(String),
 }
 
+/// Событие синхронизации интерфейсу: сериализуется (postcard), смысл договора — как в вариантах. Байты
+/// (`BlobReady`, `Raw`) идут в `Arc` как байты; ключевые слова-статики — строкой (модуль [`keyword`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     Status(Status),
     MailboxesChanged,
@@ -1733,5 +1783,633 @@ mod tests {
                 SendReceive::Finished { error: None },
             ]
         );
+    }
+
+    /// Каждый вариант договора проходит «туда и обратно» (postcard) без потерь. Списки образцов сверяются с `match`
+    /// без `_`: новый вариант без образца здесь не собирается (как у обмена каналов, `backend::wire`).
+    mod wire {
+        use super::*;
+
+        fn round<T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(v: &T) {
+            let bytes = postcard::to_stdvec(v).unwrap();
+            assert_eq!(&postcard::from_bytes::<T>(&bytes).unwrap(), v);
+        }
+
+        fn draft() -> Draft {
+            Draft {
+                from: Address::new("Я", "me@example.test"),
+                to: vec![Address::new("Анна", "anna@example.test")],
+                subject: "Отчёт".into(),
+                markdown: "текст письма".into(),
+                attachments: vec![postman_compose::Attachment {
+                    name: "a.txt".into(),
+                    mime: "text/plain".into(),
+                    data: vec![1],
+                    inline_cid: None,
+                    blob_id: Some("b1".into()),
+                }],
+                calendar: Some(postman_compose::CalendarPart { method: "REPLY".into(), ics: "BEGIN:VCALENDAR".into() }),
+                keywords: vec!["pm.cat.work".into()],
+                sign: true,
+                share: Some(postman_compose::Share {
+                    known: vec!["anna@example.test".into()],
+                    attachments: Vec::new(),
+                    note: "Файлы беседы".into(),
+                    off: false,
+                }),
+                ..Draft::default()
+            }
+        }
+
+        fn cal_event() -> postman_calendar::Event {
+            let raw = serde_json::json!({ "id": "e-1", "uid": "u-1", "title": "Планёрка", "start": "2026-11-20T10:00:00", "duration": "PT1H" });
+            postman_calendar::Event::from_jmap(&raw, &jiff::tz::TimeZone::UTC).unwrap()
+        }
+
+        fn invitation() -> Invitation {
+            Invitation {
+                method: "REQUEST".into(), event: cal_event(), sequence: 2, raw: serde_json::json!({ "uid": "u-1", "title": "Планёрка" })
+            }
+        }
+
+        fn meeting() -> Meeting {
+            Meeting {
+                uid: "u-1".into(),
+                title: "Планёрка".into(),
+                location: "Переговорная 1".into(),
+                description: "Еженедельная".into(),
+                start: jiff::civil::date(2026, 11, 20).at(10, 0, 0, 0),
+                time_zone: "Europe/Moscow".into(),
+                duration_secs: 3600,
+                attendees: vec![("Анна".into(), "anna@example.test".into())],
+                optional: Vec::new(),
+                from: Some("me@example.test".into()),
+                reminder_secs: Some(600),
+                recurrence: Some("FREQ=WEEKLY".into()),
+                all_day: false,
+                private: false,
+            }
+        }
+
+        fn task() -> postman_calendar::Task {
+            let mut t = postman_calendar::Task::new("t-1@postman", "cal-1", "Купить кофе");
+            t.due = Some(postman_calendar::Moment::new(jiff::civil::date(2026, 11, 20).at(9, 0, 0, 0), Some("Europe/Moscow")));
+            t.important = true;
+            t.progress = postman_calendar::Progress::InProcess;
+            t.keywords = vec!["pm.cat.work".into()];
+            t
+        }
+
+        fn scheduled() -> Scheduled {
+            Scheduled { submission: "s-1".into(), email: "e-1".into(), send_at: 1_768_467_600 }
+        }
+
+        fn selector() -> Selector {
+            Selector { mailbox: "inbox".into(), filter: Some(Filter::NotKeyword(crate::labels::SEEN.into())), except: vec!["e-9".into()] }
+        }
+
+        /// Номер варианта `Command` в порядке объявления.
+        fn command_index(c: &Command) -> usize {
+            match c {
+                Command::Body(_) => 0,
+                Command::Thread(_) => 1,
+                Command::Keyword { .. } => 2,
+                Command::SetKeywords { .. } => 3,
+                Command::Query { .. } => 4,
+                Command::Counts { .. } => 5,
+                Command::Move { .. } => 6,
+                Command::Destroy(_) => 7,
+                Command::CreateFolder { .. } => 8,
+                Command::RenameFolder { .. } => 9,
+                Command::MoveFolder { .. } => 10,
+                Command::Send { .. } => 11,
+                Command::Unsend { .. } => 12,
+                Command::Scheduled => 13,
+                Command::SaveDraft { .. } => 14,
+                Command::LoadMore { .. } => 15,
+                Command::Search { .. } => 16,
+                Command::FindMessage { .. } => 17,
+                Command::Blob { .. } => 18,
+                Command::RespondInvite { .. } => 19,
+                Command::ImportInvite { .. } => 20,
+                Command::RemoveInvite { .. } => 21,
+                Command::Events { .. } => 22,
+                Command::SearchEvents { .. } => 23,
+                Command::Availability { .. } => 24,
+                Command::CreateMeeting { .. } => 25,
+                Command::UpdateMeeting { .. } => 26,
+                Command::CancelMeeting { .. } => 27,
+                Command::ShareFreeBusy { .. } => 28,
+                Command::CalendarAccess => 29,
+                Command::Publications => 30,
+                Command::Publish { .. } => 31,
+                Command::Unpublish { .. } => 32,
+                Command::UnshareCalendar { .. } => 33,
+                Command::Settings(_) => 34,
+                Command::Contacts => 35,
+                Command::DirectoryPage { .. } => 36,
+                Command::FindPeople { .. } => 37,
+                Command::PersonDetails { .. } => 38,
+                Command::ExpandList { .. } => 39,
+                Command::SaveContact { .. } => 40,
+                Command::DeleteContact { .. } => 41,
+                Command::Categories(_) => 42,
+                Command::Patch { .. } => 43,
+                Command::Newsletters { .. } => 44,
+                Command::ReportPhishing { .. } => 45,
+                Command::Reconnect => 46,
+                Command::SyncNow => 47,
+                Command::Tasks(_) => 48,
+                Command::Delegate { .. } => 49,
+                Command::Withhold { .. } => 50,
+                Command::MoveLetters { .. } => 51,
+                Command::FetchRaw { .. } => 52,
+                Command::Import { .. } => 53,
+                Command::ServerCopy { .. } => 54,
+                Command::DestroyLetters { .. } => 55,
+                Command::Migration(_) => 56,
+                Command::Sweep { .. } => 57,
+                Command::StopSweep { .. } => 58,
+                Command::ListLetters { .. } => 59,
+                Command::StoreLetters { .. } => 60,
+                Command::Export { .. } => 61,
+                Command::StopExport { .. } => 62,
+                Command::Channel { .. } => 63,
+            }
+        }
+
+        fn commands() -> Vec<Command> {
+            let all = vec![
+                Command::Body("e-1".into()),
+                Command::Thread("t-1".into()),
+                Command::Keyword { id: "e-1".into(), keyword: crate::labels::FLAGGED, on: true },
+                Command::SetKeywords { ids: vec!["e-1".into()], add: vec!["pm.cat.work".into()], remove: Vec::new() },
+                Command::Query { filter: Filter::Text("отчёт".into()), mailbox: Some("inbox".into()), ticket: 1 },
+                Command::Counts { filters: vec![Filter::HasKeyword(crate::labels::FLAGGED.into())], mailbox: None, ticket: 2 },
+                Command::Move { id: "e-1".into(), from: "inbox".into(), to: "archive".into() },
+                Command::Destroy("e-1".into()),
+                Command::CreateFolder { account: None, parent: Some("inbox".into()), name: "Новая".into() },
+                Command::RenameFolder { mailbox: "f-1".into(), name: "Новое имя".into() },
+                Command::MoveFolder { mailbox: "f-1".into(), parent: None },
+                Command::Send { draft: Box::new(draft()), replace: Some("d-1".into()), ticket: 3, release: Release::After(30) },
+                Command::Unsend { scheduled: scheduled(), ticket: 4 },
+                Command::Scheduled,
+                Command::SaveDraft { draft: Box::new(Draft::default()), replace: None, ticket: 5 },
+                Command::LoadMore { mailbox: "inbox".into() },
+                Command::Search { query: "отчёт".into(), mailbox: None, ticket: 6 },
+                Command::FindMessage { message_id: "m-1@example.test".into(), ticket: 7 },
+                Command::Blob { blob_id: "b-1".into(), name: "photo.png".into(), mime: "image/png".into() },
+                Command::RespondInvite {
+                    invite: Box::new(invitation()),
+                    status: Partstat::Accepted,
+                    in_reply_to: Some("<m-1@example.test>".into()),
+                    answer: crate::invite::Answer { comment: Some("Приду".into()), silent: false },
+                },
+                Command::ImportInvite { invite: Box::new(invitation()) },
+                Command::RemoveInvite { invite: Box::new(invitation()) },
+                Command::Events { from: 1_768_400_000, to: 1_768_900_000 },
+                Command::SearchEvents { text: "планёрка".into(), from: 1_768_400_000, to: 1_768_900_000 },
+                Command::Availability {
+                    ticket: 8,
+                    emails: vec!["anna@example.test".into()],
+                    from: 0,
+                    to: 3600,
+                    sender: Some("me@example.test".into()),
+                },
+                Command::CreateMeeting { meeting: Box::new(meeting()), ticket: 9 },
+                Command::UpdateMeeting { event: Box::new(cal_event()), meeting: Box::new(meeting()), series: true, ticket: 10 },
+                Command::CancelMeeting { event: Box::new(cal_event()), series: false, from: Some("me@example.test".into()), ticket: 11 },
+                Command::ShareFreeBusy { email: "anna@example.test".into(), items: true },
+                Command::CalendarAccess,
+                Command::Publications,
+                Command::Publish { items: false },
+                Command::Unpublish { id: "pub-1".into() },
+                Command::UnshareCalendar { email: "anna@example.test".into() },
+                Command::Settings(settings::Request::SetVacation(crate::model::VacationResponse::default())),
+                Command::Contacts,
+                Command::DirectoryPage { account: Some("@2".into()), offset: 20, max: 100 },
+                Command::FindPeople { text: "анна".into(), offset: 0 },
+                Command::PersonDetails { email: "anna@example.test".into() },
+                Command::ExpandList { ticket: 12, address: "all@example.test".into() },
+                Command::SaveContact {
+                    card: Box::new(ContactCard {
+                        id: String::new(),
+                        name: "Анна".into(),
+                        emails: vec!["anna@example.test".into()],
+                        ..ContactCard::default()
+                    }),
+                    old: None,
+                    book: Some("book-1".into()),
+                    ticket: 13,
+                },
+                Command::DeleteContact { id: "c-1".into(), ticket: 14 },
+                Command::Categories(categories::Request::Load { account: None }),
+                Command::Patch {
+                    patches: vec![lifecycle::Patch { id: "e-1".into(), keywords: vec![(crate::labels::SEEN.into(), true)], mailboxes: Vec::new() }],
+                    archive_name: "Архив".into(),
+                },
+                Command::Newsletters { cutoff: 1_768_000_000, archive_name: "Архив".into() },
+                Command::ReportPhishing {
+                    ids: vec!["e-1".into()],
+                    to: Address::new("Абуз", "abuse@example.test"),
+                    subject: "Фишинг".into(),
+                    text: "Письмо".into(),
+                    ticket: 15,
+                },
+                Command::Reconnect,
+                Command::SyncNow,
+                Command::Tasks(tasks::Request::Save(Box::new(task()))),
+                Command::Delegate { uid: "t-1@postman".into(), drafts: vec![draft()], ticket: 16, release: Release::At(1_768_467_600) },
+                Command::Withhold { scheduled: vec![scheduled()], ticket: 17 },
+                Command::MoveLetters { ids: vec![LetterId(1), LetterId(2)], to: FolderId(3) },
+                Command::FetchRaw { letter: LetterId(4) },
+                Command::Import {
+                    job: JobId(1),
+                    letter: LetterId(2),
+                    folder: FolderId(9),
+                    keywords: vec![crate::labels::SEEN.into()],
+                    received_at: 1_768_000_000,
+                    message_id: Some("<m-1@example.test>".into()),
+                    retry: true,
+                },
+                Command::ServerCopy { job: JobId(1), letters: vec![LetterId(2)], to: FolderId(9) },
+                Command::DestroyLetters { job: JobId(1), account: "@2".into(), letters: vec![LetterId(1)] },
+                Command::Migration(MigrationRequest::Pause { job: JobId(1) }),
+                Command::Sweep { selector: selector(), action: sweep::Action::Purge },
+                Command::StopSweep { sweep: SweepId(7) },
+                Command::ListLetters {
+                    sweep: SweepId(7),
+                    selector: Selector { mailbox: "inbox".into(), filter: None, except: Vec::new() },
+                    position: 0,
+                    limit: 100,
+                },
+                Command::StoreLetters { sweep: SweepId(7), mailbox: "inbox".into(), ids: vec!["e-1".into()] },
+                Command::Export {
+                    scope: export::Scope::Folder { id: FolderId(11), subfolders: true },
+                    format: export::Format::Mbox,
+                    dir: "out".into(),
+                },
+                Command::StopExport { job: export::ExportId(1) },
+                Command::Channel {
+                    account: crate::channel::ChanAccount::new("demo", "me@example.test"),
+                    request: Box::new(crate::channel::Request::Reconnect),
+                },
+            ];
+            assert_eq!(all.iter().map(command_index).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>(), "у каждой команды — образец");
+            all
+        }
+
+        /// Номер варианта `Event` в порядке объявления.
+        fn event_index(e: &Event) -> usize {
+            match e {
+                Event::Status(_) => 0,
+                Event::MailboxesChanged => 1,
+                Event::EmailsChanged => 2,
+                Event::BodyReady(_) => 3,
+                Event::ThreadReady { .. } => 4,
+                Event::BlobReady { .. } => 5,
+                Event::BodiesStored(_) => 6,
+                Event::LoadedMore { .. } => 7,
+                Event::CalendarChanged => 8,
+                Event::SearchResults { .. } => 9,
+                Event::Counts { .. } => 10,
+                Event::BlobFailed { .. } => 11,
+                Event::Me { .. } => 12,
+                Event::Features(_) => 13,
+                Event::Senders(_) => 14,
+                Event::Contacts(_) => 15,
+                Event::Sent { .. } => 16,
+                Event::Unsent { .. } => 17,
+                Event::UnsendFailed { .. } => 18,
+                Event::Scheduled { .. } => 19,
+                Event::DraftSaved { .. } => 20,
+                Event::ComposeFailed { .. } => 21,
+                Event::InviteAnswered { .. } => 22,
+                Event::InviteFailed { .. } => 23,
+                Event::InviteRemoved { .. } => 24,
+                Event::EventsLoaded { .. } => 25,
+                Event::EventsFound { .. } => 26,
+                Event::Availability { .. } => 27,
+                Event::MeetingCreated { .. } => 28,
+                Event::MeetingUpdated { .. } => 29,
+                Event::MeetingCancelled { .. } => 30,
+                Event::MeetingFailed { .. } => 31,
+                Event::CalendarAccess(_) => 32,
+                Event::Publications(_) => 33,
+                Event::Published { .. } => 34,
+                Event::FreeBusyShared { .. } => 35,
+                Event::CalendarFailed(_) => 36,
+                Event::Settings(_) => 37,
+                Event::ContactsLoaded(_) => 38,
+                Event::ContactBooks(_) => 39,
+                Event::DirectoryLoaded(_) => 40,
+                Event::DirectoryPage { .. } => 41,
+                Event::PeopleFound { .. } => 42,
+                Event::PersonDetails { .. } => 43,
+                Event::ListMembers { .. } => 44,
+                Event::ContactSaved { .. } => 45,
+                Event::ContactDeleted { .. } => 46,
+                Event::ContactFailed { .. } => 47,
+                Event::Categories(_) => 48,
+                Event::Tasks(_) => 49,
+                Event::Newsletters { .. } => 50,
+                Event::Connection(_) => 51,
+                Event::SendReceive(_) => 52,
+                Event::Reported { .. } => 53,
+                Event::Delegated { .. } => 54,
+                Event::Withheld { .. } => 55,
+                Event::Raw { .. } => 56,
+                Event::Imported { .. } => 57,
+                Event::ImportFailed { .. } => 58,
+                Event::Destroyed { .. } => 59,
+                Event::DestroyFailed { .. } => 60,
+                Event::SourceKept { .. } => 61,
+                Event::StoreUpgrade { .. } => 62,
+                Event::LettersListed { .. } => 63,
+                Event::LettersStored { .. } => 64,
+                Event::ListFailed { .. } => 65,
+                Event::Sweep(_) => 66,
+                Event::Migration { .. } => 67,
+                Event::Export { .. } => 68,
+                Event::FolderFailed { .. } => 69,
+                Event::Error(_) => 70,
+                Event::Channel(..) => 71,
+            }
+        }
+
+        fn events() -> Vec<Event> {
+            let all = vec![
+                Event::Status(Status::Loading { mailbox: "Входящие".into() }),
+                Event::MailboxesChanged,
+                Event::EmailsChanged,
+                Event::BodyReady("e-1".into()),
+                Event::ThreadReady { thread: "t-1".into(), ids: vec!["e-1".into(), "e-2".into()] },
+                Event::BlobReady { blob_id: "b-1".into(), data: Arc::new(vec![1, 2, 3]) },
+                Event::BodiesStored(vec!["e-1".into()]),
+                Event::LoadedMore { mailbox: "inbox".into(), added: 25 },
+                Event::CalendarChanged,
+                Event::SearchResults { ticket: 1, ids: vec!["e-1".into()], total: 42 },
+                Event::Counts { ticket: 2, counts: Some(vec![1, 2]) },
+                Event::BlobFailed { blob_id: "b-1".into(), error: "gone".into() },
+                Event::Me { address: Address::new("Я", "me@example.test"), signature: "С уважением".into() },
+                Event::Features(crate::model::Features::ALL.with_import(true)),
+                Event::Senders(vec![Sender {
+                    account: Some("shared".into()),
+                    address: Address::new("Я", "me@example.test"),
+                    signature: String::new(),
+                }]),
+                Event::Contacts(vec![("Анна".into(), "anna@example.test".into())]),
+                Event::Sent { ticket: 3, scheduled: Some(scheduled()) },
+                Event::Unsent { ticket: 4, email: "e-1".into() },
+                Event::UnsendFailed { ticket: 5, too_late: true, error: "уже ушло".into() },
+                Event::Scheduled { list: vec![scheduled()], max_delay: 120 },
+                Event::DraftSaved { ticket: 6, id: "d-1".into() },
+                Event::ComposeFailed { ticket: 7, error: "нет темы".into() },
+                Event::InviteAnswered { uid: "u-1".into(), status: Partstat::Tentative, delivery: crate::invite::Delivery::Mail { imported: true } },
+                Event::InviteFailed { uid: "u-1".into(), error: "no calendar".into() },
+                Event::InviteRemoved { uid: "u-1".into(), found: true },
+                Event::EventsLoaded {
+                    from: 1_768_400_000,
+                    to: 1_768_900_000,
+                    events: vec![cal_event()],
+                    colleagues: vec![postman_calendar::Owner { email: "anna@example.test".into(), name: "Анна".into() }],
+                    account: Some("@2".into()),
+                },
+                Event::EventsFound { text: "план".into(), events: Vec::new(), error: Some("down".into()) },
+                Event::Availability {
+                    ticket: 8,
+                    me: vec![Busy { span: postman_calendar::Span::new(0, 3600), kind: postman_calendar::BusyKind::Busy }],
+                    people: vec![("anna@example.test".into(), None)],
+                    notes: vec![(
+                        "anna@example.test".into(),
+                        vec![BusyNote { span: postman_calendar::Span::new(0, 3600), subject: "Занят".into(), location: "каб. 1".into() }],
+                    )],
+                    error: None,
+                },
+                Event::MeetingCreated { ticket: 9, uid: "u-1".into() },
+                Event::MeetingUpdated { ticket: 10, uid: "u-1".into() },
+                Event::MeetingCancelled { ticket: 11, uid: "u-1".into() },
+                Event::MeetingFailed { ticket: 12, error: "no calendar".into() },
+                Event::CalendarAccess(vec![Access { email: "anna@example.test".into(), name: "Анна".into(), items: true }]),
+                Event::Publications(Some(vec![Publication { id: "pub-1".into(), items: false }])),
+                Event::Published { url: "https://example.test/cal/abc".into() },
+                Event::FreeBusyShared { email: "anna@example.test".into() },
+                Event::CalendarFailed("нет календаря".into()),
+                Event::Settings(settings::Reply::Quota(Some(settings::Usage { used: 10, limit: 100 }))),
+                Event::ContactsLoaded(vec![ContactCard { id: "c-1".into(), name: "Анна".into(), ..ContactCard::default() }]),
+                Event::ContactBooks(vec![ContactBook { id: "book-1".into(), name: "Контакты".into(), default: true }]),
+                Event::DirectoryLoaded(vec![Principal { id: "p-1".into(), email: Some("p-1@example.test".into()), ..Principal::default() }]),
+                Event::DirectoryPage { account: None, offset: 20, people: vec![Principal::default()], total: Some(100), search_only: true },
+                Event::PeopleFound { text: "ан".into(), offset: 0, people: Vec::new(), more: true },
+                Event::PersonDetails { email: "p-1@example.test".into(), person: Some(Principal::default()) },
+                Event::ListMembers { ticket: 13, address: "all@example.test".into(), members: Vec::new(), error: Some(ListError::Unsupported) },
+                Event::ContactSaved { ticket: 14, id: "c-1".into() },
+                Event::ContactDeleted { ticket: 15, id: "c-1".into() },
+                Event::ContactFailed { ticket: 0, error: "409".into() },
+                Event::Categories(categories::Reply::Loaded { account: None, table: None }),
+                Event::Tasks(tasks::Reply::Changed(vec![task()])),
+                Event::Newsletters { archived: 12 },
+                Event::Connection(Connection::Offline { retry_in: 5, queued: 1 }),
+                Event::SendReceive(SendReceive::Finished { error: Some("down".into()) }),
+                Event::Reported { ticket: 16, error: None },
+                Event::Delegated { ticket: 17, uid: "t-1@postman".into(), error: None, scheduled: vec![scheduled()] },
+                Event::Withheld { ticket: 18, too_late: false, error: Some("поздно".into()) },
+                Event::Raw { letter: LetterId(4), data: Ok(Arc::new(b"RFC 5322".to_vec())) },
+                Event::Imported { job: JobId(1), letter: LetterId(2), remote: Remote { account: "@2".into(), id: "m-1".into(), data: vec![9] } },
+                Event::ImportFailed { job: JobId(1), letter: LetterId(2), error: ImportError::Throttled { retry_after: 30 } },
+                Event::Destroyed { job: JobId(1), letter: LetterId(1) },
+                Event::DestroyFailed { job: JobId(1), letter: LetterId(1), error: "500".into() },
+                Event::SourceKept { job: JobId(1), letters: 3 },
+                Event::StoreUpgrade { done: 40, total: 50 },
+                Event::LettersListed { sweep: SweepId(7), ids: vec!["e-1".into()], total: 100, end: false },
+                Event::LettersStored { sweep: SweepId(7), gone: vec!["e-9".into()] },
+                Event::ListFailed { sweep: SweepId(7), error: "not supported".into() },
+                Event::Sweep(sweep::Progress {
+                    sweep: SweepId(7),
+                    action: sweep::Action::Purge,
+                    job: None,
+                    done: 10,
+                    total: 100,
+                    state: sweep::State::Working,
+                }),
+                Event::Migration { job: JobId(1), done: 5, total: 10, bytes: 2048, state: MigrationState::Running },
+                Event::Export { job: export::ExportId(1), done: 3, total: 9, bytes: 1024, state: export::State::Running { fetching: 2 } },
+                Event::FolderFailed { mailbox: Some("f-1".into()), error: FOLDER_UNSUPPORTED.into() },
+                Event::Error(SyncError { kind: ErrorKind::Network, stage: Stage::Connect, detail: "down".into() }),
+                Event::Channel(crate::channel::ChanAccount::new("demo", "me@example.test"), crate::channel::Update::SignedOut),
+            ];
+            assert_eq!(all.iter().map(event_index).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>(), "у каждого события — образец");
+            all
+        }
+
+        #[test]
+        fn every_command_and_event_round_trips() {
+            commands().iter().for_each(round);
+            events().iter().for_each(round);
+            // Внутренние формы вариантов: отказ письма целиком, пустые ответы.
+            let more = [
+                Event::Raw { letter: LetterId(5), data: Err("not supported".into()) },
+                Event::Publications(None),
+                Event::Counts { ticket: 9, counts: None },
+                Event::Sent { ticket: 10, scheduled: None },
+                Event::EventsFound { text: String::new(), events: Vec::new(), error: None },
+                Event::ListMembers { ticket: 11, address: String::new(), members: Vec::new(), error: Some(ListError::Failed("500".into())) },
+            ];
+            more.iter().for_each(round);
+            round(&Command::Keyword { id: "e-2".into(), keyword: crate::labels::SEEN, on: false });
+            // Ключевое слово — значением то же слово таблицы ядра (какой копией статической строки его дал
+            // компоновщик — дело платформы, утечки для известных слов нет).
+            let back = postcard::from_bytes::<Command>(
+                &postcard::to_stdvec(&Command::Keyword { id: "e-1".into(), keyword: crate::labels::FLAGGED, on: true }).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(back, Command::Keyword { id: "e-1".into(), keyword: crate::labels::FLAGGED, on: true });
+        }
+
+        /// Вложенные перечисления договора — каждый вариант, без `_`.
+        #[test]
+        fn nested_enums_round_trips() {
+            let statuses = [
+                Status::Connecting { url: "https://example.test".into() },
+                Status::SignedIn { user: "me".into() },
+                Status::Loading { mailbox: "Входящие".into() },
+                Status::Synced,
+            ];
+            let covered = |s: &Status| match s {
+                Status::Connecting { .. } => 0,
+                Status::SignedIn { .. } => 1,
+                Status::Loading { .. } => 2,
+                Status::Synced => 3,
+            };
+            assert_eq!(statuses.iter().map(covered).collect::<Vec<_>>(), (0..statuses.len()).collect::<Vec<_>>());
+            statuses.iter().for_each(round);
+
+            let stages = [Stage::Start, Stage::Connect, Stage::Load, Stage::Refresh, Stage::Prefetch, Stage::Command, Stage::Restore];
+            let covered = |s: &Stage| match s {
+                Stage::Start => 0,
+                Stage::Connect => 1,
+                Stage::Load => 2,
+                Stage::Refresh => 3,
+                Stage::Prefetch => 4,
+                Stage::Command => 5,
+                Stage::Restore => 6,
+            };
+            assert_eq!(stages.iter().map(covered).collect::<Vec<_>>(), (0..stages.len()).collect::<Vec<_>>());
+            stages.iter().for_each(round);
+
+            let kinds = [ErrorKind::Auth, ErrorKind::Network, ErrorKind::Server, ErrorKind::Protocol, ErrorKind::Storage, ErrorKind::Internal];
+            let covered = |k: &ErrorKind| match k {
+                ErrorKind::Auth => 0,
+                ErrorKind::Network => 1,
+                ErrorKind::Server => 2,
+                ErrorKind::Protocol => 3,
+                ErrorKind::Storage => 4,
+                ErrorKind::Internal => 5,
+            };
+            assert_eq!(kinds.iter().map(covered).collect::<Vec<_>>(), (0..kinds.len()).collect::<Vec<_>>());
+            kinds.iter().for_each(round);
+
+            let rounds = [SendReceive::Started, SendReceive::Finished { error: None }, SendReceive::Finished { error: Some("down".into()) }];
+            let covered = |s: &SendReceive| match s {
+                SendReceive::Started => 0,
+                SendReceive::Finished { error: None } => 1,
+                SendReceive::Finished { error: Some(_) } => 2,
+            };
+            assert_eq!(rounds.iter().map(covered).collect::<Vec<_>>(), (0..rounds.len()).collect::<Vec<_>>());
+            rounds.iter().for_each(round);
+
+            let connections = [Connection::Online, Connection::Offline { retry_in: 5, queued: 1 }];
+            let covered = |c: &Connection| match c {
+                Connection::Online => 0,
+                Connection::Offline { .. } => 1,
+            };
+            assert_eq!(connections.iter().map(covered).collect::<Vec<_>>(), (0..connections.len()).collect::<Vec<_>>());
+            connections.iter().for_each(round);
+
+            let errors = [ListError::Unsupported, ListError::Failed("500".into())];
+            let covered = |e: &ListError| match e {
+                ListError::Unsupported => 0,
+                ListError::Failed(_) => 1,
+            };
+            assert_eq!(errors.iter().map(covered).collect::<Vec<_>>(), (0..errors.len()).collect::<Vec<_>>());
+            errors.iter().for_each(round);
+
+            let deliveries =
+                [crate::invite::Delivery::Server, crate::invite::Delivery::Mail { imported: true }, crate::invite::Delivery::Silent { saved: false }];
+            let covered = |d: &crate::invite::Delivery| match d {
+                crate::invite::Delivery::Server => 0,
+                crate::invite::Delivery::Mail { .. } => 1,
+                crate::invite::Delivery::Silent { .. } => 2,
+            };
+            assert_eq!(deliveries.iter().map(covered).collect::<Vec<_>>(), (0..deliveries.len()).collect::<Vec<_>>());
+            deliveries.iter().for_each(round);
+
+            let releases = [Release::Now, Release::After(30), Release::At(1_768_467_600)];
+            let covered = |r: &Release| match r {
+                Release::Now => 0,
+                Release::After(_) => 1,
+                Release::At(_) => 2,
+            };
+            assert_eq!(releases.iter().map(covered).collect::<Vec<_>>(), (0..releases.len()).collect::<Vec<_>>());
+            releases.iter().for_each(round);
+
+            let homes = [Home::Account("@2".into()), Home::Local];
+            let covered = |h: &Home| match h {
+                Home::Account(_) => 0,
+                Home::Local => 1,
+            };
+            assert_eq!(homes.iter().map(covered).collect::<Vec<_>>(), (0..homes.len()).collect::<Vec<_>>());
+            homes.iter().for_each(round);
+
+            let states = [
+                MigrationState::Asking,
+                MigrationState::Running,
+                MigrationState::Paused,
+                MigrationState::QuotaFull,
+                MigrationState::Done,
+                MigrationState::Cancelled,
+            ];
+            let covered = |s: &MigrationState| match s {
+                MigrationState::Asking => 0,
+                MigrationState::Running => 1,
+                MigrationState::Paused => 2,
+                MigrationState::QuotaFull => 3,
+                MigrationState::Done => 4,
+                MigrationState::Cancelled => 5,
+            };
+            assert_eq!(states.iter().map(covered).collect::<Vec<_>>(), (0..states.len()).collect::<Vec<_>>());
+            states.iter().for_each(round);
+
+            let requests = [
+                MigrationRequest::Answer { job: JobId(1), mode: crate::model::MigrationMode::Upload },
+                MigrationRequest::Pause { job: JobId(1) },
+                MigrationRequest::Resume { job: JobId(1) },
+                MigrationRequest::Cancel { job: JobId(1), keep_local: true },
+            ];
+            let covered = |r: &MigrationRequest| match r {
+                MigrationRequest::Answer { .. } => 0,
+                MigrationRequest::Pause { .. } => 1,
+                MigrationRequest::Resume { .. } => 2,
+                MigrationRequest::Cancel { .. } => 3,
+            };
+            assert_eq!(requests.iter().map(covered).collect::<Vec<_>>(), (0..requests.len()).collect::<Vec<_>>());
+            requests.iter().for_each(round);
+
+            let import_errors =
+                [ImportError::TooLarge, ImportError::Quota, ImportError::Throttled { retry_after: 30 }, ImportError::Rejected("550".into())];
+            let covered = |e: &ImportError| match e {
+                ImportError::TooLarge => 0,
+                ImportError::Quota => 1,
+                ImportError::Throttled { .. } => 2,
+                ImportError::Rejected(_) => 3,
+            };
+            assert_eq!(import_errors.iter().map(covered).collect::<Vec<_>>(), (0..import_errors.len()).collect::<Vec<_>>());
+            import_errors.iter().for_each(round);
+
+            [crate::model::Features::ALL, crate::model::Features::NONE, crate::model::Features::NONE.with_import(true).with_server_copy(true)]
+                .iter()
+                .for_each(round);
+            round(&SyncError { kind: ErrorKind::Server, stage: Stage::Command, detail: "serverFail".into() });
+        }
     }
 }

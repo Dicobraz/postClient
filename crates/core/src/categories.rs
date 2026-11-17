@@ -41,6 +41,7 @@ struct TableFile {
 /// Аккаунт — как в кэше: `None` — свой, иначе id общего ящика (он же префикс ключей кэша).
 pub type Scope = Option<String>;
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     /// Перечитать таблицу аккаунта → `Loaded`.
     Load { account: Scope },
@@ -51,7 +52,7 @@ pub enum Request {
     Purge { account: Scope, keyword: String, ticket: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Reply {
     /// Таблица аккаунта на сервере; `None` — файла нет (таблица по умолчанию).
     Loaded {

@@ -341,7 +341,7 @@ pub struct Recipients {
 
 /// Правка письма до ответа сервера (жизненный цикл, S5-04): ключевые слова и папки — поставить (`true`) или
 /// снять; `$seen` и `$flagged` — в свои поля ([`EmailRow::set_keyword`]). Папки — ключи кэша.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Patch {
     pub id: String,
     pub keywords: Vec<(String, bool)>,
