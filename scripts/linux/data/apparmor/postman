@@ -1,7 +1,7 @@
-# Postman (LIN-06): the worker and the viewer create an unprivileged user namespace for their sandbox (ADR 0010,
-# seccomp + Landlock + namespaces). Ubuntu 23.10+ allows it only to binaries with a profile that says "userns".
-# The profiles do not confine anything else (unconfined): the sandbox itself is the worker's. Installed by the deb and
-# rpm (scripts/linux/data/apparmor.sh) only where AppArmor 4 is present.
+# Postman (LIN-06): the worker, the viewer and the plugin set create an unprivileged user namespace for their sandbox
+# (ADR 0010, seccomp + Landlock + namespaces). Ubuntu 23.10+ allows it only to binaries with a profile that says
+# "userns". The profiles do not confine anything else (unconfined): the sandbox itself is the process's. Installed by
+# the deb and rpm (scripts/linux/data/apparmor.sh) only where AppArmor 4 is present.
 abi <abi/4.0>,
 include <tunables/global>
 
@@ -15,4 +15,10 @@ profile postman-viewer /usr/bin/postman-viewer flags=(unconfined) {
   userns,
 
   include if exists <local/postman-viewer>
+}
+
+profile postman-plugins /usr/bin/postman-plugins flags=(unconfined) {
+  userns,
+
+  include if exists <local/postman-plugins>
 }

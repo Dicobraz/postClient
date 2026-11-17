@@ -427,6 +427,7 @@ jobs:
 
       # Подпись (S4-01, решение владельца 1): только если заданы секреты с сертификатом, иначе — уведомление
       # (scripts/windows/sign.ps1). Exe — до архива, MSI — после: хэш winget считается от подписанного MSI.
+      # postman-plugins.exe — набор плагинов (PLG-03, ADR 0013): тот же комплект, одна версия.
       - name: Подпись exe
         if: runner.os == 'Windows'
         shell: pwsh
@@ -435,7 +436,7 @@ jobs:
           PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
           TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
         run: |
-          $exes = "postman.exe", "postman-worker.exe", "postman-viewer.exe" | ForEach-Object { Join-Path "$env:CARGO_TARGET_DIR/release" $_ }
+          $exes = "postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe" | ForEach-Object { Join-Path "$env:CARGO_TARGET_DIR/release" $_ }
           ./scripts/windows/sign.ps1 @exes
 
       - name: Архив

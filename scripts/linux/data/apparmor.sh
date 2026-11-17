@@ -1,8 +1,9 @@
 #!/bin/sh
 # Postman (LIN-06): deb postinst/prerm and rpm %post/%preun (scripts/linux/package.sh). $1 - configure (after install
-# or upgrade), remove (before removal), anything else - nothing. The AppArmor profile (ADR 0010: user namespaces of the
-# worker and the viewer) goes to /etc/apparmor.d only where AppArmor 4 is (abi/4.0; older ones have no userns rule and
-# no restriction). A failed load does not fail the package: the worker then runs without namespaces, as the AppImage.
+# or upgrade), remove (before removal), anything else - nothing. The AppArmor profile (ADR 0010: user namespaces of
+# the worker, the viewer and the plugin set) goes to /etc/apparmor.d only where AppArmor 4 is (abi/4.0; older ones
+# have no userns rule and no restriction). A failed load does not fail the package: the worker then runs without
+# namespaces, as the AppImage.
 set -e
 pm_src=/usr/share/postman/apparmor/postman
 pm_dst=/etc/apparmor.d/postman

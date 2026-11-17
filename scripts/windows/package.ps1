@@ -1,5 +1,7 @@
 # S4-01: the delivery zip postman-<version>-windows-x64.zip: postman.exe, postman-worker.exe, README.txt, install.ps1,
-# postman.portable (the self-update flag) and postman-viewer.exe (S8-24, ADR 0007). WASM viewer modules (viewers/*) are not packaged.
+# postman.portable (the self-update flag), postman-viewer.exe (S8-24, ADR 0007) and postman-plugins.exe (the plugin set,
+# ADR 0013: one common set file - mail and directory together, owner decision 2026-11-16; Telegram and Matrix get their
+# own set files in later waves). WASM viewer modules (viewers/*) are not packaged.
 # The MSI postman-<version>-windows-x64.msi (owner decision 2026-11-07) - the same files without install.ps1, made by
 # postman-pack.exe of the same build (tools/pack); signed afterwards by scripts\windows\sign.ps1 in CI.
 # Takes the exes of a finished release build (cargo build --release --workspace --features postman-worker/viewer);
@@ -38,6 +40,10 @@ Copy-Item -LiteralPath $exe, (Join-Path $release "postman-worker.exe") -Destinat
 $viewer = Join-Path $release "postman-viewer.exe"
 if (-not (Test-Path -LiteralPath $viewer)) { throw "no $viewer - build with --features postman-worker/viewer" }
 Copy-Item -LiteralPath $viewer -Destination $dir
+# The plugin set (PLG-03, ADR 0013): built by the same workspace call; the host looks for it next to postman.exe.
+$plugins = Join-Path $release "postman-plugins.exe"
+if (-not (Test-Path -LiteralPath $plugins)) { throw "no $plugins - build the whole workspace (cargo build --release --workspace)" }
+Copy-Item -LiteralPath $plugins -Destination $dir
 Copy-Item -LiteralPath "$PSScriptRoot\README.txt", "$PSScriptRoot\install.ps1" -Destination $dir
 # Portable flag (self-update, decision 2026-11-11): next to postman.exe the update takes the zip, not the MSI.
 # The MSI lists its files itself (tools/pack ITEMS) and does not install the flag.
