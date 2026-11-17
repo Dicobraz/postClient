@@ -21,8 +21,10 @@
 //! Сторона плагина — [`serve_channel`].
 
 mod serve;
+mod sso;
 
-pub use serve::{on_log, on_stats, serve_channel, settings};
+pub use serve::{SetEntry, on_log, on_stats, serve_channel, set_main, settings};
+pub(crate) use sso::BROWSER_WAIT;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
@@ -39,7 +41,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::{oneshot, watch};
 
 use super::BoxFuture;
-use super::wire::{Ask, Build, Call, FromPlugin, HostHello, Kind, Opened, PluginHello, Reply, Settings, StoreOp, ToPlugin};
+use super::wire::{Ask, Build, Call, FromPlugin, HostHello, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin};
 use crate::channel::{
     AccountId, Address, Answer, AttachmentSource, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelFeatures, ChannelPlugin, ChannelSession,
     ChannelState, ConnectCtx, ConversationId, Cursor, Done, FileMeta, Flow, FlowCtx, FlowKind, MessageId, Page, Participant, PluginStore, Prompt,
@@ -328,7 +330,9 @@ impl Inner {
     }
 
     /// Ждать очереди старта: первый кадр показан, стартов меньше [`MAX_STARTS`], этот плагин — первый в очереди.
-    fn acquire(&self, plugin: &Plugin) {
+    /// Место в очереди живёт и после возврата — до [`Inner::entered`]: запись запуска идёт после слота, и пока
+    /// она не сделана, место держит порядок (следующий не займёт слот раньше — иначе порядок стартов гоняется).
+    fn acquire(&self, plugin: &Plugin) -> u64 {
         let mut gate = lock(&self.gate);
         let seq = gate.next;
         gate.next += 1;
@@ -337,14 +341,18 @@ impl Inner {
         loop {
             let first = gate.queue.iter().min().map(|e| e.1);
             if gate.shown && gate.starting < MAX_STARTS && first == Some(seq) {
-                break;
+                gate.starting += 1;
+                return seq;
             }
             gate = self.opened.wait(gate).unwrap_or_else(PoisonError::into_inner);
         }
+    }
+
+    /// Запуск записан: место в очереди свободно — следующий может брать слот.
+    fn entered(&self, seq: u64) {
+        let mut gate = lock(&self.gate);
         gate.queue.retain(|e| e.1 != seq);
-        gate.starting += 1;
         drop(gate);
-        // Очередь сдвинулась: следующий может стартовать, если есть место.
         self.opened.notify_all();
     }
 
@@ -443,11 +451,13 @@ fn supervise(host: &Inner, plugin: &Plugin) {
     let mut crashes: VecDeque<Instant> = VecDeque::new();
     loop {
         plugin.set(Phase::Waiting);
-        host.acquire(plugin);
+        let seq = host.acquire(plugin);
         plugin.set(Phase::Starting);
         host.launches.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
-        let outcome = match host.launcher.launch(&plugin.row) {
+        let launched = host.launcher.launch(&plugin.row);
+        host.entered(seq);
+        let outcome = match launched {
             Ok(s) => hello(host, plugin, s, started),
             // Файла набора нет (не собран, не установлен): перезапуски не помогут.
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Failed::Build(format!("plugin set {} not found", plugin.row.set))),
@@ -505,6 +515,7 @@ fn hello(host: &Inner, plugin: &Plugin, s: Started, started: Instant) -> Result<
         pending: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
         scopes: Mutex::new(HashMap::new()),
+        sso: Mutex::new(HashMap::new()),
         kill: Mutex::new(kill),
         exit_code: Mutex::new(exit_code),
         background: Mutex::new(background),
@@ -565,6 +576,8 @@ struct Conn {
     sessions: Mutex<HashMap<u64, crate::channel::Incoming>>,
     /// Сессия или вход → кто выполняет вызовы хранилища (задача в потоке учётки, где живёт её `PluginStore`).
     scopes: Mutex<HashMap<u64, UnboundedSender<(CallId, StoreOp)>>>,
+    /// Вход → слушатель возврата SSO из браузера (ADR 0013: слушает ядро, не плагин).
+    sso: Mutex<HashMap<u64, Arc<std::net::TcpListener>>>,
     kill: Mutex<Box<dyn FnMut() + Send>>,
     exit_code: Mutex<Box<dyn FnMut() -> Option<u32> + Send>>,
     background: Mutex<Box<dyn FnMut(bool) -> io::Result<()> + Send>>,
@@ -645,7 +658,12 @@ impl Conn {
                         let _ = self.link.reply(call, &ToPlugin::Stored(Err(ChannelError::Storage("no store for the scope".into()))), &[]);
                     }
                 }
-                Incoming::Message(..) | Incoming::Call(..) | Incoming::Shutdown => {}
+                Incoming::Call(call, FromPlugin::Sso { flow, op }, _) => self.sso(call, flow, op),
+                // Незнакомый вызов — отказом: плагин не виснет до своего предела ожидания.
+                Incoming::Call(call, ..) => {
+                    let _ = self.link.reply(call, &ToPlugin::Stored(Err(ChannelError::Storage("unexpected call".into()))), &[]);
+                }
+                Incoming::Message(..) | Incoming::Shutdown => {}
                 Incoming::Closed => break,
             }
         }
@@ -653,6 +671,7 @@ impl Conn {
         plugin.set(Phase::Down);
         lock(&self.pending).clear();
         lock(&self.scopes).clear();
+        lock(&self.sso).clear();
         for (_, tx) in lock(&self.sessions).drain() {
             let _ = tx.send(ChannelEvent::State(ChannelState::Offline { retry_in: 0 }));
         }
@@ -681,6 +700,38 @@ impl Conn {
                     self.kill();
                 }
                 return;
+            }
+        }
+    }
+
+    /// Услуга SSO (ADR 0013 «Договор»): loopback для возврата браузера слушает ядро. `Listen` — порт сейчас, `Wait` —
+    /// своим потоком (до [`sso::BROWSER_WAIT`]), ответ плагину по обмену; слушатель живёт до конца входа, повтор
+    /// входа ждёт тот же порт.
+    fn sso(self: &Arc<Self>, call: CallId, flow: u64, op: SsoOp) {
+        match op {
+            SsoOp::Listen => {
+                let reply = sso::listen().map(|(l, port)| {
+                    lock(&self.sso).insert(flow, Arc::new(l));
+                    SsoDone::Port(port)
+                });
+                let _ = self.link.reply(call, &ToPlugin::SsoReply(reply.map_err(|e| ChannelError::Storage(format!("loopback: {e}")))), &[]);
+            }
+            SsoOp::Wait => {
+                let Some(listener) = lock(&self.sso).get(&flow).cloned() else {
+                    let _ = self.link.reply(call, &ToPlugin::SsoReply(Err(ChannelError::NotFound)), &[]);
+                    return;
+                };
+                let conn = Arc::clone(self);
+                let spawned = std::thread::Builder::new().name("plugin sso".into()).spawn(move || {
+                    let token = sso::wait_token(&listener);
+                    if let Err(e) = conn.link.reply(call, &ToPlugin::SsoReply(token.map(SsoDone::Token)), &[]) {
+                        tracing::debug!("plugin sso reply: {e}");
+                    }
+                });
+                if let Err(e) = spawned {
+                    tracing::warn!("plugin sso thread: {e}");
+                    let _ = self.link.reply(call, &ToPlugin::SsoReply(Err(ChannelError::Plugin(format!("sso thread: {e}")))), &[]);
+                }
             }
         }
     }
@@ -1069,7 +1120,12 @@ mod tests {
         let started = launcher.started();
         assert_eq!(started.len(), 2, "третий ждёт, пока двое не ответят на Hello: {started:?}");
         assert_eq!(started[0], "c", "первым — плагин активной учётки: {started:?}");
-        assert_eq!(lock(&host.0.gate).queue.len(), 1);
+        // Место второго выходит из очереди сразу после записи его запуска — ждём, пока очередь придёт к одному.
+        let settled = Instant::now() + WAIT;
+        while lock(&host.0.gate).queue.len() != 1 && Instant::now() < settled {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(lock(&host.0.gate).queue.len(), 1, "третий в очереди: {:?}", lock(&host.0.gate).queue);
     }
 
     /// Процесс другой сборки (обновление прервано): отвечает на `Hello` и только.

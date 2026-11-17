@@ -449,7 +449,7 @@ pub(crate) fn flow_thread(
         };
         tokio::task::LocalSet::new().block_on(&rt, async move {
             let store: std::rc::Rc<dyn postman_core::channel::PluginStore> = std::rc::Rc::new(NoStore);
-            let mut flow = match plugin.sign_in(postman_core::channel::FlowCtx { store }).await {
+            let mut flow = match plugin.sign_in(postman_core::channel::FlowCtx { store, sso: None }).await {
                 Ok(f) => f,
                 Err(e) => {
                     let _ = out.unbounded_send(Err(e));

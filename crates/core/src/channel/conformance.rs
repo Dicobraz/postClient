@@ -267,7 +267,7 @@ fn check_id(h: &Harness) -> Check {
 async fn check_sign_in(h: &Harness) -> Check {
     let Some(answers) = &h.sign_in else { return Ok(None) };
     let cache = Cache::open_in_memory().map_err(|e| e.to_string())?;
-    let mut flow = h.plugin.sign_in(FlowCtx { store: store_of(&cache, h) }).await.map_err(|e| format!("sign_in: {e}"))?;
+    let mut flow = h.plugin.sign_in(FlowCtx { store: store_of(&cache, h), sso: None }).await.map_err(|e| format!("sign_in: {e}"))?;
     let mut prompt = flow.step(None).await.map_err(|e| format!("first step: {e}"))?;
     for a in answers {
         if matches!(prompt, Prompt::Done { .. } | Prompt::Finished) {

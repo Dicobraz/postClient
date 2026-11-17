@@ -5,8 +5,9 @@
 //! - Хост → плагин ([`ToPlugin`]): вопрос с ответом по номеру ([`Ask`]: `Hello`, `Open`, вызовы сессии и шаги входа),
 //!   смена настроек, `Close`, `Leave`, ответ на услугу ядра ([`ToPlugin::Stored`]). `Ping` и `Shutdown` — кадры самой
 //!   связи.
-//! - Плагин → хост ([`FromPlugin`]): ответ на вопрос ([`Reply`]), событие учётки ([`FromPlugin::Event`]), услуга ядра —
-//!   вызовом связи ([`FromPlugin::Store`]: `PluginStore` учётки или входа).
+//! - Плагин → хост ([`FromPlugin`]): ответ на вопрос ([`Reply`]), событие учётки ([`FromPlugin::Event`]), услуги ядра —
+//!   вызовом связи ([`FromPlugin::Store`]: `PluginStore` учётки или входа; [`FromPlugin::Sso`]: возврат SSO из браузера
+//!   слушает ядро, песочница плагина входящих не принимает).
 //!
 //! Номер сессии и номер входа выдаёт хост: им же помечены события и вызовы хранилища, хост по ним находит учётку.
 
@@ -98,6 +99,8 @@ pub enum ToPlugin {
     Leave,
     /// Ответ ядра на вызов хранилища ([`FromPlugin::Store`]).
     Stored(Result<Option<Vec<u8>>, ChannelError>),
+    /// Ответ ядра на услугу SSO ([`FromPlugin::Sso`]).
+    SsoReply(Result<SsoDone, ChannelError>),
 }
 
 /// Вопрос хоста.
@@ -156,6 +159,9 @@ pub enum FromPlugin {
     Event { session: u64, event: ChannelEvent },
     /// Услуга ядра — вызовом связи: хранилище сессии или входа `scope`. Ответ — [`ToPlugin::Stored`].
     Store { scope: u64, op: StoreOp },
+    /// Услуга SSO (ADR 0013 «Договор»): возврат из браузера на `127.0.0.1` слушает ядро, песочница плагина входящих
+    /// не принимает. Ответ — [`ToPlugin::SsoReply`].
+    Sso { flow: u64, op: SsoOp },
 }
 
 /// Вызов `PluginStore`.
@@ -164,6 +170,22 @@ pub enum StoreOp {
     Get(String),
     Put(String, Vec<u8>),
     RemovePrefix(String),
+}
+
+/// Шаг услуги SSO у ядра ([`FromPlugin::Sso`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SsoOp {
+    /// Слушать `127.0.0.1:0` для возврата браузера; ответ — порт ([`SsoDone::Port`]).
+    Listen,
+    /// Ждать возврата браузера (`loginToken`); ответ — токен ([`SsoDone::Token`]).
+    Wait,
+}
+
+/// Ответ ядра на услугу SSO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SsoDone {
+    Port(u16),
+    Token(String),
 }
 
 /// Ответ плагина.
@@ -563,6 +585,9 @@ mod tests {
             ToPlugin::CloseFlow { flow: 2 },
             ToPlugin::Leave,
             ToPlugin::Stored(Ok(Some(b"v".to_vec()))),
+            ToPlugin::SsoReply(Ok(SsoDone::Port(7))),
+            ToPlugin::SsoReply(Ok(SsoDone::Token("login-token".into()))),
+            ToPlugin::SsoReply(Err(ChannelError::Denied(crate::channel::matrix::BROWSER_TIMEOUT.into()))),
         ];
         to.iter().for_each(round);
         let covered = |m: &ToPlugin| match m {
@@ -572,6 +597,9 @@ mod tests {
             ToPlugin::CloseFlow { .. } => 3,
             ToPlugin::Leave => 4,
             ToPlugin::Stored(_) => 5,
+            ToPlugin::SsoReply(Ok(SsoDone::Port(_))) => 6,
+            ToPlugin::SsoReply(Ok(SsoDone::Token(_))) => 7,
+            ToPlugin::SsoReply(Err(_)) => 8,
         };
         assert_eq!(to.iter().map(covered).collect::<Vec<_>>(), (1..=to.len()).collect::<Vec<_>>());
         let from = [
@@ -579,12 +607,15 @@ mod tests {
             FromPlugin::Store { scope: 1, op: StoreOp::Get("k".into()) },
             FromPlugin::Store { scope: 1, op: StoreOp::Put("k".into(), b"v".to_vec()) },
             FromPlugin::Store { scope: 1, op: StoreOp::RemovePrefix("state/".into()) },
+            FromPlugin::Sso { flow: 2, op: SsoOp::Listen },
+            FromPlugin::Sso { flow: 2, op: SsoOp::Wait },
         ];
         from.iter().for_each(round);
         let covered = |m: &FromPlugin| match m {
             FromPlugin::Answer { .. } => 0,
             FromPlugin::Event { .. } => 1,
             FromPlugin::Store { .. } => 2,
+            FromPlugin::Sso { .. } => 3,
         };
         assert!(from.iter().map(covered).all(|i| i > 0), "ответы — выше");
     }

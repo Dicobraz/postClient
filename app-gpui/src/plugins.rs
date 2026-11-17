@@ -6,7 +6,8 @@
 //!
 //! Плагины отдельными процессами (ADR 0013): строка плагина ([`ROWS`]) — идентификатор, вид, как узнать свой адрес,
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
-//! по запросу. В этой волне так работает демо-канал; остальные плагины — внутри `postman.exe`, как были.
+//! по запросу. Так работают демо-канал (PLG-02) и Matrix (PLG-04, свой файл набора `postman-plugins-matrix`); остальные
+//! плагины — внутри `postman.exe`, как были.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,8 +25,18 @@ const DEMO: Row = Row {
     profile: Profile::Network { enterprise_auth: false },
 };
 
+/// Matrix (CH-05) — набором `postman-plugins-matrix` (PLG-04, ADR 0013): тяжёлый канал отдельным файлом, решение
+/// владельца 2026-11-16. Включает настройка и политика `AllowChannelMatrix`; файл — компонент установки (PLG-03).
+const MATRIX: Row = Row {
+    id: crate::account_matrix::MATRIX,
+    kind: Kind::Channel,
+    claim: Claim::Channel,
+    set: "postman-plugins-matrix",
+    profile: Profile::Network { enterprise_auth: false },
+};
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX];
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -63,7 +74,7 @@ impl Launcher for Beside {
 }
 
 /// Демо-канал — отдельным процессом: в dev-сборке и в замере с `POSTMAN_BENCH_PLUGINS`; снимки и release без набора в
-/// поставке (PLG-03) — в процессе, как прежде.
+/// поставке (PLG-03) — в процессе, как прежде. У Matrix внутрипроцессного плагина больше нет (PLG-04).
 pub(crate) fn demo_remote(screens: bool) -> bool {
     !screens && (cfg!(debug_assertions) || std::env::var_os(postman_core::bench::PLUGINS_VAR).is_some())
 }
@@ -82,10 +93,9 @@ pub(crate) fn registry() -> &'static Registry {
         // (`account_telegram`), без учётки сети нет.
         #[cfg(feature = "telegram")]
         let r = r.with_channel(postman_backend_telegram::TelegramChannel::new());
-        // Matrix (CH-05) — признаком `matrix`: в dev-сборке всегда, в release — с `matrix-release` (`account_matrix`).
-        #[cfg(all(feature = "matrix", any(debug_assertions, feature = "matrix-release")))]
-        let r = r.with_channel(postman_backend_matrix::MatrixChannel::new());
-        r
+        // Matrix (CH-05, PLG-04) — заместителем набора `postman-plugins-matrix`: процесс — у хоста, после первого
+        // кадра и по запросу; включает настройка и политика (`account_matrix`).
+        r.with_channel(host().channel(MATRIX))
     })
 }
 
@@ -120,20 +130,33 @@ const LEAVE_LIMIT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests {
-    /// Строка корня — та же, что у плагина в наборе: вид, профиль, файл и адреса по мнению самого плагина; у каждого
+    /// Строка корня — та же, что у плагина в его наборе: вид, профиль, файл и адреса по мнению самого плагина; у каждого
     /// плагина набора есть строка.
     #[test]
-    fn rows_match_the_plugin_set() {
+    fn rows_match_the_plugin_sets() {
+        use postman_core::backend::remote::SetEntry;
+        let sets: &[(&str, &[SetEntry])] =
+            &[("postman-plugins", postman_plugins::PLUGINS), ("postman-plugins-matrix", postman_plugins_matrix::PLUGINS)];
         for row in super::ROWS {
-            let entry = postman_plugins::find(row.id).unwrap_or_else(|| panic!("{}: нет в наборе", row.id));
-            assert_eq!(row.set, postman_plugins::SET);
+            let Some((_, plugins)) = sets.iter().find(|(set, _)| *set == row.set) else {
+                panic!("{}: неизвестный файл набора {}", row.id, row.set)
+            };
+            let entry = plugins.iter().find(|e| e.id == row.id).unwrap_or_else(|| panic!("{}: нет в наборе {}", row.id, row.set));
             assert_eq!((row.kind, row.profile), (entry.kind, entry.profile), "{}", row.id);
-            for url in ["postman://demo/me@example.test/c", "postman://telegram/1/c", "imaps://mail.example.test", "https://mail.example.test/"] {
+            for url in [
+                "postman://demo/me@example.test/c",
+                "postman://matrix/@me:example.test/c",
+                "postman://telegram/1/c",
+                "imaps://mail.example.test",
+                "https://mail.example.test/",
+            ] {
                 assert_eq!(row.claims(url), entry.claims(url), "{} {url}", row.id);
             }
         }
-        for e in postman_plugins::PLUGINS {
-            assert!(super::ROWS.iter().any(|r| r.id == e.id), "{}: нет строки в корне", e.id);
+        for (_, plugins) in sets {
+            for e in *plugins {
+                assert!(super::ROWS.iter().any(|r| r.id == e.id), "{}: нет строки в корне", e.id);
+            }
         }
     }
 

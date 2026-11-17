@@ -63,7 +63,7 @@ fn sign_in_errors_and_qr() {
     let cache = Cache::open_in_memory().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt(), async {
-        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache) }).await.unwrap();
+        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache), sso: None }).await.unwrap();
         assert_eq!(flow.step(None).await.unwrap(), Prompt::Phone);
         assert!(matches!(flow.step(Some(Answer::Text("+999 0".into()))).await, Err(ChannelError::Denied(c)) if c == BAD_PHONE));
         assert!(matches!(flow.step(Some(Answer::Text(fake::PHONE.into()))).await.unwrap(), Prompt::Code { length: Some(5), .. }));
@@ -78,7 +78,7 @@ fn sign_in_errors_and_qr() {
         drop(flow);
 
         // QR: ссылка tg://login, срок; не отсканирован — тот же QR; отсканирован — вход.
-        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache) }).await.unwrap();
+        let mut flow = plugin.sign_in(FlowCtx { store: store(&cache), sso: None }).await.unwrap();
         flow.step(None).await.unwrap();
         let Prompt::Qr { url, expires } = flow.step(Some(Answer::Confirm(true))).await.unwrap() else { panic!() };
         assert!(url.starts_with("tg://login?token=") && expires > 0, "{url}");

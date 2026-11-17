@@ -42,7 +42,7 @@ pub mod xref;
 
 pub use plugin::{
     Answer, ByteSink, ByteSource, ChannelPlugin, ChannelSession, CodeVia, ConnectCtx, Flow, FlowCtx, FlowKind, Incoming, LocalStore, MemorySecrets,
-    PluginStore, Prompt, Secrets,
+    PluginStore, Prompt, Secrets, Sso, matrix,
 };
 pub use run::{BATCH_EVENTS, BATCH_MS, HISTORY_PAGE, Render, Request, RunCtx, Start, Update, run, spawn, to_ir, worker_render};
 pub use source::{Chats, ConversationSource, Line, Summary};

@@ -34,6 +34,8 @@ url.workspace = true
 http = "1"
 postman-backend-matrix = { path = ".", features = ["testkit"] }
 postman-cache.workspace = true
+# Связь хост—плагин в тесте договора через обмен (`tests/remote.rs`).
+postman-proc.workspace = true
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "io-util"] }
 
 [lints]
