@@ -67,8 +67,10 @@ manual: yes                 # docs/manual-tests/PLG-06.md: каталог орг
   по обмену в песочнице, работает и на Windows; строка набора; полный поиск с `fake` — кроме Windows: loopback
   AppContainer закрыт, см. карточку PLG-05 п. 8 — проверен на Linux). Подменный сервер LDAP вынесен из unit-тестов
   в `backend-ldap::fake` (признак `testkit`, как `fake` у Telegram) — им пользуются тесты крейта, обмен и процесс.
-- **Слои**: `layers.rs` — `postman-backend-ldap` вне `LINKED_FOR_NOW` (`interface_does_not_link_plugins` проходит);
-  набор и плагин — в своих таблицах как были. Замер — строка №17 в `docs/SIZE.md`.
+- **Слои и замер**: `layers.rs` — `postman-backend-ldap` вне `LINKED_FOR_NOW` (`interface_does_not_link_plugins`
+  проходит); набор и плагин — в своих таблицах как были; `docs/SIZE.md` — строка №17 (Linux x86_64, school-99,
+  release): `postman` — 82,15 → **79,38 МиБ** (вклад выноса каталога относительно после-PLG-05 — −0,61 МиБ), общий
+  набор `postman-plugins` (демо + каталог) 1,21 → **5,54 МиБ** (+4,33 — свой стек TLS у первого протокола набора).
 - Вне `files:` (без них не собирается и не проверяется): `crates/core/src/backend/wire.rs` уже в списке через
   `crates/core/src/backend/*`; `docs/manual-tests/PLG-06.md`, `docs/tasks/PLG-06.md`; `Cargo.lock` — deps LDAP
   (self `testkit`, `postman-proc` в dev, `windows-sys` ушёл из `backend-ldap`).
@@ -87,12 +89,11 @@ manual: yes                 # docs/manual-tests/PLG-06.md: каталог орг
   домена на macOS/Linux резолвит интерфейс (вне песочницы) — без регрессии к PLG-06.
 - Замер памяти живого процесса каталога (`plugins_rss_mb`) — с ручной проверкой; в тестах рабочий набор
   запрашивается сторожем как у всех плагинов.
-- Локальный полный прогон `cargo test` на Windows — диск C исчерпан (0 свободно), `target` локально не держим:
-  школьный прогон Linux полный и зелёный; Windows покрывают сборка `postman-gpui`, 28 тестов `postman-backend-ldap`
-  (до исчерпания диска) и sandbox-тесты из `postman-core`/`postman-proc` — они же в школьном прогоне
-  (`POSTMAN_REQUIRE_FULL_SANDBOX=1`) — а на Windows процесс-тесты `plugins/tests/ldap.rs` и
-  `backend-ldap/tests/remote.rs` зелёные до выноса локального прогона.
-- Windows-урок PLG-05 (отложенная загрузка) не понадобился: дерево зависимостей набора с LDAP не тянет
-  `user32`/`win32k`-библиотеки статически (на Windows процесс-тест зелёный; `windows-sys` из `backend-ldap` ушёл
-  вместе с `DsGetDcNameW` в интерфейс). Если ручная проверка найдёт 0xC0000142 на стенде — `/DELAYLOAD` в
-  `build.rs` набора, как у Telegram.
+- Локальный полный прогон `cargo test` на Windows — диск C исчерпан (0 свободно), локальный `target` не держим.
+  До исчерпания успели: сборка `postman-gpui` (чистая) и 28 тестов `postman-backend-ldap` (unit + обмен) — зелёные;
+  процесс-тест `crates/plugins/tests/ldap.rs` на Windows только скомпилирован (`cargo check --all-targets`), не
+  запущен. Полный Windows-прогон — школьный Linux-прогон (1580/1580, полная песочница) плюс ручная проверка
+  (`docs/manual-tests/PLG-06.md`).
+- Windows-урок PLG-05 (отложенная загрузка) не понадобился: `windows-sys` ушёл из `backend-ldap` вместе с
+  `DsGetDcNameW` (теперь это интерфейс), новых сторонних зависимостей LDAP не добавляет; если ручная проверка на
+  стенде найдёт 0xC0000142 у процесса набора — `/DELAYLOAD` в `build.rs` набора, как у Telegram (PLG-05).
