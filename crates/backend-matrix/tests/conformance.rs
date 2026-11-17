@@ -72,7 +72,10 @@ impl Sso for Loopback {
     fn token<'a>(&'a self) -> BoxFuture<'a, Result<String, ChannelError>> {
         const WAIT: Duration = Duration::from_secs(5);
         const PAGE: &str = "<!doctype html><meta charset=utf-8><title>Postman</title>";
-        let listener = self.0.try_clone().map_err(|e| ChannelError::Storage(e.to_string()));
+        let listener = self.0.try_clone().map_err(|e| ChannelError::Storage(e.to_string())).and_then(|l| {
+            l.set_nonblocking(true).map_err(|e| ChannelError::Storage(e.to_string()))?;
+            Ok(l)
+        });
         Box::pin(async move {
             let listener = tokio::net::TcpListener::from_std(listener?).map_err(|e| ChannelError::Storage(e.to_string()))?;
             let wait = async {
