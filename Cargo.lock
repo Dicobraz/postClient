@@ -7641,6 +7641,7 @@ dependencies = [
  "postman-cache",
  "postman-core",
  "postman-ir",
+ "postman-proc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -7809,7 +7810,6 @@ dependencies = [
  "postman-backend-imap",
  "postman-backend-jmap",
  "postman-backend-ldap",
- "postman-backend-telegram",
  "postman-cache",
  "postman-calendar",
  "postman-compose",
@@ -7891,6 +7891,7 @@ name = "postman-plugins"
 version = "0.1.0-beta.7"
 dependencies = [
  "embed-resource",
+ "postman-backend-telegram",
  "postman-cache",
  "postman-core",
  "postman-demo",
