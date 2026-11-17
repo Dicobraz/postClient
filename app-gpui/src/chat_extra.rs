@@ -66,7 +66,6 @@ pub(crate) fn view(channel: &str, extra: &Extra) -> Option<View> {
     }
     let v = match channel {
         postman_demo::channel::ID => demo(extra)?,
-        #[cfg(feature = "telegram")]
         crate::account_telegram::TELEGRAM => telegram(extra)?,
         _ => return None,
     };
@@ -77,9 +76,8 @@ pub(crate) fn view(channel: &str, extra: &Extra) -> Option<View> {
 pub(crate) fn vote(channel: &str, extra: &Extra, picks: &[usize]) -> Option<Extra> {
     match channel {
         postman_demo::channel::ID => Some(postman_demo::channel::DemoExtra::vote(picks)),
-        #[cfg(feature = "telegram")]
         crate::account_telegram::TELEGRAM => {
-            use postman_backend_telegram::extra::{TgAct, TgExtra};
+            use postman_core::channel::telegram::{TgAct, TgExtra};
             let poll = TgExtra::parse(extra)?.poll?;
             let answers: Vec<_> = picks.iter().filter_map(|i| poll.answers.get(*i)).collect();
             (answers.len() == picks.len()).then(|| TgAct::vote(&answers))
@@ -121,9 +119,10 @@ fn demo(extra: &Extra) -> Option<View> {
     Some(View { rows: buttons.chunks(2).map(<[Button]>::to_vec).collect(), poll })
 }
 
-#[cfg(feature = "telegram")]
+/// Довесок Telegram: формат — в ядре (`postman_core::channel::telegram`, PLG-05), интерфейс от крейта плагина
+/// не зависит.
 fn telegram(extra: &Extra) -> Option<View> {
-    use postman_backend_telegram::extra::{ButtonAction, TgAct, TgExtra};
+    use postman_core::channel::telegram::{ButtonAction, TgAct, TgExtra};
     let e = TgExtra::parse(extra)?;
     // Кнопки под сообщением, которые канал выполнит: ответ боту (без пароля) и ссылки. Клавиатура вместо обычной,
     // мини-приложения, игры и оплата — не из Postman.
@@ -208,10 +207,9 @@ mod tests {
 
     /// Telegram: под сообщением — только кнопки, которые канал выполнит (ответ боту без пароля, ссылка); голос —
     /// вариантами сервера.
-    #[cfg(feature = "telegram")]
     #[test]
     fn telegram_extra_keeps_only_pressable_buttons() {
-        use postman_backend_telegram::extra::{Button, ButtonAction, Keyboard, Poll, PollAnswer, TgAct, TgExtra};
+        use postman_core::channel::telegram::{Button, ButtonAction, Keyboard, Poll, PollAnswer, TgAct, TgExtra};
         let button = |text: &str, action| Button { text: text.into(), action };
         let keyboard = Keyboard {
             inline: true,

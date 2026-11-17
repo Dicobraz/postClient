@@ -3,18 +3,23 @@
 //! поток обновлений, история, поиск, действия, файлы (`session`), перевод TL ↔ общая модель ([`convert`],
 //! [`text`]). Хранение, поиск, уведомления — у ядра.
 //!
+//! Отдельным процессом (PLG-05, ADR 0013): набор `postman-plugins-telegram --plugin=telegram`, точка входа —
+//! [`serve`]; из `postman.exe` канал ушёл, в реестре — заместитель. Хранилище — услугой ядра по обмену.
+//!
 //! - **Ключ приложения** (`api_id`/`api_hash`) — при сборке из переменных окружения `POSTMAN_TG_API_ID`,
-//!   `POSTMAN_TG_API_HASH` (секреты CI); в репозитории его нет. Без ключа канал в сборке есть, а вход и подключение
+//!   `POSTMAN_TG_API_HASH` (секреты CI); в репозитории его нет, на диск не пишется. Есть ли он — плагин сообщает
+//!   в `Hello` (интерфейс у `api_key` не зовёт, PLG-05). Без ключа канал в сборке есть, а вход и подключение
 //!   отвечают `ChannelError::Denied(`[`NO_API_KEY`]`)` — интерфейс говорит «нет ключа приложения».
 //! - **Сеть** — только по действию пользователя (вход) и для учёток, которые он добавил; ни телеметрии, ни
 //!   запросов при старте без учётки.
 //! - **Тесты без сети**: подставной сервер `fake` (признак `testkit`) отвечает теми же байтами TL; канал проходит
-//!   `postman_core::channel::conformance` (`tests/conformance.rs`).
+//!   `postman_core::channel::conformance` (`tests/conformance.rs`) и те же проверки через обмен (`tests/remote.rs`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use postman_core::backend::BoxFuture;
+use postman_core::backend::remote::{PluginLink, serve_channel};
 use postman_core::channel::{
     AccountId, Address, ChannelError, ChannelFeatures, ChannelId, ChannelPlugin, ChannelSession, ConnectCtx, ConversationId, E2e, Flow, FlowCtx,
     Limit, Participant, Reactions,
@@ -47,14 +52,15 @@ pub const MAX_FILE: u64 = 2000 * 1024 * 1024;
 /// Папка архива Telegram (`folder_id = 1`); название даёт интерфейс.
 pub const ARCHIVE: &str = "archive";
 
-/// Коды отказов входа и подключения в `ChannelError::Denied` — интерфейс переводит их в слова (Fluent).
-pub const NO_API_KEY: &str = "no-api-key";
-pub const BAD_PHONE: &str = "phone-invalid";
-pub const BAD_CODE: &str = "code-invalid";
-pub const CODE_EXPIRED: &str = "code-expired";
-pub const BAD_PASSWORD: &str = "password-invalid";
-/// Номер не зарегистрирован: регистрация — в официальном приложении.
-pub const SIGN_UP: &str = "sign-up-required";
+/// Коды отказов входа и подключения в `ChannelError::Denied` — в ядре (`postman_core::channel::telegram`, PLG-05):
+/// слова интерфейса (Fluent) и коды плагина — одни и те же, интерфейс от крейта плагина не зависит.
+pub use postman_core::channel::telegram::{BAD_CODE, BAD_PASSWORD, BAD_PHONE, CODE_EXPIRED, NO_API_KEY, SIGN_UP};
+
+/// Точка входа процесса набора `postman-plugins-telegram --plugin=telegram` (ADR 0013, PLG-05): канал отвечает хосту за себя,
+/// наличие ключа приложения сообщает в `Hello`; клиент и рантайм — при первом настоящем вопросе.
+pub fn serve(link: PluginLink) -> i32 {
+    serve_channel(link, ID, api_key().is_some(), || Arc::new(TelegramChannel::new()))
+}
 
 /// Ключ приложения из сборки; нет — `None`.
 pub fn api_key() -> Option<(i32, String)> {

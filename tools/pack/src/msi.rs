@@ -44,11 +44,12 @@ struct Item {
     file_name: &'static str,
 }
 
-const ITEMS: [Item; 5] = [
+const ITEMS: [Item; 6] = [
     Item { key: "postman.exe", name: "postman.exe", file_name: "postman.exe" },
     Item { key: "worker.exe", name: "postman-worker.exe", file_name: "POSTMA~1.EXE|postman-worker.exe" },
     Item { key: "viewer.exe", name: "postman-viewer.exe", file_name: "POSTMA~2.EXE|postman-viewer.exe" },
     Item { key: "plugins.exe", name: "postman-plugins.exe", file_name: "POSTMA~3.EXE|postman-plugins.exe" },
+    Item { key: "plugins_telegram.exe", name: "postman-plugins-telegram.exe", file_name: "POSTMA~4.EXE|postman-plugins-telegram.exe" },
     Item { key: "README.txt", name: "README.txt", file_name: "README.txt" },
 ];
 
@@ -424,7 +425,7 @@ mod tests {
     }
 
     fn kit(dir: &Path, v: (u32, u32, u32)) {
-        for name in ["postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe"] {
+        for name in ["postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe", "postman-plugins-telegram.exe"] {
             fs::write(dir.join(name), fake_exe(v)).unwrap();
         }
         fs::write(dir.join("README.txt"), "Postman\r\n").unwrap();
@@ -451,7 +452,7 @@ mod tests {
         assert_eq!(property(&mut p, "UpgradeCode"), UPGRADE_CODE);
         assert_eq!(property(&mut p, "ALLUSERS"), "1");
         let names: Vec<String> = p.select_rows(Select::table("File")).unwrap().map(|r| r[2].as_str().unwrap().to_owned()).collect();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"POSTMA~1.EXE|postman-worker.exe".to_owned()), "{names:?}");
         assert!(names.contains(&"POSTMA~3.EXE|postman-plugins.exe".to_owned()), "{names:?}");
         assert!(p.has_stream(CABINET));
@@ -501,7 +502,7 @@ mod tests {
         let status =
             std::process::Command::new("msiexec.exe").arg("/a").arg(&out).arg("/qn").arg(format!("TARGETDIR={}", target.display())).status().unwrap();
         assert!(status.success(), "msiexec /a: {status}");
-        for name in ["postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe", "README.txt"] {
+        for name in ["postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe", "postman-plugins-telegram.exe", "README.txt"] {
             assert!(target.join("Postman").join(name).is_file(), "{name}");
         }
         assert_eq!(fs::read_to_string(target.join("Postman/README.txt")).unwrap(), "Postman\r\n");

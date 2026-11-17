@@ -312,6 +312,7 @@ impl Inner {
                 row,
                 phase: watch::channel(Phase::Idle).0,
                 priority: Mutex::new(Priority::default()),
+                key: Mutex::new(None),
                 supervised: AtomicBool::new(false),
                 retry: Mutex::new(false),
                 retried: Condvar::new(),
@@ -386,6 +387,8 @@ struct Plugin {
     row: Row,
     phase: watch::Sender<Phase>,
     priority: Mutex<Priority>,
+    /// Ключ приложения в сборке плагина — из его `Hello` (Telegram, PLG-05); `None` — процесса ещё не было.
+    key: Mutex<Option<bool>>,
     /// Фоновый поток плагина уже есть.
     supervised: AtomicBool,
     retry: Mutex<bool>,
@@ -547,6 +550,8 @@ fn hello(host: &Inner, plugin: &Plugin, s: Started, started: Instant) -> Result<
             theirs.id, theirs.kind, theirs.build, plugin.row.id, plugin.row.kind, ours
         )));
     }
+    // Наличие ключа приложения — факт сборки плагина (PLG-05): помним и между перезапусками процесса.
+    *lock(&plugin.key) = Some(theirs.key);
     let mut m = metrics_lock();
     m.start.get_or_insert(started.elapsed());
     drop(m);
@@ -799,6 +804,12 @@ impl RemoteChannel {
             Phase::Ready(c) if !c.link.is_closed() => Some(Arc::clone(c)),
             _ => None,
         }
+    }
+
+    /// Ключ приложения в сборке плагина есть — из его `Hello` (PLG-05, ADR 0013: ключ — у плагина, интерфейсу — факт
+    /// наличия). Процесс ещё не поднимался — не знаем: показываем вход (`true`), отказ «нет ключа» вернёт сам плагин.
+    pub fn has_key(&self) -> bool {
+        lock(&self.plugin.key).unwrap_or(true)
     }
 }
 
@@ -1142,7 +1153,7 @@ mod tests {
                 let link: PluginLink = Link::new(plugin_in, plugin_out, MAX_BIN).unwrap();
                 while let Incoming::Message(ToPlugin::Ask { id: n, ask: Ask::Hello(_) }, _) = link.recv() {
                     let build = Build { build: "other".into(), ..Build::current() };
-                    let reply = Reply::Hello(PluginHello { build, id: id.into(), kind: Kind::Channel });
+                    let reply = Reply::Hello(PluginHello { build, id: id.into(), kind: Kind::Channel, key: false });
                     link.send(&FromPlugin::Answer { id: n, reply }, &[]).unwrap();
                 }
             });

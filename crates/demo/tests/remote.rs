@@ -29,7 +29,7 @@ impl Launcher for InThread {
         let server = self.0.clone();
         std::thread::spawn(move || {
             let link = Link::new(plugin_in, plugin_out, postman_core::backend::remote::MAX_BIN).unwrap();
-            postman_core::backend::remote::serve_channel(link, ID, move || Arc::new(DemoChannel::new(server)))
+            postman_core::backend::remote::serve_channel(link, ID, false, move || Arc::new(DemoChannel::new(server)))
         });
         Ok(Started {
             link: Link::new(from_plugin, to_plugin, postman_core::backend::remote::MAX_BIN)?,

@@ -24,8 +24,9 @@ manual: yes                 # docs/manual-tests/PLG-04.md
 хуже прежнего.
 
 ## Сделано
-- **Свой файл набора** (решение владельца 2026-11-16: почта+каталог+Telegram — общий `postman-plugins`, Matrix ~16 МиБ —
-  отдельный): крейт `crates/plugins-matrix`, исполняемый файл `postman-plugins-matrix --plugin=matrix`, свой вход в
+- **Свой файл набора** (решение владельца 2026-11-16: общий `postman-plugins` — почта и каталог вместе, Matrix и
+  Telegram — каждый своим файлом; правка цитаты — PLG-05): крейт `crates/plugins-matrix`, исполняемый файл
+  `postman-plugins-matrix --plugin=matrix`, свой вход в
   реестре набора (`postman_plugins_matrix::{PLUGINS, find}`). Запуск, песочница, сторож и связь — общий
   `set_main` в `postman_core::backend::remote` (общий `main` файла набора); журнал строками с уровнем — в каждом
   файле набора, предел кучи macOS — там же.
