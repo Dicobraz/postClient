@@ -3,10 +3,11 @@
 #   postman-<version>-linux-x64.AppImage - one file for any distribution (the self-update replaces it);
 #   postman-<version>-linux-x64.deb      - Debian, Ubuntu and derivatives;
 #   postman-<version>-linux-x64.rpm      - Fedora, openSUSE, RHEL and derivatives.
-# Each holds postman, postman-worker and postman-viewer side by side (the worker looks for them next to postman),
-# postman.desktop (the mailto scheme), hicolor icons from app-gpui/res/postman.ico. deb and rpm also hold an AppArmor
-# profile for the worker and the viewer (data/apparmor/postman): Ubuntu 23.10+ forbids unprivileged user namespaces,
-# and without them the worker sandbox runs without namespaces (ADR 0010, mode optional). The profile goes to
+# Each holds postman, postman-worker, postman-viewer and postman-plugins (the plugin set, ADR 0013) side by side
+# (the worker and the plugin host look for them next to postman), postman.desktop (the mailto scheme), hicolor icons
+# from app-gpui/res/postman.ico. deb and rpm also hold an AppArmor profile for the worker, the viewer and the plugin
+# set (data/apparmor/postman): Ubuntu 23.10+ forbids unprivileged user namespaces, and without them the worker
+# sandbox runs without namespaces (ADR 0010, mode optional). The profile goes to
 # /etc/apparmor.d only where AppArmor 4 is installed; the AppImage has none - the sandbox diagnostics show it.
 # Glibc: the binaries take the glibc of the build host - CI builds in an old container (ci.yml, job release); the
 # minimum version goes into the package dependencies by itself (the newest GLIBC_x.y symbol the binaries use).
@@ -38,7 +39,7 @@ mkdir -p "$out"
 target="$(cd "$target" && pwd)"
 out="$(cd "$out" && pwd)"
 bin="$target/$profile"
-bins=(postman postman-worker postman-viewer)
+bins=(postman postman-worker postman-viewer postman-plugins)
 for b in "${bins[@]}"; do
   if [ ! -x "$bin/$b" ]; then
     echo "no $bin/$b - run cargo build --$profile --workspace --features postman-worker/viewer first" >&2
@@ -172,6 +173,7 @@ mkdir -p "$rpmtop/SPECS" "$rpmtop/RPMS"
   echo "/usr/bin/postman"
   echo "/usr/bin/postman-worker"
   echo "/usr/bin/postman-viewer"
+  echo "/usr/bin/postman-plugins"
   echo "/usr/share/applications/postman.desktop"
   echo "/usr/share/icons/hicolor/*/apps/postman.png"
   echo "/usr/share/postman"

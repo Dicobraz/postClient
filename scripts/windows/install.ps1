@@ -20,8 +20,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 # postman-viewer.exe (viewer host, ADR 0007) is optional: copied and removed when present.
+# postman-plugins.exe (the plugin set, ADR 0013) lies next to postman.exe like the worker.
 # postman.portable: the self-update flag - this copy is updated from the zip, not from the MSI.
-$Files = "postman.exe", "postman-worker.exe", "postman-viewer.exe", "README.txt", "install.ps1", "postman.portable"
+$Files = "postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe", "README.txt", "install.ps1", "postman.portable"
 $Shortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "Postman.lnk"
 $EventKey = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\Postman"
 # The .NET message file holds "%1" for every event id: the log shows our text as is (pets-shell writes id 1000).
@@ -38,7 +39,7 @@ function Full([string]$path) {
 
 # Postman started from this directory locks its files.
 function Assert-NotRunning([string]$dir) {
-  $running = Get-Process -Name "postman", "postman-worker", "postman-viewer" -ErrorAction SilentlyContinue |
+  $running = Get-Process -Name "postman", "postman-worker", "postman-viewer", "postman-plugins" -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and (Full (Split-Path -Parent $_.Path)) -ieq $dir }
   if ($running) { throw "Postman is running from $dir - close it and run the script again" }
 }
@@ -70,11 +71,12 @@ if ($Uninstall) {
   Assert-NotRunning $dest
   $link = Get-OurShortcut $dest
   if ($link) { Remove-Item -LiteralPath $link -Force; "shortcut: removed" }
-  # The worker's AppContainer profile (PAR-05): removed by the worker itself; a failure does not stop the removal.
+  # The AppContainer profiles of the sandbox (PAR-05): the worker removes its own and the plugin set's network
+  # profile Postman.Plugins (ADR 0013); a failure does not stop the removal.
   $worker = Join-Path $dest "postman-worker.exe"
   if (Test-Path -LiteralPath $worker) {
     & $worker --remove-appcontainer
-    if ($LASTEXITCODE) { "kept: AppContainer profile Postman.MailWorker (worker exit $LASTEXITCODE)" } else { "AppContainer profile: removed" }
+    if ($LASTEXITCODE) { "kept: AppContainer profiles Postman.MailWorker, Postman.Plugins (worker exit $LASTEXITCODE)" } else { "AppContainer profiles: removed" }
   }
   foreach ($f in $Files) {
     $p = Join-Path $dest $f
