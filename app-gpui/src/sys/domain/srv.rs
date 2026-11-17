@@ -1,6 +1,7 @@
-//! Контроллер домена по DNS (macOS, MAC-05; Linux, LIN-05; на Windows — `DsGetDcNameW`): домен — область (realm) билета Kerberos
+//! Контроллер домена по DNS (macOS, MAC-05; Linux, LIN-05): домен — область (realm) билета Kerberos
 //! пользователя, контроллеры — записи SRV `_ldap._tcp.dc._msdcs.<домен>` (RFC 2782, как ищет их Windows). Здесь —
-//! разбор ответа и выбор; запрос DNS и билет — в `sys`. Ответ DNS — чужие данные: разбор без паник.
+//! разбор ответа и выбор; запрос DNS и билет — в `macos.rs` и `linux.rs`. Ответ DNS — чужие данные: разбор без
+//! паник.
 
 /// Запись SRV (RFC 2782).
 #[derive(Debug, PartialEq, Eq)]

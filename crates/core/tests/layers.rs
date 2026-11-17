@@ -46,8 +46,9 @@ const LAYERS: &[(&str, u8)] = &[
     ("postman-backend-telegram", L2B),
     // Канал Matrix (ADR 0012 п. 12, CH-05): плагин канала бесед, Client-Server API и шифрование — matrix-sdk.
     ("postman-backend-matrix", L2B),
-    // Наборы плагинов отдельными процессами (ADR 0013): общий `postman-plugins` (PLG-02); Matrix (PLG-04) и
-    // Telegram (PLG-05) — каждый своим файлом набора (решение владельца 2026-11-16): `--plugin=<id>`.
+    // Наборы плагинов отдельными процессами (ADR 0013): общий `postman-plugins` — демо-канал (PLG-02) и каталог
+    // (PLG-06); Matrix (PLG-04) и Telegram (PLG-05) — каждый своим файлом набора (решение владельца 2026-11-16):
+    // `--plugin=<id>`.
     ("postman-plugins", L3P),
     ("postman-plugins-matrix", L3P),
     ("postman-plugins-telegram", L3P),
@@ -83,9 +84,8 @@ const SETS: &[&str] = &["postman-plugins", "postman-plugins-matrix", "postman-pl
 const UI: &str = "postman-gpui";
 
 /// Плагины, которые интерфейс пока линкует сам (ADR 0013, переходный период): вынесенный в набор плагин уходит отсюда,
-/// к PLG-11 список пуст. Matrix — PLG-04, Telegram — PLG-05 (каждый своим файлом набора).
-const LINKED_FOR_NOW: &[&str] =
-    &["postman-backend-jmap", "postman-backend-imap", "postman-backend-dav", "postman-backend-ews", "postman-backend-ldap"];
+/// к PLG-11 список пуст. Matrix — PLG-04 и Telegram — PLG-05 (каждый своим файлом набора), каталог — PLG-06 (общий).
+const LINKED_FOR_NOW: &[&str] = &["postman-backend-jmap", "postman-backend-imap", "postman-backend-dav", "postman-backend-ews"];
 /// Выгрузка в файлы (S8): из байтов письма и свойств MAPI. От неё зависят `core` и `worker` (свойства MAPI заполняет
 /// воркер, S8-29), сама — ни от них, ни от протоколов.
 const EXPORT: &str = "postman-export";

@@ -10,12 +10,15 @@ name = "postman-plugins"
 path = "src/main.rs"
 
 [dependencies]
-# Договор, сторона плагина (`backend::remote::serve_channel`) и сообщения обмена.
+# Договор, сторона плагина (`backend::remote::serve_channel` и `serve_directory`) и сообщения обмена.
 postman-core.workspace = true
 # Запирание песочницы, сторож смерти хоста, связь — общий механизм процессов.
 postman-proc.workspace = true
 # Демо-канал — первый плагин отдельным процессом (PLG-02): без сети, для тестов и замера.
 postman-demo.workspace = true
+# Каталог сертификатов адресатов (S5-12 Ф5, PLG-06): общий файл — почта и каталог вместе (решение владельца
+# 2026-11-16). Контроллер домена резолвит хост (функция ОС в интерфейсе), сервер приносит запрос.
+postman-backend-ldap.workspace = true
 tracing = "0.1"
 # Журнал процесса — строками с уровнем в stderr (хост пишет их в журнал приложения); уровень — из `Hello` и смены
 # настройки (`reload`). Та же копия, что у pets-shell.
@@ -31,4 +34,6 @@ embed-resource = "3"
 [dev-dependencies]
 # Хранилище хоста в тесте процесса (`tests/process.rs`): состояние плагина — в базе хоста, не в файлах процесса.
 postman-cache.workspace = true
+# Подставной сервер LDAP для теста каталога настоящим процессом (`tests/ldap.rs`).
+postman-backend-ldap = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", default-features = false, features = ["rt", "time", "sync", "macros"] }

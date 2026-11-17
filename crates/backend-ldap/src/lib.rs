@@ -1,14 +1,16 @@
 //! Каталог Active Directory — плагин ядра (ADR 0004; S5-12 Ф5, решение владельца №12,
-//! `docs/decisions/2026-11-02-ldap-active-directory.md`): сертификаты адресатов для «Конфиденциально».
+//! `docs/decisions/2026-11-02-ldap-active-directory.md`): сертификаты адресатов для «Конфиденциально». Работает
+//! процессом набора (`postman-plugins --plugin=ldap`, PLG-06, ADR 0013): запрос и настройки приходят по обмену
+//! ([`serve`]), ответ — DER как есть.
 //!
-//! Где каталог: контроллер домена компьютера — службой Windows (`DsGetDcNameW`, `sys.rs`; на macOS — DNS SRV по
-//! области билета Kerberos, `srv.rs`), база поиска —
-//! `defaultNamingContext` из rootDSE (AD, 389 DS — ALD Pro, FreeIPA), иначе первый раздел данных из `namingContexts`
-//! (OpenLDAP); компьютер вне домена — сервер и база из настроек. Вход — учётной записью Windows (SASL GSSAPI,
-//! Kerberos через SSPI): по `ldap://` — с шифрованием Kerberos, по TLS — с привязкой к каналу. Простой вход (имя и
-//! пароль, в том числе служебная учётная запись LDAP-шлюза authentik) — только по TLS: `ldaps://` или StartTLS.
-//! На macOS вход учётной записью — свой SASL GSSAPI поверх GSS.framework (`kerberos.rs`), остальное — общее. На
-//! Linux — SASL GSSAPI `ldap3` (MIT Kerberos, билет `kinit` или SSSD), контроллер домена — DNS SRV, как на macOS.
+//! Сервер приносит запрос: контроллер домена компьютера — функция ОС в интерфейсе (`app-gpui/src/sys`, решение №12):
+//! службой Windows (`DsGetDcNameW`) или DNS SRV по области билета Kerberos — процессу песочницы файлы и билет не
+//! нужны. База поиска — `defaultNamingContext` из rootDSE (AD, 389 DS — ALD Pro, FreeIPA), иначе первый раздел
+//! данных из `namingContexts` (OpenLDAP); сервера нет — «каталог не настроен». Вход — учётной записью Windows (SASL
+//! GSSAPI, Kerberos через SSPI): по `ldap://` — с шифрованием Kerberos, по TLS — с привязкой к каналу. Простой вход
+//! (имя и пароль, в том числе служебная учётная запись LDAP-шлюза authentik) — только по TLS: `ldaps://` или
+//! StartTLS; пароль передаёт ядро. На macOS вход учётной записью — свой SASL GSSAPI поверх GSS.framework
+//! (`kerberos.rs`), остальное — общее. На Linux — SASL GSSAPI `ldap3` (MIT Kerberos, билет `kinit` или SSSD).
 //! Без входа — каталог, открытый на чтение (частая настройка OpenLDAP). TLS — с проверкой сертификата Windows.
 //!
 //! Поиск — по `mail` и `proxyAddresses` (`smtp:`), атрибут `userCertificate` (у каталогов по RFC 4523 — с
@@ -16,10 +18,12 @@
 //! его ядро (`postman_core::smime::directory`). `userSMIMECertificate` (PKCS#7) — тоже как есть: сертификаты из него
 //! достаёт воркер.
 
+/// Подменный сервер LDAP для тестов обмена (признак `testkit`), как `fake` у Telegram: в тестах этого крейта,
+/// через обмен (`tests/remote.rs`) и у настоящего процесса набора (`crates/plugins/tests/ldap.rs`).
+#[cfg(any(test, feature = "testkit"))]
+pub mod fake;
 #[cfg(any(target_os = "macos", test))]
 mod kerberos;
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-mod srv;
 mod sys;
 #[cfg(test)]
 mod tests;
@@ -28,8 +32,37 @@ use std::sync::Arc;
 
 use ldap3::asn1::StructureTag;
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, LdapError, Scope, SearchOptions, ldap_escape};
+use postman_core::backend::remote::{PluginLink, serve_directory};
+use postman_core::backend::wire::{DirectoryLogin as QueryLogin, DirectoryQuery};
 use postman_core::smime::directory::{Directory, DirectoryError, TIMEOUT};
 pub use zeroize::Zeroizing;
+
+/// Идентификатор плагина каталога в наборе (`postman-plugins`, PLG-06); тот же в строке композиционного корня
+/// (`app-gpui/src/plugins.rs`) — совпадение сверяет тест корня.
+pub const ID: &str = "ldap";
+
+/// Настройки каталога из запроса ([`DirectoryQuery`]): пароль простого входа ядро передаёт байтами — здесь
+/// нулится при выходе, как и в [`Login::Simple`].
+fn settings(query: &DirectoryQuery) -> Settings {
+    Settings {
+        server: query.server.clone(),
+        base_dn: query.base_dn.clone(),
+        starttls: query.starttls,
+        login: match &query.login {
+            QueryLogin::Windows => Login::Windows,
+            QueryLogin::Anonymous => Login::Anonymous,
+            QueryLogin::Password { user, password } => {
+                Login::Simple { user: user.clone(), password: Zeroizing::new(String::from_utf8_lossy(password.expose()).into_owned()) }
+            }
+        },
+    }
+}
+
+/// Точка входа процесса набора (ADR 0013, PLG-06): `postman-plugins --plugin=ldap`. Настройки — с каждым запросом
+/// («Настройки → Безопасность»), журнал и песочница — [`set_main`](postman_core::backend::remote::set_main) набора.
+pub fn serve(link: PluginLink) -> i32 {
+    serve_directory(link, ID, |q| Arc::new(LdapDirectory::new(settings(q))))
+}
 
 /// Атрибуты сертификата: у AD — `userCertificate`, у каталогов по RFC 4523 — с `;binary`; `userSMIMECertificate`
 /// (RFC 2798) — PKCS#7 с сертификатами, их достаёт воркер (S5-12.5в).
@@ -77,11 +110,10 @@ impl LdapDirectory {
 
 impl Directory for LdapDirectory {
     fn certificates(&self, addresses: &[String]) -> Result<Vec<Vec<u8>>, DirectoryError> {
-        // Контроллер домена — блокирующий вызов Windows: ядро ждёт весь вызов в своём потоке не дольше TIMEOUT.
-        let target = match self.settings.server.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => Target::parse(s)?,
-            None => Target::parse(&sys::domain_controller().ok_or(DirectoryError::NotConfigured)?)?,
-        };
+        // Сервер приносит запрос (хост резолвит контроллер домена — функция ОС в интерфейсе, ADR 0013); поиск —
+        // не дольше TIMEOUT: ядро ждёт весь вызов в своём потоке.
+        let server = self.settings.server.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or(DirectoryError::NotConfigured)?;
+        let target = Target::parse(server)?;
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| DirectoryError::Unavailable(e.to_string()))?;
         rt.block_on(async {
             match tokio::time::timeout(TIMEOUT, search(&self.settings, &target, addresses)).await {
@@ -90,11 +122,6 @@ impl Directory for LdapDirectory {
             }
         })
     }
-}
-
-/// Контроллер домена компьютера (`DsGetDcNameW`; на macOS — DNS SRV) — для подсказки в настройках; блокирует поток.
-pub fn domain_controller() -> Option<String> {
-    sys::domain_controller()
 }
 
 /// Куда подключаться: адрес для `ldap3` и имя узла (SPN Kerberos — `ldap/<узел>`).

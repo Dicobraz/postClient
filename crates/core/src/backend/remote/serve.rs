@@ -14,13 +14,16 @@ use std::time::Duration;
 use postman_proc::link::Incoming;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::super::wire::{Ask, Build, Call, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin};
+use super::super::wire::{
+    Ask, Build, Call, DirectoryQuery, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin,
+};
 use super::{BROWSER_WAIT as HOST_BROWSER_WAIT, MAX_BIN, PluginLink};
 use super::{Claim, Profile, Row};
 use crate::backend::BoxFuture;
 use crate::channel::{
     AccountId, Answer, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelPlugin, ChannelSession, ConnectCtx, FlowCtx, PluginStore, Secret, Sso,
 };
+use crate::smime::directory::{Directory, DirectoryError};
 
 /// Вызов хранилища ядра ждёт ответа не дольше.
 const STORE_WAIT: Duration = Duration::from_secs(30);
@@ -135,6 +138,43 @@ pub fn serve_channel(link: PluginLink, id: &'static str, key: bool, make: impl F
     let served = Rc::new(Served { link, plugin, sessions: RefCell::new(HashMap::new()), flows: RefCell::new(HashMap::new()) });
     tokio::task::LocalSet::new().block_on(&rt, served.run(rx));
     0
+}
+
+/// Обслужить хост каталогом `id` (PLG-06): процесс отвечает на поиск сертификатов ([`Ask::Certificates`]) и вопросы
+/// описания (`Hello`, память). Рантайма у каталога нет: поиск — [`Directory::certificates`], он сам заводит свой
+/// рантайм и ограничен [`TIMEOUT`](crate::smime::directory::TIMEOUT) — в своём потоке, чтобы не задерживать ответы
+/// сторожу. Настройки — с каждым запросом («Настройки → Безопасность», пароль — ядро), `make` делает каталог из
+/// запроса. Услуги ядра у каталога нет, сессий и входов тоже. Ответ — код выхода процесса.
+pub fn serve_directory(link: PluginLink, id: &'static str, make: impl Fn(&DirectoryQuery) -> Arc<dyn Directory>) -> i32 {
+    let link = Arc::new(link);
+    loop {
+        match link.recv() {
+            Incoming::Message(ToPlugin::Ask { id: n, ask: Ask::Hello(h) }, _) => {
+                apply(h.settings.clone());
+                answer(&link, n, Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Directory, key: false }), &[]);
+            }
+            Incoming::Message(ToPlugin::Ask { id: n, ask: Ask::Stats }, _) => {
+                let rss = STATS.get().map_or_else(|| crate::bench::rss() as u64, |rss| rss());
+                answer(&link, n, Reply::Stats { rss }, &[]);
+            }
+            Incoming::Message(ToPlugin::Ask { id: n, ask: Ask::Certificates(q) }, _) => {
+                let dir = make(&q);
+                let spawned = std::thread::Builder::new().name("plugin-directory".into()).spawn({
+                    let link = Arc::clone(&link);
+                    move || answer(&link, n, Reply::Certs(dir.certificates(&q.addresses)), &[])
+                });
+                if spawned.is_err() {
+                    answer(&link, n, Reply::Certs(Err(DirectoryError::Unavailable("directory thread not started".into()))), &[]);
+                }
+            }
+            Incoming::Message(ToPlugin::Settings(s), _) => apply(s),
+            // Каталог ничего не держит: выход программы — завершение процесса.
+            Incoming::Message(ToPlugin::Leave, _) => return 0,
+            // У каталога нет услуг ядра, сессий и входов: остальное — ответы сторожу.
+            Incoming::Message(..) | Incoming::Call(..) => {}
+            Incoming::Shutdown | Incoming::Closed => return 0,
+        }
+    }
 }
 
 /// События сессии — хосту по порядку; перед ответом на вызов — всё, что сессия успела послать.

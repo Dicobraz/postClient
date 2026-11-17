@@ -1,14 +1,18 @@
-//! Каталог сертификатов адресатов (S5-12 Ф5, S5-12.5б): плагин `postman-backend-ldap` по настройкам «Безопасность»,
-//! ответ — в воркер (`SmimePrepare`: чужие сертификаты проверяет и разбирает только он), проверенные — в кэш адресата
-//! (`postman_core::smime::directory`). Каталог спрашивают только по «Найти в каталоге», при отправке и по
-//! «Проверить» в настройках. Пароль простого входа — в Диспетчере учётных данных (`Postman:ldap:<сервер>`).
+//! Каталог сертификатов адресатов (S5-12 Ф5, S5-12.5б): плагин LDAP процессом набора (`postman-plugins
+//! --plugin=ldap`, PLG-06, ADR 0013) по настройкам «Безопасность», ответ — в воркер (`SmimePrepare`: чужие
+//! сертификаты проверяет и разбирает только он), проверенные — в кэш адресата (`postman_core::smime::directory`).
+//! Каталог спрашивают только по «Найти в каталоге», при отправке и по «Проверить» в настройках. Пароль простого
+//! входа — в Диспетчере учётных данных (`Postman:ldap:<сервер>`). Контроллер домена компьютера — функция ОС
+//! ([`crate::sys::domain_controller`], решение №12): резолвит здесь и кладёт в запрос, процессу песочницы файлы и
+//! билет не нужны.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use pets_i18n::tr;
-use postman_backend_ldap::{LdapDirectory, Login, Settings, Zeroizing};
 use postman_cache::Cache;
-use postman_core::prefs::{Directory as Prefs, DirectoryLogin};
+use postman_core::backend::wire::{DirectoryLogin, DirectoryQuery};
+use postman_core::channel::Secret;
+use postman_core::prefs::{Directory as Prefs, DirectoryLogin as PrefsLogin};
 use postman_core::smime::directory::{self, Directory, DirectoryError, Found};
 use postman_smime::prepare::Prepared;
 use postman_worker::Client as Worker;
@@ -18,18 +22,42 @@ pub(crate) fn credential_target(server: &str) -> String {
     format!("Postman:ldap:{}", server.trim().to_lowercase())
 }
 
-/// Каталог из настроек; пароль — из Диспетчера учётных данных (блокирует поток: только в фоне).
+/// Каталог из настроек: заместитель процесса набора с настройками запроса. Сервер — из настроек, иначе контроллер
+/// домена компьютера (блокирующая функция ОС, до 5 с: фон); нет ни того, ни другого — «каталог не настроен» без
+/// процесса.
 pub(crate) fn from_prefs(p: &Prefs) -> Arc<dyn Directory> {
+    let text = |s: &str| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+    let server = match text(&p.server) {
+        Some(s) => Some(s),
+        None => crate::sys::domain_controller(),
+    };
+    let Some(server) = server else {
+        return Arc::new(NotConfigured);
+    };
     let login = match p.login {
-        DirectoryLogin::Windows => Login::Windows,
-        DirectoryLogin::Anonymous => Login::Anonymous,
-        DirectoryLogin::Password => {
+        PrefsLogin::Windows => DirectoryLogin::Windows,
+        PrefsLogin::Anonymous => DirectoryLogin::Anonymous,
+        PrefsLogin::Password => {
             let password = crate::sys::credentials::read(&credential_target(&p.server)).ok().flatten().unwrap_or_default();
-            Login::Simple { user: p.user.trim().to_owned(), password: Zeroizing::new(password) }
+            DirectoryLogin::Password { user: p.user.trim().to_owned(), password: Secret::new(password.into_bytes()) }
         }
     };
-    let text = |s: &str| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
-    Arc::new(LdapDirectory::new(Settings { server: text(&p.server), base_dn: text(&p.base_dn), starttls: p.starttls, login }))
+    crate::plugins::remote_directory(DirectoryQuery {
+        server: Some(server),
+        base_dn: text(&p.base_dn),
+        starttls: p.starttls,
+        login,
+        addresses: Vec::new(),
+    })
+}
+
+/// Каталог не настроен: сервер не задан и компьютер не в домене — процесс набора не нужен.
+struct NotConfigured;
+
+impl Directory for NotConfigured {
+    fn certificates(&self, _: &[String]) -> Result<Vec<Vec<u8>>, DirectoryError> {
+        Err(DirectoryError::NotConfigured)
+    }
 }
 
 /// Демо-ящик: каталога нет, сертификатов в нём тоже (снимки строки «Перед отправкой»).

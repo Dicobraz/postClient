@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use postman_cache::Cache;
+use serde::{Deserialize, Serialize};
 
 use super::KnownCert;
 
@@ -26,8 +27,9 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_CERTS: usize = 64;
 pub const MAX_CERT_LEN: usize = 64 * 1024;
 
-/// Почему каталог не дал ответа — для строки «каталог недоступен» и журнала.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Почему каталог не дал ответа — для строки «каталог недоступен» и журнала. Сериализация — ответ плагина
+/// каталога по обмену (`wire::Reply::Certs`, PLG-06).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum DirectoryError {
     /// Компьютер не в домене, а сервер в настройках не задан.
     #[error("directory is not configured")]

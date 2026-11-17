@@ -5,6 +5,12 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+# Процесс набора — `postman-plugins --plugin=ldap` (PLG-06, ADR 0013).
+[features]
+# Подменный сервер LDAP (`fake`) для тестов обмена — свой, через обмен (`tests/remote.rs`) и процесс набора
+# (`crates/plugins/tests/ldap.rs`), как `testkit` у Telegram.
+testkit = []
+
 [dependencies]
 postman-core.workspace = true
 # LDAP (MIT/Apache-2.0); TLS — rustls с проверкой сертификата ОС, как у IMAP.
@@ -31,11 +37,10 @@ sha2 = "0.11"
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros"] }
 sha2 = "0.11"
-
-# Контроллер домена — службой Windows (`DsGetDcNameW`, решение №12): `sys.rs`, единственное место `unsafe`.
-[target.'cfg(windows)'.dependencies.windows-sys]
-version = "0.61"
-features = ["Win32_Foundation", "Win32_Networking_ActiveDirectory", "Win32_NetworkManagement_NetManagement"]
+# Кадры обмена для теста через обмен (`tests/remote.rs`).
+postman-proc.workspace = true
+# Тесты обмена настоящей точкой входа (`serve`): свой крейт с подменным сервером (`fake`), как у Telegram.
+postman-backend-ldap = { path = ".", features = ["testkit"] }
 
 [lints]
 workspace = true
