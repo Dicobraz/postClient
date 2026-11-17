@@ -49,7 +49,7 @@ const ITEMS: [Item; 6] = [
     Item { key: "worker.exe", name: "postman-worker.exe", file_name: "POSTMA~1.EXE|postman-worker.exe" },
     Item { key: "viewer.exe", name: "postman-viewer.exe", file_name: "POSTMA~2.EXE|postman-viewer.exe" },
     Item { key: "plugins.exe", name: "postman-plugins.exe", file_name: "POSTMA~3.EXE|postman-plugins.exe" },
-    Item { key: "plugins-telegram.exe", name: "postman-plugins-telegram.exe", file_name: "POSTMA~4.EXE|postman-plugins-telegram.exe" },
+    Item { key: "plugins_telegram.exe", name: "postman-plugins-telegram.exe", file_name: "POSTMA~4.EXE|postman-plugins-telegram.exe" },
     Item { key: "README.txt", name: "README.txt", file_name: "README.txt" },
 ];
 
