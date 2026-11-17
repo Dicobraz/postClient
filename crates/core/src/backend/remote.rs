@@ -330,7 +330,9 @@ impl Inner {
     }
 
     /// Ждать очереди старта: первый кадр показан, стартов меньше [`MAX_STARTS`], этот плагин — первый в очереди.
-    fn acquire(&self, plugin: &Plugin) {
+    /// Место в очереди живёт и после возврата — до [`Inner::entered`]: запись запуска идёт после слота, и пока
+    /// она не сделана, место держит порядок (следующий не займёт слот раньше — иначе порядок стартов гоняется).
+    fn acquire(&self, plugin: &Plugin) -> u64 {
         let mut gate = lock(&self.gate);
         let seq = gate.next;
         gate.next += 1;
@@ -339,14 +341,18 @@ impl Inner {
         loop {
             let first = gate.queue.iter().min().map(|e| e.1);
             if gate.shown && gate.starting < MAX_STARTS && first == Some(seq) {
-                break;
+                gate.starting += 1;
+                return seq;
             }
             gate = self.opened.wait(gate).unwrap_or_else(PoisonError::into_inner);
         }
+    }
+
+    /// Запуск записан: место в очереди свободно — следующий может брать слот.
+    fn entered(&self, seq: u64) {
+        let mut gate = lock(&self.gate);
         gate.queue.retain(|e| e.1 != seq);
-        gate.starting += 1;
         drop(gate);
-        // Очередь сдвинулась: следующий может стартовать, если есть место.
         self.opened.notify_all();
     }
 
@@ -445,11 +451,13 @@ fn supervise(host: &Inner, plugin: &Plugin) {
     let mut crashes: VecDeque<Instant> = VecDeque::new();
     loop {
         plugin.set(Phase::Waiting);
-        host.acquire(plugin);
+        let seq = host.acquire(plugin);
         plugin.set(Phase::Starting);
         host.launches.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
-        let outcome = match host.launcher.launch(&plugin.row) {
+        let launched = host.launcher.launch(&plugin.row);
+        host.entered(seq);
+        let outcome = match launched {
             Ok(s) => hello(host, plugin, s, started),
             // Файла набора нет (не собран, не установлен): перезапуски не помогут.
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Failed::Build(format!("plugin set {} not found", plugin.row.set))),
@@ -1112,7 +1120,12 @@ mod tests {
         let started = launcher.started();
         assert_eq!(started.len(), 2, "третий ждёт, пока двое не ответят на Hello: {started:?}");
         assert_eq!(started[0], "c", "первым — плагин активной учётки: {started:?}");
-        assert_eq!(lock(&host.0.gate).queue.len(), 1);
+        // Место второго выходит из очереди сразу после записи его запуска — ждём, пока очередь придёт к одному.
+        let settled = Instant::now() + WAIT;
+        while lock(&host.0.gate).queue.len() != 1 && Instant::now() < settled {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(lock(&host.0.gate).queue.len(), 1, "третий в очереди: {:?}", lock(&host.0.gate).queue);
     }
 
     /// Процесс другой сборки (обновление прервано): отвечает на `Hello` и только.
