@@ -13,7 +13,7 @@ pub const MAX_RETRY: u64 = 60;
 pub const MAX_QUEUE: usize = 10_000;
 
 /// Связь для интерфейса: строка состояния, метка у аккаунта, полоса над списком.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Connection {
     Online,
     /// Сервер не отвечает: следующая попытка через `retry_in` секунд; правок ждёт отправки — `queued`.

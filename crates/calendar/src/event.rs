@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::Span;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum EventStatus {
     #[default]
     Confirmed,
@@ -18,7 +18,7 @@ pub enum EventStatus {
 }
 
 /// Как событие влияет на занятость (JSCalendar `freeBusyStatus`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FreeBusy {
     #[default]
     Busy,
@@ -26,7 +26,7 @@ pub enum FreeBusy {
 }
 
 /// Ответ участника на приглашение (`participationStatus`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Partstat {
     #[default]
     NeedsAction,
@@ -36,7 +36,7 @@ pub enum Partstat {
     Delegated,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Participant {
     pub name: String,
     pub email: String,
@@ -48,7 +48,7 @@ pub struct Participant {
 }
 
 /// Владелец чужого календаря, открытого мне (S5-22): адрес (имя аккаунта у Stalwart) и имя из справочника.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Owner {
     pub email: String,
     pub name: String,
@@ -61,7 +61,7 @@ impl Owner {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub id: String,
     pub uid: String,

@@ -95,7 +95,7 @@ struct SweepRow {
 }
 
 /// Где выборка.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum State {
     /// Снимок: `done` — писем в снимке.
     Listing,
@@ -107,7 +107,7 @@ pub enum State {
 }
 
 /// Ход выборки — интерфейсу.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub sweep: SweepId,
     pub action: Action,

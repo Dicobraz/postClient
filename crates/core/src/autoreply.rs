@@ -132,7 +132,7 @@ pub struct Stored {
 
 /// Кому отвечать: свои домены (внутри компании), адреса моих контактов (внешним при «только контактам») и мои
 /// адреса (`:addresses` — письма на псевдонимы тоже получают ответ).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Audience {
     pub domains: Vec<String>,
     pub contacts: Vec<String>,

@@ -18,7 +18,8 @@ postman-search.workspace = true
 postman-calendar.workspace = true
 # Выгрузка писем в файлы (S8-31): задание экспорта ядра пишет файлы форматами крейта, I/O — в потоке ядра.
 postman-export.workspace = true
-serde.workspace = true
+# `rc` — `Arc<Vec<u8>>` в событиях `sync::Event` (blob, письмо целиком) идёт по обмену как байты (PLG-07).
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 thiserror.workspace = true
 jiff.workspace = true

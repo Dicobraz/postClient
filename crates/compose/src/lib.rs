@@ -20,7 +20,7 @@ use mail_builder::headers::content_type::ContentType;
 use mail_builder::mime::MimePart;
 use postman_ir::Document;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Address {
     pub name: String,
     pub email: String,
@@ -41,7 +41,7 @@ impl Address {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub name: String,
     pub mime: String,
@@ -52,7 +52,7 @@ pub struct Attachment {
     pub blob_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Draft {
     pub from: Address,
     pub to: Vec<Address>,
@@ -85,7 +85,7 @@ pub struct Draft {
 }
 
 /// Объект iCalendar в письме (RFC 6047): метод и текст VCALENDAR.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CalendarPart {
     pub method: String,
     pub ics: String,

@@ -8,7 +8,7 @@
 use std::ops::Range;
 
 /// Фрагмент письма, на который отвечают, и ответ на него.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Fragment {
     /// Номер реплики в черновике: не меняется при перестановке и отмене удаления.
     pub id: u64,

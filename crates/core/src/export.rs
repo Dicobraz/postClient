@@ -46,7 +46,7 @@ const BYTES_PER_POLL: u64 = 32 * 1024 * 1024;
 const PAGE: usize = 1000;
 
 /// Что экспортировать.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     /// Выделенные письма: каждое — в каталог (файл mbox) своей папки, без её родителей.
     Letters(Vec<LetterId>),
@@ -106,11 +106,11 @@ pub fn worker_mapi(mut client: postman_worker::Client) -> Mapi {
 const MAPI_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Номер задания экспорта (не хранится: задание живёт до выхода).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ExportId(pub u64);
 
 /// Состояние задания в `Event::Export`. Тексты — у интерфейса (S8-D, `export.ftl`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     /// Идёт: `export-running`, `export-running-detail` (`fetching` — писем ещё загрузить с серверов), в строке
     /// состояния — `export-status` и `export-stop`.

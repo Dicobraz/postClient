@@ -5,7 +5,7 @@ use jiff::tz::TimeZone;
 
 use crate::Span;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum BusyKind {
     /// Под вопросом (tentative) — слабее «занят».
     Tentative,
@@ -14,7 +14,7 @@ pub enum BusyKind {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Busy {
     pub span: Span,
     pub kind: BusyKind,
@@ -22,7 +22,7 @@ pub struct Busy {
 
 /// Тема и место интервала занятости, если сервер их дал (T2-02б): Exchange `GetUserAvailability` вид `Detailed` —
 /// когда владелец календаря или организация разрешают «занятость, тема, место». Частное событие — без темы.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BusyNote {
     pub span: Span,
     pub subject: String,

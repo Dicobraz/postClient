@@ -56,7 +56,7 @@ const COMPLETED: &str = "completed";
 const OURS: &[&str] = &[X_PROJECT, X_SOMEDAY, X_ORDER, X_MESSAGE_ID, X_EMAIL_ID, X_BLOCK, X_REPEAT_AFTER, COMPLETED];
 
 /// Ход задачи (JSCalendar `progress`, iCalendar STATUS).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Progress {
     #[default]
     NeedsAction,
@@ -104,7 +104,7 @@ impl Progress {
 }
 
 /// Момент задачи (начало, срок): местное время и пояс; без пояса — «плавающее» (в поясе пользователя).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Moment {
     pub local: DateTime,
     pub tz: Option<String>,
@@ -132,13 +132,13 @@ impl Moment {
 }
 
 /// От чего отсчитывается напоминание.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Anchor {
     Start,
     Due,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Trigger {
     /// За `secs` секунд до (отрицательное) или после якоря.
     Offset { secs: i64, from: Anchor },
@@ -148,7 +148,7 @@ pub enum Trigger {
 
 /// Напоминание (`alerts`, VALARM). Письмо сервер шлёт только по `email` от начала (`docs/STALWART.md` п. 41) —
 /// остальные показывает Postman (S6-07).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Alert {
     pub trigger: Trigger,
     pub email: bool,
@@ -156,14 +156,14 @@ pub struct Alert {
 
 /// Письмо, из которого задача: `Message-ID` (виден другим клиентам ссылкой `mid:`; пустой — ещё не известен) и
 /// id письма в ящике.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MailLink {
     pub message_id: String,
     pub email_id: Option<String>,
 }
 
 /// «Время в календаре» (S6-08): блок «занят» в своём календаре под задачу — событие `event_id`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TimeBlock {
     pub event_id: String,
     /// Unix-секунды.
@@ -186,7 +186,7 @@ impl TimeBlock {
 }
 
 /// Роль в поручении (S6-09).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     /// Поручивший (`roles.owner`, ORGANIZER).
     Owner,
@@ -198,7 +198,7 @@ pub enum Role {
 
 /// Ответ участника поручения: PARTSTAT iCalendar для VTODO (RFC 5545 §3.2.12). В JSCalendar 2.0 «в работе» и
 /// «готово» — `progress` участника, остальное — `participationStatus`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TaskPartstat {
     #[default]
     NeedsAction,
@@ -224,7 +224,7 @@ impl TaskPartstat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TaskParticipant {
     /// Ключ в `participants` (сохраняется при записи — патчи участника идут по нему).
     pub key: String,
@@ -234,7 +234,7 @@ pub struct TaskParticipant {
     pub status: TaskPartstat,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Task {
     /// id на сервере (`CalendarEvent.id`); у новой, ещё не записанной — пусто.
     pub id: String,
@@ -257,7 +257,9 @@ pub struct Task {
     pub completed_at: Option<i64>,
     /// Категории (`keywords`, CATEGORIES) — та же таблица, что у почты.
     pub keywords: Vec<String>,
-    /// Повтор (`recurrenceRule` JSCalendar 2.0) как есть; разбор — `postman_core::recur` (S6-07).
+    /// Повтор (`recurrenceRule` JSCalendar 2.0) как есть; разбор — `postman_core::recur` (S6-07). По обмену — байтами
+    /// JSON (postcard `Value` не разбирает, [`crate::json`]).
+    #[serde(with = "crate::json::opt")]
     pub recurrence: Option<Value>,
     /// Повтор через столько дней после выполнения (`X-POSTMAN-REPEAT-AFTER`).
     pub repeat_after: Option<u32>,
@@ -273,7 +275,9 @@ pub struct Task {
     /// «Время в календаре» (S6-08).
     pub block: Option<TimeBlock>,
     pub sequence: i64,
-    /// Чужие свойства iCalendar (jCal) — пишутся обратно как были.
+    /// Чужие свойства iCalendar (jCal) — пишутся обратно как были. По обмену — байтами JSON (postcard `Value` не
+    /// разбирает, [`crate::json`]).
+    #[serde(with = "crate::json::vec")]
     pub extra: Vec<Value>,
 }
 

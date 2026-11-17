@@ -20,7 +20,7 @@ const APP: &str = "# app: ";
 const NAME: &str = "# name: ";
 
 /// Что проверяет условие.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Field {
     From,
     /// «Кому» и «Копия».
@@ -30,7 +30,7 @@ pub enum Field {
 
 /// Как проверяет: заголовок содержит строку (или не содержит), домен адреса равен (или не равен). Домен — только
 /// у «От» и «Кому».
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
     Contains,
     NotContains,
@@ -50,7 +50,7 @@ impl Op {
 }
 
 /// Условие: поле, проверка, значение.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Cond {
     pub field: Field,
     pub op: Op,
@@ -63,7 +63,7 @@ impl Cond {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     /// В папку: по id (переименование папки не ломает правило), имя — запасное и для показа.
     Move { mailbox_id: String, name: String },
@@ -80,7 +80,7 @@ pub enum Action {
     Category(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rule {
     pub enabled: bool,
     /// Имя правила; пустое — правило называется своими условиями.

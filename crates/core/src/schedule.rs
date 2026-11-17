@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// Новая встреча из окна встречи: всё своё (команда уходит в поток синхронизации). Календарь и организатора
 /// подставляет синхронизация: календарь по умолчанию и адрес учётной записи.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Meeting {
     pub uid: String,
     pub title: String,
