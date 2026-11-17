@@ -21,8 +21,13 @@ use postman_core::channel::{
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-const ROW: Row =
-    Row { id: postman_backend_matrix::ID, kind: Kind::Channel, claim: Claim::Channel, set: "postman-plugins-matrix", profile: Profile::Network { enterprise_auth: false } };
+const ROW: Row = Row {
+    id: postman_backend_matrix::ID,
+    kind: Kind::Channel,
+    claim: Claim::Channel,
+    set: "postman-plugins-matrix",
+    profile: Profile::Network { enterprise_auth: false },
+};
 const WAIT: Duration = Duration::from_secs(30);
 
 type Kill = Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>;
@@ -91,7 +96,8 @@ fn matrix_channel_runs_as_a_process() {
     let server = FakeMatrix::new();
     let exe = Path::new(env!("CARGO_BIN_EXE_postman-plugins-matrix"));
     let last: Kill = Arc::new(Mutex::new(None));
-    let launcher = Killable { inner: ProcLauncher { dir: exe.parent().unwrap().to_owned(), namespaces: Namespaces::Optional }, last: Arc::clone(&last) };
+    let launcher =
+        Killable { inner: ProcLauncher { dir: exe.parent().unwrap().to_owned(), namespaces: Namespaces::Optional }, last: Arc::clone(&last) };
     let host = Host::new(Arc::new(launcher), Settings { log: "info".into(), ..Settings::default() });
     let plugin = host.channel(ROW);
     assert_eq!(host.launches(), 0, "заместитель без запроса процесс не создаёт");
@@ -105,7 +111,10 @@ fn matrix_channel_runs_as_a_process() {
         assert_eq!(flow.step(None).await.unwrap(), Prompt::Server);
         assert_eq!(flow.step(Some(Answer::Text(server.url()))).await.unwrap(), Prompt::Login);
         assert_eq!(flow.step(Some(Answer::Text(fake::LOGIN.into()))).await.unwrap(), Prompt::Password { hint: None });
-        let Prompt::Done { account, secret, .. } = flow.step(Some(Answer::Secret(Secret::new(fake::PASSWORD.as_bytes().to_vec())))).await.unwrap() else { panic!() };
+        let Prompt::Done { account, secret, .. } = flow.step(Some(Answer::Secret(Secret::new(fake::PASSWORD.as_bytes().to_vec())))).await.unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(account.as_str(), fake::ME);
         drop(flow);
         assert_eq!(host.launches(), 1);
@@ -160,7 +169,8 @@ fn matrix_channel_runs_as_a_process() {
 
         // Вопросы описания — у поднятого процесса.
         assert!(plugin.parse_link("https://matrix.to/#/!team:example.test/$ev1").is_some());
-        let missing = plugin.connect(ConnectCtx { account, secret: Secret::new(b"x".to_vec()), incoming: unbounded_channel().0, store: store(&cache) }).await;
+        let missing =
+            plugin.connect(ConnectCtx { account, secret: Secret::new(b"x".to_vec()), incoming: unbounded_channel().0, store: store(&cache) }).await;
         assert!(matches!(missing, Err(ChannelError::SignedOut(_))));
     });
 }

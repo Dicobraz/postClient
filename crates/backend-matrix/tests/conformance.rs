@@ -88,7 +88,11 @@ impl Sso for Loopback {
                     };
                     let head = String::from_utf8_lossy(&buf[..n]);
                     let token = head.lines().next().and_then(|l| l.split(' ').nth(1)).and_then(|path| {
-                        path.split_once('?')?.1.split('&').find_map(|kv| kv.strip_prefix("loginToken=")).and_then(postman_core::channel::decode_segment)
+                        path.split_once('?')?
+                            .1
+                            .split('&')
+                            .find_map(|kv| kv.strip_prefix("loginToken="))
+                            .and_then(postman_core::channel::decode_segment)
                     });
                     let reply = match &token {
                         Some(_) => format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}", PAGE.len()),

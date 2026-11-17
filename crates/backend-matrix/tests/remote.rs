@@ -18,15 +18,20 @@ use postman_core::backend::remote::{self, Claim, Host, Launcher, Profile, Row, S
 use postman_core::backend::wire::{Kind, Settings};
 use postman_core::channel::conformance::{Harness, Script, run_all};
 use postman_core::channel::{
-    AccountId, Answer, ChannelError, ChannelEvent, ChannelId, ChannelPlugin, ConnectCtx, FlowCtx, LocalStore, Participant, ParticipantId, PluginStore,
-    Prompt, Secret,
+    AccountId, Answer, ChannelError, ChannelEvent, ChannelId, ChannelPlugin, ConnectCtx, FlowCtx, LocalStore, Participant, ParticipantId,
+    PluginStore, Prompt, Secret,
 };
 use postman_proc::link::Link;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc::unbounded_channel;
 
-const ROW: Row =
-    Row { id: postman_backend_matrix::ID, kind: Kind::Channel, claim: Claim::Channel, set: "postman-plugins-matrix", profile: Profile::Network { enterprise_auth: false } };
+const ROW: Row = Row {
+    id: postman_backend_matrix::ID,
+    kind: Kind::Channel,
+    claim: Claim::Channel,
+    set: "postman-plugins-matrix",
+    profile: Profile::Network { enterprise_auth: false },
+};
 
 /// Сторона плагина — поток теста с той же точкой входа, что у файла набора.
 struct InThread;
@@ -151,12 +156,22 @@ fn bad_secret_is_signed_out_over_the_wire() {
     let cache = Cache::open_in_memory().unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     tokio::task::LocalSet::new().block_on(&rt, async {
-        let ctx = ConnectCtx { account: AccountId::new(fake::ME), secret: Secret::new(b"not a session".to_vec()), incoming: unbounded_channel().0, store: store(&cache) };
+        let ctx = ConnectCtx {
+            account: AccountId::new(fake::ME),
+            secret: Secret::new(b"not a session".to_vec()),
+            incoming: unbounded_channel().0,
+            store: store(&cache),
+        };
         let err = plugin.connect(ctx).await.err().unwrap();
         assert!(matches!(err, ChannelError::SignedOut(_)), "{err:?}");
         // `MatrixChannel::new()` без обмена — то же мнение о секрете.
         let local = MatrixChannel::new();
-        let ctx = ConnectCtx { account: AccountId::new(fake::ME), secret: Secret::new(b"not a session".to_vec()), incoming: unbounded_channel().0, store: store(&cache) };
+        let ctx = ConnectCtx {
+            account: AccountId::new(fake::ME),
+            secret: Secret::new(b"not a session".to_vec()),
+            incoming: unbounded_channel().0,
+            store: store(&cache),
+        };
         assert!(matches!(local.connect(ctx).await, Err(ChannelError::SignedOut(_))));
     });
 }

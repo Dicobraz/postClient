@@ -23,7 +23,7 @@
 mod serve;
 mod sso;
 
-pub use serve::{on_log, on_stats, serve_channel, set_main, settings, SetEntry};
+pub use serve::{SetEntry, on_log, on_stats, serve_channel, set_main, settings};
 pub(crate) use sso::BROWSER_WAIT;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

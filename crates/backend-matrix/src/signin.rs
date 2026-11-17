@@ -32,10 +32,23 @@ struct Ways {
 enum Step {
     Start,
     Server,
-    Login { client: Client, ways: Ways, user: Option<String> },
-    Password { client: Client, ways: Ways, user: String },
+    Login {
+        client: Client,
+        ways: Ways,
+        user: Option<String>,
+    },
+    Password {
+        client: Client,
+        ways: Ways,
+        user: String,
+    },
     /// Порт возврата слушает ядро ([`Sso`]); повтор входа ждёт тот же порт.
-    Browser { client: Client, ways: Ways, port: u16, user: Option<String> },
+    Browser {
+        client: Client,
+        ways: Ways,
+        port: u16,
+        user: Option<String>,
+    },
     Over,
 }
 

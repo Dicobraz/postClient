@@ -27,7 +27,13 @@ const DEMO: Row = Row {
 
 /// Matrix (CH-05) — набором `postman-plugins-matrix` (PLG-04, ADR 0013): тяжёлый канал отдельным файлом, решение
 /// владельца 2026-11-16. Включает настройка и политика `AllowChannelMatrix`; файл — компонент установки (PLG-03).
-const MATRIX: Row = Row { id: crate::account_matrix::MATRIX, kind: Kind::Channel, claim: Claim::Channel, set: "postman-plugins-matrix", profile: Profile::Network { enterprise_auth: false } };
+const MATRIX: Row = Row {
+    id: crate::account_matrix::MATRIX,
+    kind: Kind::Channel,
+    claim: Claim::Channel,
+    set: "postman-plugins-matrix",
+    profile: Profile::Network { enterprise_auth: false },
+};
 
 /// Плагины отдельными процессами.
 pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX];
@@ -137,7 +143,13 @@ mod tests {
             };
             let entry = plugins.iter().find(|e| e.id == row.id).unwrap_or_else(|| panic!("{}: нет в наборе {}", row.id, row.set));
             assert_eq!((row.kind, row.profile), (entry.kind, entry.profile), "{}", row.id);
-            for url in ["postman://demo/me@example.test/c", "postman://matrix/@me:example.test/c", "postman://telegram/1/c", "imaps://mail.example.test", "https://mail.example.test/"] {
+            for url in [
+                "postman://demo/me@example.test/c",
+                "postman://matrix/@me:example.test/c",
+                "postman://telegram/1/c",
+                "imaps://mail.example.test",
+                "https://mail.example.test/",
+            ] {
                 assert_eq!(row.claims(url), entry.claims(url), "{} {url}", row.id);
             }
         }
