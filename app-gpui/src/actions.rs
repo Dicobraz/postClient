@@ -486,6 +486,10 @@ pub(crate) mod scenes {
     pub(crate) const SCENES: &[Scene] = &[
         // Входящие, ничего не выбрано.
         Scene::new("list", list, list_ready).live(),
+        // Кнопки окна слева (LIN-08, макет `MainLinuxLeft`): та же раскладка `list` по настройке ОС «слева». Только
+        // Linux: под Xvfb портала нет — сцена ставит настройку сама, дальше — сброс в `chrome.rs` `reset`.
+        #[cfg(target_os = "linux")]
+        Scene::new("list-left", list_left, list_left_ready).continues(),
         // Первое письмо выбрано, тело разобрано воркером.
         Scene::new("letter", letter, letter_ready).live().continues(),
         // «Отправленные» (T1-22): письма выбираются и открываются, как в других папках, — и у Exchange (`--live`).
@@ -542,6 +546,22 @@ pub(crate) mod scenes {
     fn letter(_: &Scene, m: &mut Mailer, _: &mut Window, cx: &mut Context<Mailer>) -> Result<(), String> {
         m.list.update(cx, |l, cx| l.select(0, cx));
         Ok(())
+    }
+
+    /// LIN-08: та же «Входящие» (`list`) при кнопках окна слева — настройку ОС ставит сцена (портала под Xvfb нет),
+    /// кадр — сразу, раскладку рисует `chrome.rs`.
+    #[cfg(target_os = "linux")]
+    fn list_left(_: &Scene, _: &mut Mailer, _: &mut Window, cx: &mut Context<Mailer>) -> Result<(), String> {
+        crate::chrome::set_buttons("close,minimize,maximize:", cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// Раскладка применилась: «✕» (и прочие кнопки) — слева в заголовке, остальное — как у `list`.
+    #[cfg(target_os = "linux")]
+    fn list_left_ready(s: &Scene, m: &Mailer, cx: &App) -> bool {
+        let on_left = |id: &str| crate::screens::spot_bounds(id).is_some_and(|b| b.origin.x < px(160.));
+        crate::chrome::buttons_left(cx) && ["caption-close", "caption-min", "caption-max"].iter().all(|id| on_left(id)) && list_ready(s, m, cx)
     }
 
     fn letter_ready(_: &Scene, m: &Mailer, cx: &App) -> bool {

@@ -221,6 +221,11 @@ pub mod shell;
 #[path = "appearance_linux.rs"]
 pub mod appearance;
 
+/// Linux (LIN-08): сторона и состав кнопок окна — `button-layout` (portal).
+#[cfg(target_os = "linux")]
+#[path = "buttons_linux.rs"]
+pub mod buttons;
+
 /// Другие ОС: ничего из этого нет.
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub mod shell {

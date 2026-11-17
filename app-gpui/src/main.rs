@@ -359,6 +359,9 @@ fn main() {
         // Linux (LIN-03): тема и акцент среды (portal).
         #[cfg(target_os = "linux")]
         sys::appearance::watch(cx);
+        // Linux (LIN-08): сторона и состав кнопок окна — настройка среды `button-layout` (portal).
+        #[cfg(target_os = "linux")]
+        sys::buttons::watch(cx);
         // Клавиши — из реестра команд (S2-02) и свои из настроек (S5-09); в поле ввода клавиши без модификаторов — текст.
         commands::bind(cx, &user_prefs);
         prefs::init(user_prefs, prefs_path, cx);
