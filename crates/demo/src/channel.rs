@@ -595,7 +595,7 @@ fn set_reaction(m: &mut Message, key: &str, who: &str, on: bool) {
 
 /// Точка входа процесса набора: демо-канал отвечает хосту. Сервер и плагин создаются при первом вопросе хоста.
 pub fn serve(link: PluginLink) -> i32 {
-    remote::serve_channel(link, ID, || Arc::new(DemoChannel::new(DemoServer::new())))
+    remote::serve_channel(link, ID, false, || Arc::new(DemoChannel::new(DemoServer::new())))
 }
 
 /// Плагин демо-канала.

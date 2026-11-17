@@ -62,11 +62,11 @@ fn answer(link: &PluginLink, id: u64, reply: Reply, bin: &[u8]) {
 }
 
 /// Вопрос, на который отвечают сразу, без рантайма. `false` — не такой.
-fn quick(link: &PluginLink, id: &'static str, plugin: Option<&dyn ChannelPlugin>, n: u64, ask: &Ask) -> bool {
+fn quick(link: &PluginLink, id: &'static str, key: bool, plugin: Option<&dyn ChannelPlugin>, n: u64, ask: &Ask) -> bool {
     let reply = match (ask, plugin) {
         (Ask::Hello(h), _) => {
             apply(h.settings.clone());
-            Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Channel })
+            Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Channel, key })
         }
         (Ask::Stats, _) => Reply::Stats { rss: STATS.get().map_or_else(|| crate::bench::rss() as u64, |rss| rss()) },
         (Ask::Features, Some(p)) => Reply::Features(p.features()),
@@ -79,13 +79,14 @@ fn quick(link: &PluginLink, id: &'static str, plugin: Option<&dyn ChannelPlugin>
     true
 }
 
-/// Обслужить хост каналом `id`; `make` создаёт плагин при первом настоящем вопросе. Ответ — код выхода процесса.
-pub fn serve_channel(link: PluginLink, id: &'static str, make: impl FnOnce() -> Arc<dyn ChannelPlugin>) -> i32 {
+/// Обслужить хост каналом `id`; `key` — есть ли у плагина ключ приложения (сообщается в `Hello`, PLG-05), `make`
+/// создаёт плагин при первом настоящем вопросе. Ответ — код выхода процесса.
+pub fn serve_channel(link: PluginLink, id: &'static str, key: bool, make: impl FnOnce() -> Arc<dyn ChannelPlugin>) -> i32 {
     let link = Arc::new(link);
     let first = loop {
         match link.recv() {
             Incoming::Message(ToPlugin::Ask { id: n, ask }, bin) => {
-                if !quick(&link, id, None, n, &ask) {
+                if !quick(&link, id, key, None, n, &ask) {
                     break (ToPlugin::Ask { id: n, ask }, bin);
                 }
             }
@@ -111,7 +112,7 @@ pub fn serve_channel(link: PluginLink, id: &'static str, make: impl FnOnce() -> 
             loop {
                 match link.recv() {
                     Incoming::Message(ToPlugin::Ask { id: n, ask }, bin) => {
-                        if !quick(&link, id, Some(&*plugin), n, &ask) && tx.send((ToPlugin::Ask { id: n, ask }, bin)).is_err() {
+                        if !quick(&link, id, key, Some(&*plugin), n, &ask) && tx.send((ToPlugin::Ask { id: n, ask }, bin)).is_err() {
                             return;
                         }
                     }

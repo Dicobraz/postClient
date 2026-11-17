@@ -4,7 +4,7 @@
 //! в композиционном корне (`app-gpui/src/plugins.rs`) сверяет с набором тест корня.
 //!
 //! Тяжёлый канал Matrix — отдельным файлом набора `postman-plugins-matrix` (решение владельца 2026-11-16, PLG-04);
-//! Telegram и остальные лёгкие каналы — этим файлом.
+//! Telegram и остальные лёгкие каналы — этим файлом (Telegram — PLG-05; почтовые протоколы — PLG-06…PLG-10).
 
 use postman_core::backend::remote::{Claim, Profile, SetEntry};
 use postman_core::backend::wire::Kind;
@@ -13,14 +13,24 @@ use postman_core::backend::wire::Kind;
 pub const SET: &str = "postman-plugins";
 
 /// Плагины набора.
-pub const PLUGINS: &[SetEntry] = &[SetEntry {
-    id: postman_demo::channel::ID,
-    kind: Kind::Channel,
-    // Демо сети не нужно, но профиль у плагинов один (рантайм tokio и потоки связи): «сеть без файлов».
-    profile: Profile::Network { enterprise_auth: false },
-    claim: Claim::Channel,
-    serve: postman_demo::channel::serve,
-}];
+pub const PLUGINS: &[SetEntry] = &[
+    SetEntry {
+        id: postman_demo::channel::ID,
+        kind: Kind::Channel,
+        // Демо сети не нужно, но профиль у плагинов один (рантайм tokio и потоки связи): «сеть без файлов».
+        profile: Profile::Network { enterprise_auth: false },
+        claim: Claim::Channel,
+        serve: postman_demo::channel::serve,
+    },
+    SetEntry {
+        id: postman_backend_telegram::ID,
+        kind: Kind::Channel,
+        profile: Profile::Network { enterprise_auth: false },
+        claim: Claim::Channel,
+        // Ключ приложения (`api_id`/`api_hash`) — в сборке плагина; есть ли он — плагин сообщает в `Hello` (PLG-05).
+        serve: postman_backend_telegram::serve,
+    },
+];
 
 /// Плагин набора по id.
 pub fn find(id: &str) -> Option<&'static SetEntry> {

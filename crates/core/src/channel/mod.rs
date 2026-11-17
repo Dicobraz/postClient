@@ -38,6 +38,7 @@ mod run;
 pub mod smart;
 mod source;
 mod store;
+pub mod telegram;
 pub mod xref;
 
 pub use plugin::{

@@ -27,6 +27,8 @@ tracing = "0.1"
 [dev-dependencies]
 postman-backend-telegram = { path = ".", features = ["testkit"] }
 postman-cache.workspace = true
+# Связь с хостом в тесте договора через обмен (`tests/remote.rs`): кадры — общий механизм процессов.
+postman-proc.workspace = true
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 [lints]

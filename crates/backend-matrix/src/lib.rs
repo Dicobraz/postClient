@@ -47,9 +47,9 @@ pub use postman_core::channel::matrix::{
 };
 
 /// Точка входа процесса набора `postman-plugins-matrix --plugin=matrix` (ADR 0013, PLG-04): канал отвечает хосту за
-/// себя; клиент и рантайм — при первом настоящем вопросе.
+/// себя; клиент и рантайм — при первом настоящем вопросе. Ключа приложения у Matrix нет (`Hello` — `key: false`).
 pub fn serve(link: PluginLink) -> i32 {
-    serve_channel(link, ID, || Arc::new(MatrixChannel::new()))
+    serve_channel(link, ID, false, || Arc::new(MatrixChannel::new()))
 }
 
 /// Длина текста: событие Matrix — не больше 64 КиБ JSON; с запасом на разметку и шифр.

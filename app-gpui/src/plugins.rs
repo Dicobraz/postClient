@@ -1,13 +1,13 @@
 //! Пути к серверам (ADR 0004, S7-02б): композиционный корень. Здесь — какие плагины протоколов знает Postman и в
 //! каком порядке: почтовые пути — JMAP (путь по умолчанию: адрес без своей схемы), затем EWS Exchange (S7-06г:
 //! адрес — URL EWS; узел без схемы — EWS узла или `autodiscover.<узел>`), затем IMAP + SMTP; пути областей — CalDAV и
-//! CardDAV, EWS (у IMAP-учётки на Exchange); каналы бесед — Telegram (признак `telegram`). Новый протокол — плагин-крейт
+//! CardDAV, EWS (у IMAP-учётки на Exchange); каналы бесед — Telegram и Matrix. Новый протокол — плагин-крейт
 //! и строка здесь; `postman-core` и экраны не меняются.
 //!
 //! Плагины отдельными процессами (ADR 0013): строка плагина ([`ROWS`]) — идентификатор, вид, как узнать свой адрес,
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
-//! по запросу. Так работают демо-канал (PLG-02) и Matrix (PLG-04, свой файл набора `postman-plugins-matrix`); остальные
-//! плагины — внутри `postman.exe`, как были.
+//! по запросу. Так работают демо-канал (PLG-02), Matrix (PLG-04, свой файл набора `postman-plugins-matrix`) и Telegram
+//! (PLG-05, общий набор `postman-plugins`); почтовые пути — внутри `postman.exe`, как были.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -35,8 +35,18 @@ const MATRIX: Row = Row {
     profile: Profile::Network { enterprise_auth: false },
 };
 
+/// Telegram (CH-03) — общим набором `postman-plugins` (PLG-05, ADR 0013): лёгкие каналы — одним файлом (решение
+/// владельца 2026-11-16). Включает настройка и политика `AllowChannelTelegram`; ключ приложения — у плагина.
+const TELEGRAM: Row = Row {
+    id: crate::account_telegram::TELEGRAM,
+    kind: Kind::Channel,
+    claim: Claim::Channel,
+    set: "postman-plugins",
+    profile: Profile::Network { enterprise_auth: false },
+};
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM];
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -59,6 +69,12 @@ pub(crate) fn remote_channel(id: &str) -> Option<Arc<dyn postman_core::channel::
     Some(Arc::new(remote))
 }
 
+/// Ключ приложения Telegram есть — из `Hello` плагина набора (PLG-05: ключ — у плагина, интерфейс у `api_key` не
+/// зовёт). Процесс ещё не поднимался — не знаем, показываем вход: отказ «нет ключа» вернёт сам плагин.
+pub(crate) fn telegram_has_key() -> bool {
+    host().channel(TELEGRAM).has_key()
+}
+
 /// Набор — рядом с `postman.exe` (как воркер); namespaces Linux — по политике `SandboxNamespaces`.
 struct Beside;
 
@@ -74,7 +90,7 @@ impl Launcher for Beside {
 }
 
 /// Демо-канал — отдельным процессом: в dev-сборке и в замере с `POSTMAN_BENCH_PLUGINS`; снимки и release без набора в
-/// поставке (PLG-03) — в процессе, как прежде. У Matrix внутрипроцессного плагина больше нет (PLG-04).
+/// поставке (PLG-03) — в процессе, как прежде. У Matrix и Telegram внутрипроцессных плагинов больше нет (PLG-04, PLG-05).
 pub(crate) fn demo_remote(screens: bool) -> bool {
     !screens && (cfg!(debug_assertions) || std::env::var_os(postman_core::bench::PLUGINS_VAR).is_some())
 }
@@ -89,13 +105,9 @@ pub(crate) fn registry() -> &'static Registry {
             .with_mail(postman_backend_imap::ImapPlugin)
             .with_area(postman_backend_dav::DavPlugin)
             .with_area(postman_backend_ews::EwsAreaPlugin);
-        // Каналы бесед (ADR 0012 п. 12): Telegram — признаком сборки `telegram`; включает настройка и политика
-        // (`account_telegram`), без учётки сети нет.
-        #[cfg(feature = "telegram")]
-        let r = r.with_channel(postman_backend_telegram::TelegramChannel::new());
-        // Matrix (CH-05, PLG-04) — заместителем набора `postman-plugins-matrix`: процесс — у хоста, после первого
-        // кадра и по запросу; включает настройка и политика (`account_matrix`).
-        r.with_channel(host().channel(MATRIX))
+        // Каналы бесед (ADR 0012 п. 12) — заместителями своих наборов (ADR 0013): процесс — у хоста, после первого
+        // кадра и по запросу; включает настройка и политика (`account_telegram`, `account_matrix`).
+        r.with_channel(host().channel(MATRIX)).with_channel(host().channel(TELEGRAM))
     })
 }
 

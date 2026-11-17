@@ -3,9 +3,11 @@
 //! вход на месте: телефон → код → пароль двухэтапной проверки или QR-код с другого устройства. Полноценный вид
 //! бесед — CH-04.
 //!
-//! Канал собран признаком `telegram`, включается настройкой (`Prefs::channels`, по умолчанию выключен) и
+//! Канал — отдельным процессом общего набора `postman-plugins` (PLG-05, ADR 0013): признака сборки нет,
+//! `grammers` не в дереве `postman.exe`; включается настройкой (`Prefs::channels`, по умолчанию выключен) и
 //! политикой организации `AllowChannelTelegram` (`0` — канала нет в настройках, учётки не подключаются; `1` —
-//! включён, в настройках не выключить). Вход идёт своим потоком с tokio: интерфейс сети не трогает, ответы приходят
+//! включён, в настройках не выключить). Ключ приложения — у плагина, его наличие приходит в `Hello`
+//! (`plugins::telegram_has_key`). Вход идёт своим потоком с tokio: интерфейс сети не трогает, ответы приходят
 //! сообщениями; секрет сессии кладёт в хранилище ОС экран почты (`channels.rs`).
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -13,6 +15,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::Metric;
+use postman_core::channel::telegram as tg;
 use postman_core::channel::{AccountId, Answer, ChanAccount, ChannelError, ChannelState, CodeVia, Prompt, Secret};
 use postman_core::prefs::Prefs;
 
@@ -29,8 +32,9 @@ pub(crate) const PART: crate::part::Part = crate::part::Part { name: "channels",
 
 const TEXTS: &[pets_i18n::Resource] = &[("ru", include_str!("../i18n/ru/channels.ftl")), ("en", include_str!("../i18n/en/channels.ftl"))];
 
-/// Канал Telegram есть в этой сборке.
-pub(crate) const BUILT: bool = cfg!(feature = "telegram");
+/// Канал Telegram есть в этой сборке всегда (PLG-05): код — в процессе набора, не в `postman.exe`; включают настройка
+/// и политика, файл набора — часть установки.
+pub(crate) const BUILT: bool = true;
 
 /// Политика организации запретила канал: его нет в настройках.
 pub(crate) fn forbidden() -> bool {
@@ -51,16 +55,10 @@ pub(crate) fn channel_on(id: &str, p: &Prefs) -> bool {
     }
 }
 
-/// Ключ приложения есть в сборке (без него вход отвечает «нет ключа приложения»).
+/// Ключ приложения есть (без него вход отвечает «нет ключа приложения»): говорит плагин в `Hello` (PLG-05), интерфейс
+/// у `api_key` не зовёт. Процесса ещё не было — показываем вход, отказ вернёт сам плагин.
 pub(crate) fn has_key() -> bool {
-    #[cfg(feature = "telegram")]
-    {
-        postman_backend_telegram::api_key().is_some()
-    }
-    #[cfg(not(feature = "telegram"))]
-    {
-        false
-    }
+    crate::plugins::telegram_has_key()
 }
 
 /// Учётки каналов окна — для настроек (пишет экран почты по событиям потоков).
@@ -413,16 +411,17 @@ fn error_code(e: &ChannelError) -> String {
     }
 }
 
-/// «Проблема → причина» отказа словами (Fluent).
+/// «Проблема → причина» отказа словами (Fluent); коды — в ядре (`postman_core::channel::telegram`, PLG-05):
+/// интерфейс от крейта плагина не зависит.
 pub(crate) fn error_text(e: &ChannelError) -> String {
     match e {
         ChannelError::Denied(code) => match code.as_str() {
-            "no-api-key" => tr!("tg-no-key"),
-            "phone-invalid" => tr!("tg-err-phone"),
-            "code-invalid" => tr!("tg-err-code"),
-            "code-expired" => tr!("tg-err-code-expired"),
-            "password-invalid" => tr!("tg-err-password"),
-            "sign-up-required" => tr!("tg-err-sign-up"),
+            tg::NO_API_KEY => tr!("tg-no-key"),
+            tg::BAD_PHONE => tr!("tg-err-phone"),
+            tg::BAD_CODE => tr!("tg-err-code"),
+            tg::CODE_EXPIRED => tr!("tg-err-code-expired"),
+            tg::BAD_PASSWORD => tr!("tg-err-password"),
+            tg::SIGN_UP => tr!("tg-err-sign-up"),
             _ => tr!("tg-err-denied"),
         },
         ChannelError::Wait { secs } => tr!("tg-err-wait", secs = secs.to_string()),
@@ -497,19 +496,11 @@ struct Qr {
 
 impl Qr {
     fn encode(url: &str) -> Option<Qr> {
-        #[cfg(feature = "telegram")]
-        {
-            let q = qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok()?;
-            let n = usize::try_from(q.size()).ok()?;
-            let size = i32::try_from(n).ok()?;
-            let dark = (0..size).flat_map(|y| (0..size).map(move |x| (x, y))).map(|(x, y)| q.get_module(x, y)).collect();
-            Some(Qr { size: n, dark: std::rc::Rc::new(dark) })
-        }
-        #[cfg(not(feature = "telegram"))]
-        {
-            let _ = url;
-            None
-        }
+        let q = qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok()?;
+        let n = usize::try_from(q.size()).ok()?;
+        let size = i32::try_from(n).ok()?;
+        let dark = (0..size).flat_map(|y| (0..size).map(move |x| (x, y))).map(|(x, y)| q.get_module(x, y)).collect();
+        Some(Qr { size: n, dark: std::rc::Rc::new(dark) })
     }
 
     fn view(&self, l: &Look) -> Div {
@@ -562,7 +553,6 @@ mod tests {
         assert!(!error_text(&ChannelError::Denied("code-invalid".into())).is_empty());
     }
 
-    #[cfg(feature = "telegram")]
     #[test]
     fn qr_encodes() {
         let q = super::Qr::encode("tg://login?token=AbCdEf-_123").unwrap();

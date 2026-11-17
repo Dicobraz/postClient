@@ -18,8 +18,9 @@ use crate::channel::{
     FlowKind, MessageId, Page, Participant, Prompt, Secret, Uploaded,
 };
 
-/// Версия договора обмена: меняется с любым несовместимым изменением сообщений.
-pub const WIRE: u32 = 1;
+/// Версия договора обмена: меняется с любым несовместимым изменением сообщений. №2 — `PluginHello` сообщает наличие
+/// ключа приложения (PLG-05: ключ Telegram остался в плагине, интерфейс его больше не читает из сборки).
+pub const WIRE: u32 = 2;
 
 /// Чья сборка: версия договора, версия программы и номер сборки. Хост и плагин из разных сборок (обновление прервано)
 /// не работают вместе.
@@ -69,12 +70,16 @@ pub struct HostHello {
     pub settings: Settings,
 }
 
-/// Приветствие плагина: чья сборка и кто он.
+/// Приветствие плагина: чья сборка, кто он и есть ли у него ключ приложения (Telegram; остальные плагины — `false`,
+/// интерфейс читает только у своего канала).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginHello {
     pub build: Build,
     pub id: String,
     pub kind: Kind,
+    /// Ключ приложения (`api_id`/`api_hash`) в сборке плагина есть (PLG-05, ADR 0013 «Договор»): сам ключ — у
+    /// плагина, интерфейсу — только факт его наличия.
+    pub key: bool,
 }
 
 /// Подключённая сессия канала: кто я и что умеет учётка (`ChannelSession::me`, `features`).
@@ -526,7 +531,7 @@ mod tests {
 
     fn replies() -> Vec<Reply> {
         let all = vec![
-            Reply::Hello(PluginHello { build: Build::current(), id: "demo".into(), kind: Kind::Channel }),
+            Reply::Hello(PluginHello { build: Build::current(), id: "telegram".into(), kind: Kind::Channel, key: true }),
             Reply::Stats { rss: 8 << 20 },
             Reply::Features(ChannelFeatures::default()),
             Reply::Address(Some(address())),
