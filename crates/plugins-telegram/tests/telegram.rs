@@ -1,9 +1,9 @@
-//! Канал Telegram настоящим процессом `postman-plugins --plugin=telegram` в песочнице «сеть без файлов» (ADR 0013,
-//! PLG-05): `Hello` со сверкой сборки и сообщением о ключе приложения; сборка без ключа (`POSTMAN_TG_API_*` не задан,
-//! как в тестах CI) — вход отказывает «нет ключа приложения» тем же кодом, что и без процесса. Полный вход (телефон,
-//! код, пароль, QR) без сети не проверить настоящим процессом: подставной сервер `fake` живёт в памяти теста — тот же
-//! поток обменом проверяет `crates/backend-telegram/tests/remote.rs`; настоящая проверка входа — ручная
-//! (`docs/manual-tests/PLG-05.md`).
+//! Канал Telegram настоящим процессом `postman-plugins-telegram --plugin=telegram` в песочнице «сеть без файлов»
+//! (ADR 0013, PLG-05): `Hello` со сверкой сборки и сообщением о ключе приложения; сборка без ключа
+//! (`POSTMAN_TG_API_*` не задан, как в тестах CI) — вход отказывает «нет ключа приложения» тем же кодом, что и без
+//! процесса. Полный вход (телефон, код, пароль, QR) без сети не проверить настоящим процессом: подставной сервер
+//! `fake` живёт в памяти теста — тот же поток обменом проверяет `crates/backend-telegram/tests/remote.rs`; настоящая
+//! проверка входа — ручная (`docs/manual-tests/PLG-05.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -19,14 +19,14 @@ use postman_core::channel::telegram as tg;
 use postman_core::channel::{AccountId, ChannelError, ChannelId, ChannelPlugin, FlowCtx, LocalStore, PluginStore};
 
 const ROW: Row =
-    Row { id: ID, kind: Kind::Channel, claim: Claim::Channel, set: "postman-plugins", profile: Profile::Network { enterprise_auth: false } };
+    Row { id: ID, kind: Kind::Channel, claim: Claim::Channel, set: "postman-plugins-telegram", profile: Profile::Network { enterprise_auth: false } };
 
 /// Запуск настоящего набора.
 struct Real;
 
 impl Launcher for Real {
     fn launch(&self, row: &Row) -> std::io::Result<Started> {
-        let exe = Path::new(env!("CARGO_BIN_EXE_postman-plugins"));
+        let exe = Path::new(env!("CARGO_BIN_EXE_postman-plugins-telegram"));
         ProcLauncher { dir: exe.parent().unwrap().to_owned(), namespaces: Namespaces::Optional }.launch(row)
     }
 }
@@ -61,7 +61,7 @@ fn telegram_without_a_key_refuses_over_a_real_process() {
 /// Строка набора — как мнение самого плагина: вид, профиль, адреса.
 #[test]
 fn set_entry_matches_the_row() {
-    let entry = postman_plugins::find(ID).unwrap();
+    let entry = postman_plugins_telegram::find(ID).unwrap();
     assert_eq!((entry.kind, entry.profile), (ROW.kind, ROW.profile));
     assert!(entry.claims("postman://telegram/9990001/c123") && !entry.claims("postman://demo/a/b"));
 }

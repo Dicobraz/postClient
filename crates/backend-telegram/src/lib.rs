@@ -3,8 +3,8 @@
 //! поток обновлений, история, поиск, действия, файлы (`session`), перевод TL ↔ общая модель ([`convert`],
 //! [`text`]). Хранение, поиск, уведомления — у ядра.
 //!
-//! Отдельным процессом (PLG-05, ADR 0013): набор `postman-plugins --plugin=telegram`, точка входа — [`serve`]; из
-//! `postman.exe` канал ушёл, в реестре — заместитель. Хранилище — услугой ядра по обмену.
+//! Отдельным процессом (PLG-05, ADR 0013): набор `postman-plugins-telegram --plugin=telegram`, точка входа —
+//! [`serve`]; из `postman.exe` канал ушёл, в реестре — заместитель. Хранилище — услугой ядра по обмену.
 //!
 //! - **Ключ приложения** (`api_id`/`api_hash`) — при сборке из переменных окружения `POSTMAN_TG_API_ID`,
 //!   `POSTMAN_TG_API_HASH` (секреты CI); в репозитории его нет, на диск не пишется. Есть ли он — плагин сообщает
@@ -56,7 +56,7 @@ pub const ARCHIVE: &str = "archive";
 /// слова интерфейса (Fluent) и коды плагина — одни и те же, интерфейс от крейта плагина не зависит.
 pub use postman_core::channel::telegram::{BAD_CODE, BAD_PASSWORD, BAD_PHONE, CODE_EXPIRED, NO_API_KEY, SIGN_UP};
 
-/// Точка входа процесса набора `postman-plugins --plugin=telegram` (ADR 0013, PLG-05): канал отвечает хосту за себя,
+/// Точка входа процесса набора `postman-plugins-telegram --plugin=telegram` (ADR 0013, PLG-05): канал отвечает хосту за себя,
 /// наличие ключа приложения сообщает в `Hello`; клиент и рантайм — при первом настоящем вопросе.
 pub fn serve(link: PluginLink) -> i32 {
     serve_channel(link, ID, api_key().is_some(), || Arc::new(TelegramChannel::new()))

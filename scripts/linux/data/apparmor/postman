@@ -22,3 +22,9 @@ profile postman-plugins /usr/bin/postman-plugins flags=(unconfined) {
 
   include if exists <local/postman-plugins>
 }
+
+profile postman-plugins-telegram /usr/bin/postman-plugins-telegram flags=(unconfined) {
+  userns,
+
+  include if exists <local/postman-plugins-telegram>
+}

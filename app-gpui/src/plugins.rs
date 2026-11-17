@@ -6,8 +6,9 @@
 //!
 //! Плагины отдельными процессами (ADR 0013): строка плагина ([`ROWS`]) — идентификатор, вид, как узнать свой адрес,
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
-//! по запросу. Так работают демо-канал (PLG-02), Matrix (PLG-04, свой файл набора `postman-plugins-matrix`) и Telegram
-//! (PLG-05, общий набор `postman-plugins`); почтовые пути — внутри `postman.exe`, как были.
+//! по запросу. Так работают демо-канал (PLG-02, общий набор `postman-plugins`), Matrix (PLG-04, свой файл
+//! `postman-plugins-matrix`) и Telegram (PLG-05, свой файл `postman-plugins-telegram`); почтовые пути — внутри
+//! `postman.exe`, как были.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -35,13 +36,14 @@ const MATRIX: Row = Row {
     profile: Profile::Network { enterprise_auth: false },
 };
 
-/// Telegram (CH-03) — общим набором `postman-plugins` (PLG-05, ADR 0013): лёгкие каналы — одним файлом (решение
-/// владельца 2026-11-16). Включает настройка и политика `AllowChannelTelegram`; ключ приложения — у плагина.
+/// Telegram (CH-03) — набором `postman-plugins-telegram` (PLG-05, ADR 0013): отдельным файлом набора, решение
+/// владельца 2026-11-16 (общий файл — почта и каталог). Включает настройка и политика `AllowChannelTelegram`;
+/// ключ приложения — у плагина.
 const TELEGRAM: Row = Row {
     id: crate::account_telegram::TELEGRAM,
     kind: Kind::Channel,
     claim: Claim::Channel,
-    set: "postman-plugins",
+    set: "postman-plugins-telegram",
     profile: Profile::Network { enterprise_auth: false },
 };
 
@@ -147,8 +149,11 @@ mod tests {
     #[test]
     fn rows_match_the_plugin_sets() {
         use postman_core::backend::remote::SetEntry;
-        let sets: &[(&str, &[SetEntry])] =
-            &[("postman-plugins", postman_plugins::PLUGINS), ("postman-plugins-matrix", postman_plugins_matrix::PLUGINS)];
+        let sets: &[(&str, &[SetEntry])] = &[
+            ("postman-plugins", postman_plugins::PLUGINS),
+            ("postman-plugins-matrix", postman_plugins_matrix::PLUGINS),
+            ("postman-plugins-telegram", postman_plugins_telegram::PLUGINS),
+        ];
         for row in super::ROWS {
             let Some((_, plugins)) = sets.iter().find(|(set, _)| *set == row.set) else {
                 panic!("{}: неизвестный файл набора {}", row.id, row.set)

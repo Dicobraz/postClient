@@ -1,0 +1,35 @@
+[package]
+name = "postman-plugins-telegram"
+description = "Набор плагина Telegram отдельным процессом (ADR 0013, PLG-05): postman-plugins-telegram --plugin=telegram"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "postman-plugins-telegram"
+path = "src/main.rs"
+
+[dependencies]
+# Договор, сторона плагина (`backend::remote::serve_channel` и `set_main`) и сообщения обмена.
+postman-core.workspace = true
+# Запирание песочницы, сторож смерти хоста, связь — общий механизм процессов.
+postman-proc.workspace = true
+# Канал Telegram (CH-03) — отдельным файлом набора (решение владельца 2026-11-16: общий набор — почта и каталог;
+# Telegram и Matrix — каждый своим файлом). Ключ приложения — в сборке плагина, наличие — в `Hello` (PLG-05).
+postman-backend-telegram.workspace = true
+tracing = "0.1"
+# Журнал процесса — строками с уровнем в stderr (хост пишет их в журнал приложения); уровень — из `Hello` и смены
+# настройки (`reload`). Та же копия, что у общего набора.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
+
+[lints]
+workspace = true
+
+# Версия exe (build.rs, rc.exe из Windows SDK) — как у общего набора: MSI сверяет её с версией комплекта (PLG-03).
+[build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+# Хранилище хоста в тесте процесса (`tests/telegram.rs`): состояние плагина — в базе хоста, не в файлах процесса.
+postman-cache.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "time", "sync", "macros"] }

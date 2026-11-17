@@ -95,10 +95,11 @@ embed-resource = "3"
 
 [dev-dependencies]
 tempfile = "3"
-# Строки плагинов корня (`src/plugins.rs`) сверяются с наборами `postman-plugins` и `postman-plugins-matrix`
-# (ADR 0013); в сборку интерфейса наборы не входят — отдельные процессы.
+# Строки плагинов корня (`src/plugins.rs`) сверяются с наборами `postman-plugins`, `postman-plugins-matrix` и
+# `postman-plugins-telegram` (ADR 0013); в сборку интерфейса наборы не входят — отдельные процессы.
 postman-plugins.workspace = true
 postman-plugins-matrix.workspace = true
+postman-plugins-telegram.workspace = true
 # Каналы команд синхронизации в тестах маршрутизации (S7-03б); та же версия, что у postman-core.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 

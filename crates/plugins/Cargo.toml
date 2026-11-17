@@ -16,9 +16,6 @@ postman-core.workspace = true
 postman-proc.workspace = true
 # Демо-канал — первый плагин отдельным процессом (PLG-02): без сети, для тестов и замера.
 postman-demo.workspace = true
-# Канал Telegram (CH-03, PLG-05): лёгкие каналы — общим файлом набора (решение владельца 2026-11-16); ключ
-# приложения — в сборке плагина, наличие — в `Hello`.
-postman-backend-telegram.workspace = true
 tracing = "0.1"
 # Журнал процесса — строками с уровнем в stderr (хост пишет их в журнал приложения); уровень — из `Hello` и смены
 # настройки (`reload`). Та же копия, что у pets-shell.
@@ -32,8 +29,6 @@ workspace = true
 embed-resource = "3"
 
 [dev-dependencies]
-# Подставной сервер Telegram для теста без сети (`tests/telegram.rs`).
-postman-backend-telegram = { workspace = true, features = ["testkit"] }
 # Хранилище хоста в тесте процесса (`tests/process.rs`): состояние плагина — в базе хоста, не в файлах процесса.
 postman-cache.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "time", "sync", "macros"] }

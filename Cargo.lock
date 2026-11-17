@@ -7818,6 +7818,7 @@ dependencies = [
  "postman-ir",
  "postman-plugins",
  "postman-plugins-matrix",
+ "postman-plugins-telegram",
  "postman-search",
  "postman-smime",
  "postman-worker",
@@ -7891,7 +7892,6 @@ name = "postman-plugins"
 version = "0.1.0-beta.7"
 dependencies = [
  "embed-resource",
- "postman-backend-telegram",
  "postman-cache",
  "postman-core",
  "postman-demo",
@@ -7906,6 +7906,20 @@ name = "postman-plugins-matrix"
 version = "0.1.0-beta.7"
 dependencies = [
  "postman-backend-matrix",
+ "postman-cache",
+ "postman-core",
+ "postman-proc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "postman-plugins-telegram"
+version = "0.1.0-beta.7"
+dependencies = [
+ "embed-resource",
+ "postman-backend-telegram",
  "postman-cache",
  "postman-core",
  "postman-proc",
