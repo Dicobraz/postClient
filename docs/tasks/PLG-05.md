@@ -19,8 +19,8 @@ manual: yes                 # docs/manual-tests/PLG-05.md
 ## Готово
 Вход, диалоги, история, отправка, правки, файлы — через процесс (ручная проверка — `docs/manual-tests/PLG-05.md`,
 владелец); тесты договора зелёные (`conformance` + через обмен `tests/remote.rs` + процесс набора
-`crates/plugins-telegram/tests/telegram.rs`, `nextest --workspace`, clippy `-D warnings` и `fmt --check` чисты,
-school-99 Linux); `grammers-*` нет в дереве зависимостей `postman-gpui` (`interface_does_not_link_plugins`:
+`crates/plugins-telegram/tests/telegram.rs`, `nextest --workspace` — **1574/1574** (слияние main PLG-07),
+clippy `-D warnings` и `fmt --check` чисты, school-99 Linux); `grammers-*` нет в дереве зависимостей `postman-gpui` (`interface_does_not_link_plugins`:
 `backend-telegram` вне `LINKED_FOR_NOW`); пакеты трёх ОС работают с каналом (файл набора
 `postman-plugins-telegram` — компонент установки с этой волной: deb/rpm, zip/MSI, app/dmg).
 
