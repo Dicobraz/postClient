@@ -20,11 +20,6 @@ struct Buffer {
 
 impl Buffer {
     const EMPTY: Buffer = Buffer { length: 0, value: null_mut() };
-
-    /// Вход GSS-API: функции его только читают.
-    fn of(data: &[u8]) -> Buffer {
-        Buffer { length: data.len(), value: data.as_ptr().cast_mut().cast() }
-    }
 }
 
 #[repr(C, packed(2))]
