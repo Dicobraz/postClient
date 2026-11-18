@@ -31,6 +31,7 @@ const POLL: std::time::Duration = std::time::Duration::from_secs(120);
 /// же — его события идут через мост ([`Both`], `Features` — объединённые с областями), команды — сначала областям
 /// (`addresses` по ключам: `dav` → `https://…`), затем почтовому пути. `plugins` — пути областей реестра. Ответ —
 /// канал команд учётной записи.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn serve(
     account: Account,
     profile: Option<String>,
@@ -103,6 +104,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Жизнь областей учётной записи: подключение, развод команд, опрос. До конца канала команд интерфейса.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     url: String,
     auth: Auth,
