@@ -1,7 +1,7 @@
 //! Linux (LIN-05): контроллер домена — записи SRV через резолвер glibc (`res_query`, учитывает `/etc/resolv.conf` и
 //! systemd-resolved), домен — область билета Kerberos из кэша по умолчанию (`kinit`, SSSD) через GSS-API MIT Kerberos
-//! (`libgssapi_krb5`). Сам вход Kerberos — `ldap3` (`sasl_gssapi_bind`, с привязкой к каналу TLS). Каждый блок
-//! `unsafe` — с обоснованием.
+//! (`libgssapi_krb5`). Вход учётной записью делает сам плагин каталога (`ldap3` GSSAPI); здесь — только поиск
+//! контроллера. Каждый блок `unsafe` — с обоснованием.
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr::null_mut;
@@ -78,7 +78,7 @@ fn kerberos_principal() -> Option<String> {
     // SAFETY: имя — по умолчанию (null); OID и набор механизмов живы на время вызова; `cred` освобождается ниже.
     let major = unsafe { gss_acquire_cred(&mut minor, null_mut(), 0, &mechs, GSS_C_INITIATE, &mut cred, null_mut(), null_mut()) };
     if gss_error(major) || cred.is_null() {
-        tracing::debug!(major, minor, "ldap: no Kerberos credentials");
+        tracing::debug!(major, minor, "directory: no Kerberos credentials");
         return None;
     }
     let mut name = null_mut();
@@ -87,7 +87,7 @@ fn kerberos_principal() -> Option<String> {
     // SAFETY: `cred` выдан выше и дальше не используется.
     unsafe { gss_release_cred(&mut 0, &mut cred) };
     if gss_error(major) || name.is_null() {
-        tracing::debug!(major, minor, "ldap: no Kerberos principal");
+        tracing::debug!(major, minor, "directory: no Kerberos principal");
         return None;
     }
     let mut out = Buffer { length: 0, value: null_mut() };
@@ -119,11 +119,11 @@ fn srv_records(name: &str) -> Vec<Vec<u8>> {
     // SAFETY: имя — строка C с нулём; буфер ответа — `DNS_MAX` байт, резолвер пишет не больше `len`.
     let n = unsafe { res_query(cname.as_ptr(), DNS_CLASS_IN, DNS_TYPE_SRV, answer.as_mut_ptr(), DNS_MAX as c_int) };
     let Ok(n) = usize::try_from(n) else {
-        tracing::debug!("ldap: DNS SRV query failed");
+        tracing::debug!("directory: DNS SRV query failed");
         return Vec::new();
     };
     answer.truncate(n.min(DNS_MAX));
-    crate::srv::answers(&answer, DNS_TYPE_SRV as u16)
+    super::srv::answers(&answer, DNS_TYPE_SRV as u16)
 }
 
 /// Контроллер домена: домен — область билета Kerberos пользователя, сервер — по записям SRV
@@ -133,11 +133,11 @@ pub(crate) fn domain_controller() -> Option<String> {
 }
 
 fn dc_lookup() -> Option<String> {
-    let domain = crate::srv::realm_domain(&kerberos_principal()?)?;
-    let records = srv_records(&crate::srv::query_name(&domain));
-    let dc = crate::srv::choose(records.iter().filter_map(|r| crate::srv::parse(r)));
+    let domain = super::srv::realm_domain(&kerberos_principal()?)?;
+    let records = srv_records(&super::srv::query_name(&domain));
+    let dc = super::srv::choose(records.iter().filter_map(|r| super::srv::parse(r)));
     if dc.is_none() {
-        tracing::debug!("ldap: no domain controller in DNS for the Kerberos realm");
+        tracing::debug!("directory: no domain controller in DNS for the Kerberos realm");
     }
     dc
 }
@@ -147,7 +147,7 @@ mod tests {
     /// Без билета (пустой кэш) — `None`, без паники и без запросов пароля.
     #[test]
     fn no_ticket_no_controller() {
-        let dir = std::env::temp_dir().join(format!("postman-ldap-krb5-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("postman-directory-krb5-{}", std::process::id()));
         // SAFETY (окружение): переменные читает только libkrb5 в этом тесте; nextest запускает тест отдельным процессом.
         unsafe {
             std::env::set_var("KRB5CCNAME", format!("FILE:{}", dir.join("none").display()));

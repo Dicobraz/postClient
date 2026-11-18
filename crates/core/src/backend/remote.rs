@@ -23,7 +23,7 @@
 mod serve;
 mod sso;
 
-pub use serve::{SetEntry, on_log, on_stats, serve_channel, set_main, settings};
+pub use serve::{SetEntry, on_log, on_stats, serve_channel, serve_directory, set_main, settings};
 pub(crate) use sso::BROWSER_WAIT;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -41,12 +41,15 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::{oneshot, watch};
 
 use super::BoxFuture;
-use super::wire::{Ask, Build, Call, FromPlugin, HostHello, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin};
+use super::wire::{
+    Ask, Build, Call, DirectoryQuery, FromPlugin, HostHello, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin,
+};
 use crate::channel::{
     AccountId, Address, Answer, AttachmentSource, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelFeatures, ChannelPlugin, ChannelSession,
     ChannelState, ConnectCtx, ConversationId, Cursor, Done, FileMeta, Flow, FlowCtx, FlowKind, MessageId, Page, Participant, PluginStore, Prompt,
     Uploaded,
 };
+use crate::smime::directory::{Directory as SmimeDirectory, DirectoryError};
 
 /// Связь хоста с процессом плагина.
 pub type HostLink = Link<ToPlugin, FromPlugin>;
@@ -68,6 +71,13 @@ pub const PONG_WAIT: Duration = Duration::from_secs(30);
 pub const PING_EVERY: Duration = Duration::from_secs(10);
 /// Синхронные вопросы описания (`features`, `parse_link`…) ждут ответа не дольше; процесс не поднят — не ждут вовсе.
 const SYNC_WAIT: Duration = Duration::from_secs(2);
+/// Процесс каталога завершают после стольких простоя (PLG-06, ADR 0013 «по запросу»): начальный порог — 5 минут,
+/// уточнит PLG-12. Следующий запрос поднимет процесс снова.
+pub const IDLE_EXIT: Duration = Duration::from_secs(300);
+/// Запрос каталога ждёт ответа не дольше: поиск в плагине ограничен [`TIMEOUT`] (5 с) — обмен с запасом на него.
+const DIRECTORY_WAIT: Duration = Duration::from_secs(6);
+/// Пауза между опросами фазы процесса каталога ([`RemoteDirectory::ready`]) — ждёт отдельный поток каталога.
+const PHASE_POLL: Duration = Duration::from_millis(5);
 
 /// Как плагин узнаёт свой адрес — без запуска процесса.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +90,8 @@ pub enum Claim {
     Path(&'static str),
     /// Ключ области в адресе учётки: `dav` → `?dav=https://…`.
     Area(&'static str),
+    /// Своего адреса нет (каталог, PLG-06): поиск по настройкам «Безопасность», не по адресу учётки.
+    None,
 }
 
 /// Строка плагина в композиционном корне: всё, что о нём нужно знать без процесса.
@@ -103,6 +115,7 @@ impl Row {
             Claim::Scheme(s) => url.starts_with(&s.to_ascii_lowercase()),
             Claim::Path(p) => url.split(['?', '#']).next().is_some_and(|u| u.contains(&p.to_ascii_lowercase())),
             Claim::Area(key) => url.split_once('?').is_some_and(|(_, q)| q.split('&').any(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))),
+            Claim::None => false,
         }
     }
 
@@ -273,6 +286,14 @@ impl Host {
         RemoteChannel { host: Arc::clone(&self.0), plugin: self.0.plugin(row), reported: Mutex::new(HashMap::new()), features: Mutex::new(None) }
     }
 
+    /// Заместитель каталога по строке и настройкам запроса (PLG-06): процесс — по первому запросу сертификатов,
+    /// после [`IDLE_EXIT`] простоя завершается до следующего. Процесса нет, пока заместителя не позовут.
+    pub fn directory(&self, row: Row, query: DirectoryQuery) -> Arc<dyn SmimeDirectory> {
+        let plugin = self.0.plugin(row);
+        *lock(&plugin.idle) = Some(IDLE_EXIT);
+        Arc::new(RemoteDirectory { host: Arc::clone(&self.0), plugin, query })
+    }
+
     /// Плагин `id` — первым в очереди старта и без понижения приоритета (активная учётка, исходящее).
     pub fn prefer(&self, id: &'static str) {
         if let Some(p) = lock(&self.0.plugins).get(id) {
@@ -316,6 +337,8 @@ impl Inner {
                 supervised: AtomicBool::new(false),
                 retry: Mutex::new(false),
                 retried: Condvar::new(),
+                idle: Mutex::new(None),
+                last_use: Mutex::new(None),
             })
         }))
     }
@@ -393,6 +416,11 @@ struct Plugin {
     supervised: AtomicBool,
     retry: Mutex<bool>,
     retried: Condvar,
+    /// Предел простоя, после которого процесс завершают до следующего запроса: у каталога [`IDLE_EXIT`] (PLG-06),
+    /// у каналов `None` — держат до выхода программы.
+    idle: Mutex<Option<Duration>>,
+    /// Последний запрос каталога — простоя считает сторож ([`Conn::watch`]).
+    last_use: Mutex<Option<Instant>>,
 }
 
 impl Plugin {
@@ -433,7 +461,7 @@ fn want(host: &Arc<Inner>, plugin: &Arc<Plugin>) {
     }
     plugin.set(Phase::Waiting);
     let (h, p) = (Arc::clone(host), Arc::clone(plugin));
-    let spawned = std::thread::Builder::new().name(format!("plugin {}", plugin.row.id)).spawn(move || supervise(&h, &p));
+    let spawned = std::thread::Builder::new().name(format!("plugin {}", plugin.row.id)).spawn(move || supervise(&h, p));
     if let Err(e) = spawned {
         tracing::error!(plugin = plugin.row.id, "plugin thread: {e}");
         plugin.supervised.store(false, Ordering::SeqCst);
@@ -448,38 +476,53 @@ enum Failed {
     Crash(String),
 }
 
+/// Чем кончился обмен с процессом.
+enum Ended {
+    /// Связь закрылась: падение или хост убил — перезапуск по паузам (каналы держат до выхода).
+    Crashed(String),
+    /// Простой вышел (каталог, [`IDLE_EXIT`], PLG-06): процесс завершён до следующего запроса — не падение.
+    Idle,
+}
+
 /// Жизнь процесса плагина: очередь старта, запуск, `Hello`, обмен до конца связи, перезапуск с паузами.
-fn supervise(host: &Inner, plugin: &Plugin) {
+fn supervise(host: &Inner, plugin: Arc<Plugin>) {
     let id = plugin.row.id;
     let mut crashes: VecDeque<Instant> = VecDeque::new();
     loop {
         plugin.set(Phase::Waiting);
-        let seq = host.acquire(plugin);
+        let seq = host.acquire(&plugin);
         plugin.set(Phase::Starting);
         host.launches.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
         let launched = host.launcher.launch(&plugin.row);
         host.entered(seq);
         let outcome = match launched {
-            Ok(s) => hello(host, plugin, s, started),
+            Ok(s) => hello(host, &plugin, s, started),
             // Файла набора нет (не собран, не установлен): перезапуски не помогут.
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Failed::Build(format!("plugin set {} not found", plugin.row.set))),
             Err(e) => Err(Failed::Crash(format!("launch: {e}"))),
         };
         host.release();
-        let cause = match outcome {
+        let ended = match outcome {
             Ok(conn) => {
                 plugin.set(Phase::Ready(Arc::clone(&conn)));
                 tracing::info!(plugin = id, "plugin started in {} ms", started.elapsed().as_millis());
-                conn.serve(plugin)
+                conn.serve(&plugin)
             }
             Err(Failed::Build(why)) => {
                 tracing::error!(plugin = id, "plugin not used: {why}; restart Postman");
-                problem(host, plugin, why);
+                problem(host, &plugin, why);
                 crashes.clear();
                 continue;
             }
-            Err(Failed::Crash(why)) => why,
+            Err(Failed::Crash(why)) => Ended::Crashed(why),
+        };
+        let Ended::Crashed(cause) = ended else {
+            // Простой вышел: не падение, перезапуска нет; следующий запрос поднимет процесс заново ([`want`]).
+            tracing::info!(plugin = id, "plugin idle for {} min, stopped until the next request", IDLE_EXIT.as_secs() / 60);
+            plugin.supervised.store(false, Ordering::SeqCst);
+            plugin.set(Phase::Idle);
+            return;
         };
         tracing::warn!(plugin = id, "plugin process ended: {cause}");
         let now = Instant::now();
@@ -489,7 +532,7 @@ fn supervise(host: &Inner, plugin: &Plugin) {
         }
         if crashes.len() >= CRASHES {
             tracing::error!(plugin = id, "plugin crashed {} times in {} min, waiting for retry: {cause}", crashes.len(), CRASH_WINDOW.as_secs() / 60);
-            problem(host, plugin, format!("crashed {} times: {cause}", crashes.len()));
+            problem(host, &plugin, format!("crashed {} times: {cause}", crashes.len()));
             crashes.clear();
             continue;
         }
@@ -506,7 +549,7 @@ fn problem(host: &Inner, plugin: &Plugin, why: String) {
 
 /// `Hello`: сверка сборки и того, что плагин — тот самый. Ответ ждём здесь же (обмен ещё не начат), не дольше
 /// [`PONG_WAIT`].
-fn hello(host: &Inner, plugin: &Plugin, s: Started, started: Instant) -> Result<Arc<Conn>, Failed> {
+fn hello(host: &Inner, plugin: &Arc<Plugin>, s: Started, started: Instant) -> Result<Arc<Conn>, Failed> {
     let Started { link, kill, exit_code, mut background } = s;
     let lowered = *lock(&plugin.priority) == Priority::Rest;
     if lowered && let Err(e) = background(true) {
@@ -523,6 +566,7 @@ fn hello(host: &Inner, plugin: &Plugin, s: Started, started: Instant) -> Result<
         exit_code: Mutex::new(exit_code),
         background: Mutex::new(background),
         lowered: AtomicBool::new(lowered),
+        idle_exit: AtomicBool::new(false),
     });
     let ask = ToPlugin::Ask { id: 0, ask: Ask::Hello(HostHello { build: Build::current(), settings: lock(&host.settings).clone() }) };
     if let Err(e) = conn.link.send(&ask, &[]) {
@@ -557,7 +601,8 @@ fn hello(host: &Inner, plugin: &Plugin, s: Started, started: Instant) -> Result<
     drop(m);
     let watched = Arc::clone(&conn);
     let id = plugin.row.id;
-    if let Err(e) = std::thread::Builder::new().name(format!("plugin {id} ping")).spawn(move || watched.watch(id)) {
+    let watched_plugin = Arc::clone(plugin);
+    if let Err(e) = std::thread::Builder::new().name(format!("plugin {id} ping")).spawn(move || watched.watch(id, watched_plugin)) {
         tracing::warn!(plugin = id, "plugin ping thread: {e}");
     }
     Ok(conn)
@@ -588,6 +633,8 @@ struct Conn {
     background: Mutex<Box<dyn FnMut(bool) -> io::Result<()> + Send>>,
     /// Приоритет понижен до первой синхронизации.
     lowered: AtomicBool,
+    /// Простой вышел — процесс завершают до следующего запроса ([`Conn::watch`], PLG-06), не падение.
+    idle_exit: AtomicBool,
 }
 
 impl Conn {
@@ -632,8 +679,8 @@ impl Conn {
     }
 
     /// Обмен до конца связи (поток плагина): ответы — ждущим, события — сессиям, вызовы хранилища — владельцам.
-    /// Ответ — причина конца для журнала.
-    fn serve(self: &Arc<Self>, plugin: &Plugin) -> String {
+    /// Ответ — чем кончился обмен ([`Ended`]).
+    fn serve(self: &Arc<Self>, plugin: &Plugin) -> Ended {
         loop {
             match self.link.recv() {
                 Incoming::Message(FromPlugin::Answer { id, reply }, bin) => match lock(&self.pending).remove(&id) {
@@ -672,6 +719,14 @@ impl Conn {
                 Incoming::Closed => break,
             }
         }
+        metrics_lock().rss.remove(plugin.row.id);
+        // Простой вышел (каталог, PLG-06): процесс завершён до следующего запроса — не падение; ждущим — «процесса
+        // нет», перезапуска не будет ([`supervise`]).
+        if self.idle_exit.load(Ordering::SeqCst) {
+            plugin.set(Phase::Idle);
+            lock(&self.pending).clear();
+            return Ended::Idle;
+        }
         // Сначала — что процесса нет (повторное подключение не возьмёт мёртвую связь), затем — ждущим и сессиям.
         plugin.set(Phase::Down);
         lock(&self.pending).clear();
@@ -680,13 +735,13 @@ impl Conn {
         for (_, tx) in lock(&self.sessions).drain() {
             let _ = tx.send(ChannelEvent::State(ChannelState::Offline { retry_in: 0 }));
         }
-        metrics_lock().rss.remove(plugin.row.id);
-        format!("link closed{}", self.exit())
+        Ended::Crashed(format!("link closed{}", self.exit()))
     }
 
     /// Сторож процесса: `Ping` раз в [`PING_EVERY`], нет `Pong` за [`PONG_WAIT`] — убить (обмен кончится, поток
-    /// плагина перезапустит). Заодно — память процесса для `--bench`.
-    fn watch(&self, id: &'static str) {
+    /// плагина перезапустит). Заодно — память процесса для `--bench` и простой каталога (PLG-06): вышел
+    /// [`IDLE_EXIT`] с последнего запроса — процесс завершают до следующего (ADR 0013 «по запросу»).
+    fn watch(&self, id: &'static str, plugin: Arc<Plugin>) {
         loop {
             match self.ask_sync(Ask::Stats, SYNC_WAIT) {
                 Some(Reply::Stats { rss }) => {
@@ -697,6 +752,14 @@ impl Conn {
             }
             std::thread::sleep(PING_EVERY);
             if self.link.is_closed() {
+                return;
+            }
+            if let Some(idle) = *lock(&plugin.idle)
+                && lock(&plugin.last_use).is_some_and(|last| last.elapsed() >= idle)
+            {
+                tracing::info!(plugin = id, "plugin idle for {} min, stopping until the next request", idle.as_secs() / 60);
+                self.idle_exit.store(true, Ordering::SeqCst);
+                self.kill();
                 return;
             }
             if !self.link.ping(PONG_WAIT) {
@@ -810,6 +873,83 @@ impl RemoteChannel {
     /// наличия). Процесс ещё не поднимался — не знаем: показываем вход (`true`), отказ «нет ключа» вернёт сам плагин.
     pub fn has_key(&self) -> bool {
         lock(&self.plugin.key).unwrap_or(true)
+    }
+}
+
+/// Заместитель каталога (PLG-06): тот же [`SmimeDirectory`], внутри — процесс набора. Запросы редки («Найти в
+/// каталоге», поиск сертификата при отправке): процесс стартует по первому запросу (после первого кадра, как у всех
+/// плагинов) и завершается после [`IDLE_EXIT`] простоя — следующий запрос поднимет его снова (ADR 0013 «по запросу»).
+/// Ответ ждёт в том же потоке, что и раньше ждал плагин ([`crate::smime::directory::lookup`]).
+pub struct RemoteDirectory {
+    host: Arc<Inner>,
+    plugin: Arc<Plugin>,
+    /// Настройки каталога («Настройки → Безопасность»); пароль простого входа читает ядро. Адреса запроса — при
+    /// каждом [`SmimeDirectory::certificates`].
+    query: DirectoryQuery,
+}
+
+impl RemoteDirectory {
+    /// Работающий процесс: поднять и дождаться. «Проблема» — ещё одна попытка, как у каналов ([`RemoteChannel`]);
+    /// после [`IDLE_EXIT`] процесс в [`Phase::Idle`] — поднимем ([`want`]). Смена фазы приходит от потока плагина:
+    /// короткие паузы между опросами (`watch` без блокирующего ожидания), ждёт отдельный поток каталога.
+    fn ready(&self) -> Result<Arc<Conn>, DirectoryError> {
+        want(&self.host, &self.plugin);
+        let mut rx = self.plugin.phase.subscribe();
+        let mut retried: Option<u64> = None;
+        loop {
+            let mut ask_retry = false;
+            {
+                let phase = rx.borrow_and_update();
+                if let Phase::Ready(conn) = &*phase
+                    && !conn.link.is_closed()
+                {
+                    return Ok(Arc::clone(conn));
+                }
+                if let Phase::Problem { serial, error } = &*phase
+                    && retried != Some(*serial)
+                {
+                    if retried.is_some() {
+                        return Err(unavailable(error));
+                    }
+                    retried = Some(*serial);
+                    ask_retry = true;
+                }
+            }
+            if ask_retry {
+                self.plugin.retry();
+            }
+            while matches!(rx.has_changed(), Ok(false)) {
+                std::thread::sleep(PHASE_POLL);
+            }
+        }
+    }
+}
+
+/// Отказ плагина каталога — ошибкой каталога, для строки «каталог недоступен».
+fn unavailable(e: &ChannelError) -> DirectoryError {
+    match e {
+        ChannelError::Plugin(why) => DirectoryError::Unavailable(why.clone()),
+        other => DirectoryError::Unavailable(other.to_string()),
+    }
+}
+
+impl SmimeDirectory for RemoteDirectory {
+    fn certificates(&self, addresses: &[String]) -> Result<Vec<Vec<u8>>, DirectoryError> {
+        for _ in 0..2 {
+            let conn = self.ready()?;
+            // Запрос продлевает простой: процесс не завершится под ним ([`Conn::watch`]).
+            *lock(&self.plugin.last_use) = Some(Instant::now());
+            let mut query = self.query.clone();
+            query.addresses = addresses.to_vec();
+            match conn.ask_sync(Ask::Certificates(query), DIRECTORY_WAIT) {
+                Some(Reply::Certs(r)) => return r,
+                Some(_) => return Err(DirectoryError::Unavailable("unexpected directory reply".into())),
+                // Процесс завершился под запросом (простой успел выйти) — поднимем снова; тайм-аут плагина — как есть.
+                None if conn.link.is_closed() => {}
+                None => return Err(DirectoryError::Timeout),
+            }
+        }
+        Err(DirectoryError::Unavailable("plugin process is not running".into()))
     }
 }
 
@@ -1203,6 +1343,8 @@ mod tests {
         assert!(ews.claims("https://mail.example.test/ews/exchange.asmx") && !ews.claims("https://mail.example.test/?x=/EWS/Exchange.asmx"));
         let dav = Row { claim: Claim::Area("dav"), kind: Kind::Area, ..row("dav") };
         assert!(dav.claims("imaps://h?smtp=x&dav=https://h/dav") && !dav.claims("imaps://h?davx=1"));
+        let directory = Row { claim: Claim::None, kind: Kind::Directory, ..row("ldap") };
+        assert!(!directory.claims("ldap://dc.corp.example") && !directory.claims("postman://ldap/me/c"));
         assert_eq!(row("demo").exe(Path::new("bin")), Path::new("bin").join(format!("postman-plugins{}", std::env::consts::EXE_SUFFIX)));
     }
 }

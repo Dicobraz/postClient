@@ -1,7 +1,7 @@
 //! Платформенный код интерфейса — прослойка над нейтральным API pets (решение владельца 2026-10-28): окно —
-//! `gpui_windows::pets` (pets-gpui-windows) и `pets_gpui_macos` (MAC-02), без UI — `pets_shell`. Вызовов ОС здесь нет,
-//! на других ОС — заглушки. `unsafe` — только счётчик кучи (`alloc`) и `set_var` в начале `main`
-//! (`shell::default_env`).
+//! `gpui_windows::pets` (pets-gpui-windows) и `pets_gpui_macos` (MAC-02), без UI — `pets_shell`. Вызовов ОС здесь
+//! нет, кроме контроллера домена каталога ([`domain`], PLG-06 — функция ОС по решению №12 и ADR 0013), на других ОС
+//! — заглушки. `unsafe` — счётчик кучи (`alloc`), `set_var` в начале `main` (`shell::default_env`) и `domain`.
 //!
 //! Тексты интерфейса, где нарисованы клавиши ОС, на macOS — свой вариант ключа ([`os_key`], MAC-04).
 
@@ -465,6 +465,13 @@ pub fn show_window(window: &Window) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 #[path = "tray_linux.rs"]
 pub mod tray;
+
+/// Контроллер домена компьютера — функция ОС каталога сертификатов (PLG-06, решение №12 и ADR 0013): подсказка
+/// «Настройки → Безопасность → Каталог» и сервер каталога по умолчанию в запросе плагину. Прежде — прямой вызов
+/// плагина LDAP (`postman_backend_ldap::domain_controller`), с отдельным процессом каталога — здесь.
+mod domain;
+
+pub(crate) use domain::domain_controller;
 
 /// Снимок окна: RGBA, 8 бит на канал, строки сверху вниз.
 #[cfg(windows)]

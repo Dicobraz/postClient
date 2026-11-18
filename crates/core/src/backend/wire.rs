@@ -17,10 +17,12 @@ use crate::channel::{
     AccountId, Action, Address, Answer, AttachmentSource, ChannelError, ChannelEvent, ChannelFeatures, ConversationId, Cursor, Done, FileMeta,
     FlowKind, MessageId, Page, Participant, Prompt, Secret, Uploaded,
 };
+use crate::smime::directory::DirectoryError;
 
 /// Версия договора обмена: меняется с любым несовместимым изменением сообщений. №2 — `PluginHello` сообщает наличие
-/// ключа приложения (PLG-05: ключ Telegram остался в плагине, интерфейс его больше не читает из сборки).
-pub const WIRE: u32 = 2;
+/// ключа приложения (PLG-05: ключ Telegram остался в плагине, интерфейс его больше не читает из сборки); №3 — запрос
+/// каталога (`Ask::Certificates`, PLG-06: LDAP — процессом набора).
+pub const WIRE: u32 = 3;
 
 /// Чья сборка: версия договора, версия программы и номер сборки. Хост и плагин из разных сборок (обновление прервано)
 /// не работают вместе.
@@ -132,6 +134,36 @@ pub enum Ask {
     Step { flow: u64, answer: Option<Answer> },
     /// Вызов подключённой сессии.
     Session { session: u64, call: Call },
+    /// Поиск сертификатов в каталоге (`Directory::certificates`, PLG-06). Ответ — [`Reply::Certs`].
+    Certificates(DirectoryQuery),
+}
+
+/// Как входить в каталог ([`DirectoryQuery`], PLG-06): то же, что «Настройки → Безопасность», но пароль простого
+/// входа — байтами ([`Secret`]: по обмену, `Debug` без значения, нулится при выходе).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirectoryLogin {
+    /// Учётная запись компьютера в домене (Kerberos: SSPI на Windows, `ldap3` GSSAPI на Linux, GSS.framework на macOS).
+    Windows,
+    /// Имя (DN или `user@domain`) и пароль — только по TLS: `ldaps://` или StartTLS.
+    Password { user: String, password: Secret },
+    /// Без входа: каталог открыт на чтение.
+    Anonymous,
+}
+
+/// Запрос каталога ([`Ask::Certificates`], PLG-06): настройки «Настройки → Безопасность → Каталог» и адреса. Сервер
+/// по умолчанию — контроллер домена — резолвит хост (функция ОС в интерфейсе, `app-gpui/src/sys`, ADR 0013):
+/// песочнице плагина файлы и билет Kerberos не нужны.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryQuery {
+    /// Сервер: `host`, `host:port`, `ldap://…` или `ldaps://…`; `None` — не нашёлся (компьютер не в домене).
+    pub server: Option<String>,
+    /// База поиска; `None` — из rootDSE: `defaultNamingContext`, иначе первый раздел данных `namingContexts`.
+    pub base_dn: Option<String>,
+    /// StartTLS по `ldap://`.
+    pub starttls: bool,
+    pub login: DirectoryLogin,
+    /// Адреса для поиска сертификатов.
+    pub addresses: Vec<String>,
 }
 
 /// Вызов `ChannelSession`.
@@ -210,6 +242,8 @@ pub enum Reply {
     Page(Result<Page, ChannelError>),
     Done(Result<Done, ChannelError>),
     Uploaded(Result<Uploaded, ChannelError>),
+    /// Сертификаты из каталога ([`Ask::Certificates`], PLG-06) — DER как есть: чужие данные, их проверяет воркер.
+    Certs(Result<Vec<Vec<u8>>, DirectoryError>),
 }
 
 #[cfg(test)]
@@ -512,6 +546,13 @@ mod tests {
             Ask::SignIn { flow: 2 },
             Ask::Step { flow: 2, answer: Some(Answer::Resend) },
             Ask::Session { session: 1, call: Call::SignOut },
+            Ask::Certificates(DirectoryQuery {
+                server: Some("ldaps://dc.corp.example".into()),
+                base_dn: None,
+                starttls: true,
+                login: DirectoryLogin::Password { user: "CN=svc".into(), password: Secret::new(b"pw".to_vec()) },
+                addresses: vec!["a@corp.example".into()],
+            }),
         ];
         let covered = |a: &Ask| match a {
             Ask::Hello(_) => 0,
@@ -524,6 +565,7 @@ mod tests {
             Ask::SignIn { .. } => 7,
             Ask::Step { .. } => 8,
             Ask::Session { .. } => 9,
+            Ask::Certificates(_) => 10,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all
@@ -548,6 +590,7 @@ mod tests {
                 kind: AttachmentKind::Voice { secs: 2 },
                 source: AttachmentSource(vec![]),
             })),
+            Reply::Certs(Ok(vec![b"der".to_vec(), b"pkcs7".to_vec()])),
         ];
         let covered = |r: &Reply| match r {
             Reply::Hello(_) => 0,
@@ -561,6 +604,7 @@ mod tests {
             Reply::Page(_) => 8,
             Reply::Done(_) => 9,
             Reply::Uploaded(_) => 10,
+            Reply::Certs(_) => 11,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all

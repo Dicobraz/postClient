@@ -7,15 +7,16 @@
 //! Плагины отдельными процессами (ADR 0013): строка плагина ([`ROWS`]) — идентификатор, вид, как узнать свой адрес,
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
 //! по запросу. Так работают демо-канал (PLG-02, общий набор `postman-plugins`), Matrix (PLG-04, свой файл
-//! `postman-plugins-matrix`) и Telegram (PLG-05, свой файл `postman-plugins-telegram`); почтовые пути — внутри
-//! `postman.exe`, как были.
+//! `postman-plugins-matrix`), Telegram (PLG-05, свой файл `postman-plugins-telegram`) и каталог сертификатов
+//! (PLG-06, общий набор `postman-plugins`); почтовые пути — внутри `postman.exe`, как были.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use postman_core::backend::Registry;
 use postman_core::backend::remote::{Claim, Host, Launcher, ProcLauncher, Profile, Row, Started};
-use postman_core::backend::wire::{Kind, Settings};
+use postman_core::backend::wire::{DirectoryQuery, Kind, Settings};
+use postman_core::smime::directory::Directory;
 
 /// Демо-канал — набором `postman-plugins` (PLG-02): без сети, для тестов и замера.
 const DEMO: Row = Row {
@@ -47,8 +48,16 @@ const TELEGRAM: Row = Row {
     profile: Profile::Network { enterprise_auth: false },
 };
 
+/// Каталог сертификатов адресатов (S5-12 Ф5, PLG-06) — общим набором `postman-plugins` (решение владельца
+/// 2026-11-16: общий файл — почта и каталог). Идентификатор — мнение набора сверяет тест строк. Своего адреса нет
+/// ([`Claim::None`]): сервер приносит запрос — контроллер домена компьютера ([`crate::sys::domain_controller`],
+/// функция ОС, решение №12) или настройки «Безопасность». Профиль с корпоративной проверкой подлинности: вход
+/// учётной записью Windows (Kerberos, SSPI).
+const LDAP: Row =
+    Row { id: "ldap", kind: Kind::Directory, claim: Claim::None, set: "postman-plugins", profile: Profile::Network { enterprise_auth: true } };
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP];
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -75,6 +84,13 @@ pub(crate) fn remote_channel(id: &str) -> Option<Arc<dyn postman_core::channel::
 /// зовёт). Процесс ещё не поднимался — не знаем, показываем вход: отказ «нет ключа» вернёт сам плагин.
 pub(crate) fn telegram_has_key() -> bool {
     host().channel(TELEGRAM).has_key()
+}
+
+/// Заместитель каталога (PLG-06): настройки запроса — из «Настройки → Безопасность» и хранилища учётных данных
+/// (пароль простого входа читает ядро, [`DirectoryQuery`]); процесс набора — по первому поиску сертификатов,
+/// после простоя ([`IDLE_EXIT`](postman_core::backend::remote::IDLE_EXIT)) завершается до следующего (ADR 0013).
+pub(crate) fn remote_directory(query: DirectoryQuery) -> Arc<dyn Directory> {
+    host().directory(LDAP, query)
 }
 
 /// Набор — рядом с `postman.exe` (как воркер); namespaces Linux — по политике `SandboxNamespaces`.
@@ -166,6 +182,7 @@ mod tests {
                 "postman://telegram/1/c",
                 "imaps://mail.example.test",
                 "https://mail.example.test/",
+                "ldap://dc.corp.example",
             ] {
                 assert_eq!(row.claims(url), entry.claims(url), "{} {url}", row.id);
             }

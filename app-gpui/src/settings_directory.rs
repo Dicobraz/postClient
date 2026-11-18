@@ -112,7 +112,7 @@ impl SettingsView {
             self.dir.dc = Some(None);
             return;
         }
-        let task = cx.background_spawn(async move { postman_backend_ldap::domain_controller() });
+        let task = cx.background_spawn(async move { crate::sys::domain_controller() });
         cx.spawn(async move |this, cx| {
             let dc = task.await;
             let _ = this.update(cx, |v, cx| {
