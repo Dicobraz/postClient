@@ -224,7 +224,7 @@ impl Registry {
             return tokio::sync::mpsc::unbounded_channel().0;
         };
         tracing::debug!("sync backend: {}", p.name());
-        let addresses: Vec<(String, String)> =
+        let addresses: Vec<(&'static str, String)> =
             self.areas.iter().filter_map(|a| area_address(&account.url, a.key()).map(|address| (a.key(), address))).collect();
         if addresses.is_empty() {
             return p.spawn(Spawn { account, profile, cache, index, events, repaint: Box::new(repaint) });

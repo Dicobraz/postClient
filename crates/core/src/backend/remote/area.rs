@@ -571,8 +571,11 @@ mod tests {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
     }
 
-    fn ctx<'a>(cache: &'a postman_cache::Cache, seen: &'a std::sync::Mutex<Vec<crate::sync::Event>>) -> AreaCtx<'a> {
-        AreaCtx { cache, profile: None, owner: None, notify: &|e| seen.lock().unwrap().push(e) }
+    /// Контекст команды: `AreaCtx` строится в выражении вызова — замыкание и заём живут до конца `block_on`.
+    macro_rules! ctx {
+        ($cache:expr, $seen:expr) => {
+            AreaCtx { cache: &$cache, profile: None, owner: None, notify: &|e: crate::sync::Event| $seen.lock().unwrap().push(e) }
+        };
     }
 
     /// Команды учётки через заместитель: «не моя» — назад, неделя — области с событием, ответ на приглашение,
@@ -588,11 +591,11 @@ mod tests {
         let cache = postman_cache::Cache::open_in_memory().unwrap();
         let seen = std::sync::Mutex::new(Vec::new());
         // Не её команда — назад почтовому пути.
-        let back = rt().block_on(session.handle(Command::Reconnect, ctx(&cache, &seen)));
+        let back = rt().block_on(session.handle(Command::Reconnect, ctx!(cache, seen)));
         assert!(back.is_some(), "Reconnect — почте");
         assert!(seen.lock().unwrap().is_empty());
         // Неделя — области: событие доходит до ядра.
-        let back = rt().block_on(session.handle(Command::Events { from: 1, to: 2 }, ctx(&cache, &seen)));
+        let back = rt().block_on(session.handle(Command::Events { from: 1, to: 2 }, ctx!(cache, seen)));
         assert!(back.is_none(), "неделя — области");
         assert_eq!(*seen.lock().unwrap(), [crate::sync::Event::CalendarChanged], "событие команды — до ответа");
         // Ответ на приглашение своей копией.
@@ -617,7 +620,7 @@ mod tests {
         let task = postman_calendar::Task::from_jmap(&serde_json::json!({ "@type": "Task", "uid": "t-1", "title": "Отчёт" })).unwrap();
         crate::tasks::save_local(&cache, task).unwrap();
         let seen = std::sync::Mutex::new(Vec::new());
-        let back = rt().block_on(session.handle(Command::Tasks(crate::tasks::Request::Flush), ctx(&cache, &seen)));
+        let back = rt().block_on(session.handle(Command::Tasks(crate::tasks::Request::Flush), ctx!(cache, seen)));
         assert!(back.is_none(), "команда задач — услуга ядра");
         let seen = seen.lock().unwrap();
         assert!(seen.iter().any(|e| matches!(e, crate::sync::Event::Tasks(_))), "правка дошла до хранилища плагина: {seen:?}");
