@@ -7522,6 +7522,7 @@ dependencies = [
  "postman-compose",
  "postman-core",
  "postman-dav",
+ "postman-proc",
  "postman-worker",
  "serde_json",
  "tokio",
@@ -7807,7 +7808,6 @@ dependencies = [
  "pets-ui",
  "pets-update",
  "png 0.17.16",
- "postman-backend-dav",
  "postman-backend-ews",
  "postman-backend-imap",
  "postman-backend-jmap",
@@ -7893,6 +7893,7 @@ name = "postman-plugins"
 version = "0.1.0-beta.7"
 dependencies = [
  "embed-resource",
+ "postman-backend-dav",
  "postman-backend-ldap",
  "postman-cache",
  "postman-core",

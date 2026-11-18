@@ -435,3 +435,198 @@ impl TaskStore for WireTasks {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::pipe;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::backend::remote::{AreaServer, FetchedBody, serve_area};
+    use crate::model::Feature;
+    use crate::sync::Command;
+    use postman_proc::link::Link;
+
+    const ROW: Row = Row {
+        id: "dav",
+        kind: super::super::super::wire::Kind::Area,
+        claim: Claim::Area("dav"),
+        set: "postman-plugins",
+        profile: super::super::Profile::Network { enterprise_auth: false },
+    };
+
+    /// Подключённая область подставного плагина: неделя — с событием `CalendarChanged`, остальное — «не моя».
+    struct MockArea;
+
+    impl Areas for MockArea {
+        fn features(&self) -> Features {
+            Features::NONE.with(Feature::Calendar, true)
+        }
+
+        fn handle<'a>(&'a mut self, cmd: Command, ctx: AreaCtx<'a>) -> BoxFuture<'a, Option<Command>> {
+            Box::pin(async move {
+                match cmd {
+                    Command::Events { from, to } => {
+                        assert_eq!((from, to), (1, 2));
+                        ctx.notify(crate::sync::Event::CalendarChanged);
+                        None
+                    }
+                    other => Some(other),
+                }
+            })
+        }
+
+        fn respond<'a>(
+            &'a mut self,
+            _invite: &'a postman_calendar::Invitation,
+            status: postman_calendar::Partstat,
+            _answer: &'a crate::invite::Answer,
+        ) -> BoxFuture<'a, Result<crate::invite::Responded, Error>> {
+            Box::pin(async move {
+                if status == postman_calendar::Partstat::Accepted {
+                    Ok(crate::invite::Responded::Sent)
+                } else {
+                    Err(Error::Protocol("mock: only accepted".into()))
+                }
+            })
+        }
+
+        fn flush_tasks<'a>(&'a mut self, _ctx: AreaCtx<'a>) -> BoxFuture<'a, Result<(), Error>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn changed(&mut self) -> BoxFuture<'_, Result<bool, Error>> {
+            Box::pin(async move { Ok(true) })
+        }
+    }
+
+    impl AreaSession for MockArea {
+        fn task_op<'a>(&'a mut self, op: TaskOp) -> BoxFuture<'a, Result<TaskDone, Error>> {
+            Box::pin(async move {
+                match op {
+                    TaskOp::Create(_) => Ok(TaskDone::Created("/dav/cal/default/t1.ics".into())),
+                    _ => Err(Error::Protocol("mock: only create".into())),
+                }
+            })
+        }
+    }
+
+    /// Путь областей на стороне процесса — тот же `serve_area`, что у набора.
+    struct MockServer;
+
+    impl AreaServer for MockServer {
+        fn probe<'a>(&'a self, _host: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async move { None })
+        }
+
+        fn connect<'a>(&'a self, url: &'a str, _login: &'a Login, profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn AreaSession>, Error>> {
+            assert_eq!(url, "https://dav.example.test");
+            assert_eq!(profile, Some("@2"), "профиль учётки доезжает до плагина");
+            Box::pin(async move { Ok(Box::new(MockArea) as Box<dyn AreaSession>) })
+        }
+
+        fn fetch<'a>(&'a self, url: &'a str, max: u32, etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>> {
+            Box::pin(async move {
+                assert_eq!(url, "https://cal.example.test/f.ics");
+                assert_eq!(etag, Some("\"7\""));
+                Ok(Some(FetchedBody { body: vec![0xAB; max as usize], etag: Some("\"8\"".into()) }))
+            })
+        }
+    }
+
+    /// Сторона плагина — поток теста с точкой входа набора.
+    struct InThread;
+
+    impl super::super::Launcher for InThread {
+        fn launch(&self, _row: &Row) -> std::io::Result<super::super::Started> {
+            let (from_plugin, plugin_out) = pipe()?;
+            let (plugin_in, to_plugin) = pipe()?;
+            std::thread::spawn(move || {
+                let link = Link::new(plugin_in, plugin_out, super::super::MAX_BIN).unwrap();
+                serve_area(link, "dav", || Arc::new(MockServer))
+            });
+            Ok(super::super::Started {
+                link: Link::new(from_plugin, to_plugin, super::super::MAX_BIN)?,
+                kill: Box::new(|| {}),
+                exit_code: Box::new(|| None),
+                background: Box::new(|_| Ok(())),
+            })
+        }
+    }
+
+    fn host() -> (super::super::Host, Arc<Plugin>) {
+        let host = super::super::Host::new(Arc::new(InThread), super::super::Settings::default());
+        host.first_frame();
+        let plugin = host.0.plugin(ROW);
+        (host, plugin)
+    }
+
+    fn login() -> Login {
+        Login { user: "me@example.test".into(), password: "pw".into(), email: "me@example.test".into() }
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    fn ctx<'a>(cache: &'a postman_cache::Cache, seen: &'a std::sync::Mutex<Vec<crate::sync::Event>>) -> AreaCtx<'a> {
+        AreaCtx { cache, profile: None, owner: None, notify: &|e| seen.lock().unwrap().push(e) }
+    }
+
+    /// Команды учётки через заместитель: «не моя» — назад, неделя — области с событием, ответ на приглашение,
+    /// опрос. Процесс поднимается по первому подключению и держится, пока сессия открыта.
+    #[test]
+    fn area_commands_cross_the_process() {
+        let (host, plugin) = host();
+        let area = host.area(ROW);
+        let mut session: Box<dyn Areas> = rt().block_on(async { area.connect("https://dav.example.test", &login(), Some("@2")).await.unwrap() });
+        assert_eq!(plugin.areas_open.load(Ordering::SeqCst), 1, "сессия держит процесс");
+        assert_eq!(*lock(&plugin.idle), None, "простоя у сессии учётки нет");
+        assert_eq!(session.features(), Features::NONE.with(Feature::Calendar, true));
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        // Не её команда — назад почтовому пути.
+        let back = rt().block_on(session.handle(Command::Reconnect, ctx(&cache, &seen)));
+        assert!(back.is_some(), "Reconnect — почте");
+        assert!(seen.lock().unwrap().is_empty());
+        // Неделя — области: событие доходит до ядра.
+        let back = rt().block_on(session.handle(Command::Events { from: 1, to: 2 }, ctx(&cache, &seen)));
+        assert!(back.is_none(), "неделя — области");
+        assert_eq!(*seen.lock().unwrap(), [crate::sync::Event::CalendarChanged], "событие команды — до ответа");
+        // Ответ на приглашение своей копией.
+        let invite = crate::invite::tests::inv();
+        let answered = rt().block_on(session.respond(&invite, postman_calendar::Partstat::Accepted, &crate::invite::Answer::default()));
+        assert_eq!(answered, Ok(crate::invite::Responded::Sent));
+        // Изменилось ли что-то.
+        assert_eq!(rt().block_on(session.changed()), Ok(true));
+        drop(session);
+        assert_eq!(plugin.areas_open.load(Ordering::SeqCst), 0, "сессия закрыта");
+        assert_eq!(*lock(&plugin.idle), Some(IDLE_EXIT), "процесс держат до простоя");
+    }
+
+    /// Задачи поверх кэша — услуга ядра: правка «не отправлена» уходит в хранилище плагина операциями
+    /// ([`WireTasks`]) и до почтового пути не доходит.
+    #[test]
+    fn tasks_go_to_the_plugin_store_by_ops() {
+        let (host, _plugin) = host();
+        let area = host.area(ROW);
+        let mut session: Box<dyn Areas> = rt().block_on(async { area.connect("https://dav.example.test", &login(), None).await.unwrap() });
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        let task = postman_calendar::Task::from_jmap(&serde_json::json!({ "@type": "Task", "uid": "t-1", "title": "Отчёт" })).unwrap();
+        crate::tasks::save_local(&cache, task).unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let back = rt().block_on(session.handle(Command::Tasks(crate::tasks::Request::Flush), ctx(&cache, &seen)));
+        assert!(back.is_none(), "команда задач — услуга ядра");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|e| matches!(e, crate::sync::Event::Tasks(_))), "правка дошла до хранилища плагина: {seen:?}");
+    }
+
+    /// Публичная загрузка ([`Host::fetch`]) — телом кадра; сессий области нет — процесс завершают по простою.
+    #[test]
+    fn fetch_returns_the_body_through_the_process() {
+        let (host, plugin) = host();
+        let got = host.fetch(ROW, "https://cal.example.test/f.ics".into(), 4, Some("\"7\"".into())).unwrap();
+        assert_eq!(got, (Fetched::Body { etag: Some("\"8\"".into()) }, vec![0xAB; 4]));
+        assert_eq!(*lock(&plugin.idle), Some(IDLE_EXIT), "сессий нет — простой возвращён");
+    }
+}
