@@ -12,7 +12,7 @@
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use postman_backend_imap as imap;
+use postman_backend_imap::{self as imap, ImapAccount};
 use postman_cache::{Cache, EmailRow};
 use postman_compose::{Address, Attachment, Draft};
 use postman_core::model::Release;

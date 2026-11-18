@@ -15,7 +15,7 @@
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use postman_backend_imap as imap;
+use postman_backend_imap::{self as imap, ImapAccount};
 use postman_cache::{Cache, FolderRow, LetterRow, Owner};
 use postman_core::migrate::Engine;
 use postman_core::model::{Auth, Features, FolderId, JobId, LetterId, MigrationMode, MigrationRequest, MigrationState, Selector, SweepId};
