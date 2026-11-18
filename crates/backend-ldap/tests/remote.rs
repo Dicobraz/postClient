@@ -89,5 +89,5 @@ fn simple_login_needs_tls() {
     };
     let dir = host.directory(ROW, query);
     let got = dir.certificates(&["a@corp.example".into()]);
-    assert!(matches!(got, Err(DirectoryError::Unavailable(ref e)) if e.contains("ldaps")), "{got:?}");
+    assert!(matches!(got, Err(DirectoryError::Unavailable(ref e)) if e.contains("ldaps")));
 }
