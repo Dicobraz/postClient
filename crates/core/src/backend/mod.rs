@@ -287,11 +287,12 @@ pub fn insecure_tls() -> bool {
     std::env::var("POSTMAN_INSECURE_TLS").is_ok_and(|v| v == "1")
 }
 
-/// Адрес области с ключом `key` в адресе учётной записи (`?dav=https://…`); нет — `None`. Как
-/// [`crate::backend::remote::Row::claims`] у области ([`crate::backend::remote::Claim::Area`]), но со значением.
+/// Адрес области с ключом `key` в адресе учётной записи (`?dav=https://…`); нет — `None`. Повтор ключа — последнее
+/// значение. Как [`crate::backend::remote::Row::claims`] у области ([`crate::backend::remote::Claim::Area`]), но со
+/// значением.
 pub fn area_address(url: &str, key: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
-    query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned())).filter(|v| !v.is_empty())
+    query.split('&').rev().find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned())).filter(|v| !v.is_empty())
 }
 
 /// Ссылка годится для публичного ресурса (FBURL, календарь `.ics`; S8-42, PLG-07): `https://` или `webcal://` с

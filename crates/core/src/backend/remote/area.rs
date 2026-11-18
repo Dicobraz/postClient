@@ -538,7 +538,9 @@ mod tests {
 
         fn connect<'a>(&'a self, url: &'a str, _login: &'a Login, profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn AreaSession>, Error>> {
             assert_eq!(url, "https://dav.example.test");
-            assert_eq!(profile, Some("@2"), "профиль учётки доезжает до плагина");
+            // Профиль доезжает до плагина как есть: у команд учётки — Some("@2"), у задач той же сессии — тоже
+            // (здесь и основная учётка — None).
+            assert!(profile.is_none() || profile == Some("@2"), "профиль учётки доезжает до плагина: {profile:?}");
             Box::pin(async move { Ok(Box::new(MockArea) as Box<dyn AreaSession>) })
         }
 
