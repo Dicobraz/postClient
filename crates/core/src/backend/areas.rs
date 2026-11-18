@@ -37,10 +37,10 @@ pub(crate) fn serve(
     cache: Cache,
     index: Index,
     events: std::sync::mpsc::Sender<Event>,
-    repaint: Arc<dyn Fn() + Send>,
+    repaint: Arc<dyn Fn() + Send + Sync>,
     mail: Arc<dyn MailPlugin>,
     plugins: Vec<Arc<dyn AreaPlugin>>,
-    addresses: Vec<(String, String)>,
+    addresses: Vec<(&'static str, String)>,
 ) -> UnboundedSender<Command> {
     // Мост событий почтового пути: интерфейсу — как есть, `Features` — объединённые с областями (правило
     // «Нет у сервера — нет на экране»): событие почтового пути без областей скрыло бы календарь.
@@ -206,7 +206,7 @@ async fn dispatch(
             let _ = mail.send(Command::RespondInvite { invite, status, in_reply_to, answer });
         }
         cmd @ Command::Delegate { .. } => {
-            if delegate(areas, cache, profile, owner, notify, cmd).await {
+            if delegate(areas, cache, profile, owner, notify, &cmd).await {
                 return;
             }
             // Правки задач ушли на сервер — письма iTIP шага: почтовому пути.
@@ -257,9 +257,9 @@ async fn delegate(
     profile: Option<&str>,
     owner: Option<&Owner>,
     notify: &Notifier,
-    cmd: Command,
+    cmd: &Command,
 ) -> bool {
-    let Command::Delegate { uid, ticket, .. } = &cmd else { return false };
+    let Command::Delegate { uid, ticket, .. } = cmd else { return false };
     let Some((_, a)) = areas.iter_mut().find(|(_, a)| a.features().has(Feature::Tasks)).map(|(_, a)| a) else {
         return send_and_done(
             notify,

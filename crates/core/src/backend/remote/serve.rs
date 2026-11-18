@@ -11,19 +11,23 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+use postman_calendar::Owner;
 use postman_proc::link::Incoming;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::super::wire::{
-    Ask, Build, Call, DirectoryQuery, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin,
+    AreaLogin, Ask, Build, Call, DirectoryQuery, Fetched, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, TaskDone,
+    TaskOp, ToPlugin,
 };
 use super::{BROWSER_WAIT as HOST_BROWSER_WAIT, MAX_BIN, PluginLink};
 use super::{Claim, Profile, Row};
-use crate::backend::BoxFuture;
+use crate::backend::{AreaCtx, AreaPlugin, Areas, BoxFuture, Login};
 use crate::channel::{
     AccountId, Answer, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelPlugin, ChannelSession, ConnectCtx, FlowCtx, PluginStore, Secret, Sso,
 };
+use crate::model::Error as ModelError;
 use crate::smime::directory::{Directory, DirectoryError};
+use postman_cache::Cache;
 
 /// Вызов хранилища ядра ждёт ответа не дольше.
 const STORE_WAIT: Duration = Duration::from_secs(30);
@@ -173,6 +177,289 @@ pub fn serve_directory(link: PluginLink, id: &'static str, make: impl Fn(&Direct
             // У каталога нет услуг ядра, сессий и входов: остальное — ответы сторожу.
             Incoming::Message(..) | Incoming::Call(..) => {}
             Incoming::Shutdown | Incoming::Closed => return 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Области учётной записи (PLG-07).
+
+/// Путь областей на стороне процесса (PLG-07): вид сервера, вход и публичные загрузки. Команды сессии —
+/// [`AreaSession`].
+pub trait AreaServer: Send + Sync {
+    /// Есть ли путь на узле `host` (`AreaPlugin::probe`); `Some` — его адрес.
+    fn probe<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Option<String>>;
+
+    /// Войти в область учётной записи (`AreaPlugin::connect`): сессия команд, ответов на приглашения и опроса.
+    /// `profile` — учётная запись профиля (`None` — основная): события сессии плагин метит сам по ней и по адресу
+    /// участника из `login`.
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login, profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn AreaSession>, ModelError>>;
+
+    /// Скачать публичный ресурс без входа (`Fetch`, PLG-07): картинка письма, подписка, занятость по ссылке.
+    /// `None` — не менялся с `etag` (`If-None-Match`). Тело едет двоичной частью кадра — не больше [`MAX_BIN`].
+    fn fetch<'a>(&'a self, url: &'a str, max: u32, etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>>;
+}
+
+/// Публичный ресурс: тело и его ETag (для следующего условного запроса).
+pub struct FetchedBody {
+    pub body: Vec<u8>,
+    pub etag: Option<String>,
+}
+
+/// Подключённая область учётной записи в процессе (PLG-07): те же [`Areas`], плюс операции хранилища задач по
+/// обмену ([`TaskOp`]). Задачи поверх кэша ведёт ядро ([`crate::tasks::handle`]) — команда `Command::Tasks` сюда
+/// не доходит, хранилище плагина спрашивают операциями.
+pub trait AreaSession: Areas {
+    fn task_op<'a>(&'a mut self, op: TaskOp) -> BoxFuture<'a, Result<TaskDone, ModelError>>;
+}
+
+/// Обслужить хост областями `id` (PLG-07): вход (`AreaOpen`), команды (`AreaCommand`, события —
+/// `FromPlugin::AreaEvent`), ответ на приглашение (`AreaRespond`), опрос (`AreaChanged`), хранилище задач
+/// (`AreaTask`), вид сервера (`Probe`) и публичные загрузки (`Fetch`). Рантайм и плагин — при первом настоящем
+/// вопросе, как у каналов; сессии в реестре плагина, кэша у процесса нет — команды задач ядро не посылает, а
+/// [`AreaCtx::cache`] нужен договору: держится памятью процесса, свои файлы он не пишет. Ответ — код выхода.
+pub fn serve_area(link: PluginLink, id: &'static str, make: impl FnOnce() -> Arc<dyn AreaServer>) -> i32 {
+    let link = Arc::new(link);
+    let first = loop {
+        match link.recv() {
+            Incoming::Message(ToPlugin::Ask { id: n, ask }, bin) => {
+                let quick = match &ask {
+                    Ask::Hello(h) => {
+                        apply(h.settings.clone());
+                        answer(&link, n, Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Area, key: false }), &[]);
+                        true
+                    }
+                    Ask::Stats => {
+                        let rss = STATS.get().map_or_else(|| crate::bench::rss() as u64, |rss| rss());
+                        answer(&link, n, Reply::Stats { rss }, &[]);
+                        true
+                    }
+                    _ => false,
+                };
+                if !quick {
+                    break (ToPlugin::Ask { id: n, ask }, bin);
+                }
+            }
+            Incoming::Message(ToPlugin::Settings(s), _) => apply(s),
+            Incoming::Message(..) | Incoming::Call(..) => {}
+            Incoming::Shutdown | Incoming::Closed => return 0,
+        }
+    };
+    // Кэш договору областей (`AreaCtx`) нужен только для команд задач, которые ядро не посылает: память процесса.
+    let cache = match Cache::open_in_memory() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("area plugin {id}: in-memory cache: {e}");
+            return 1;
+        }
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("plugin runtime: {e}");
+            return 1;
+        }
+    };
+    let server = make();
+    let (tx, rx) = unbounded_channel();
+    let _ = tx.send(first);
+    let reader = {
+        let link = Arc::clone(&link);
+        std::thread::Builder::new().name("plugin-reader".into()).spawn(move || {
+            loop {
+                match link.recv() {
+                    Incoming::Message(ToPlugin::Ask { id: n, ask }, bin) => {
+                        let quick = match &ask {
+                            Ask::Hello(h) => {
+                                apply(h.settings.clone());
+                                answer(
+                                    &link,
+                                    n,
+                                    Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Area, key: false }),
+                                    &[],
+                                );
+                                true
+                            }
+                            Ask::Stats => {
+                                let rss = STATS.get().map_or_else(|| crate::bench::rss() as u64, |rss| rss());
+                                answer(&link, n, Reply::Stats { rss }, &[]);
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !quick && tx.send((ToPlugin::Ask { id: n, ask }, bin)).is_err() {
+                            return;
+                        }
+                    }
+                    Incoming::Message(ToPlugin::Settings(s), _) => apply(s),
+                    Incoming::Message(msg, bin) => {
+                        if tx.send((msg, bin)).is_err() {
+                            return;
+                        }
+                    }
+                    Incoming::Call(..) => {}
+                    Incoming::Shutdown | Incoming::Closed => return,
+                }
+            }
+        })
+    };
+    if let Err(e) = reader {
+        tracing::error!("plugin reader thread: {e}");
+        return 1;
+    }
+    let served = Rc::new(ServedAreas { link, server, cache, sessions: RefCell::new(HashMap::new()) });
+    tokio::task::LocalSet::new().block_on(&rt, served.run(rx));
+    0
+}
+
+/// Подключённая сессия области: плагин, учётка профиля и владелец её событий ([`Owner`]). Плагин — в `Rc`:
+/// команды одной сессии ядро ведёт по одной, а реестр сессий не держит заём на время команды.
+struct Session {
+    area: Rc<RefCell<Box<dyn AreaSession>>>,
+    profile: Option<String>,
+    owner: Option<Owner>,
+}
+
+/// Область учётной записи в процессе плагина.
+struct ServedAreas {
+    link: Arc<PluginLink>,
+    server: Arc<dyn AreaServer>,
+    /// Кэш договору областей ([`AreaCtx::cache`]) нужен только для команд задач, которые ядро не посылает:
+    /// память процесса, своих файлов он не пишет.
+    cache: Cache,
+    sessions: RefCell<HashMap<u64, Session>>,
+}
+
+impl ServedAreas {
+    async fn run(self: Rc<Self>, mut rx: UnboundedReceiver<(ToPlugin, Vec<u8>)>) {
+        while let Some((msg, bin)) = rx.recv().await {
+            match msg {
+                ToPlugin::Ask { id, ask } => self.ask(id, ask),
+                ToPlugin::Close { session } => {
+                    self.sessions.borrow_mut().remove(&session);
+                }
+                ToPlugin::Settings(s) => apply(s),
+                // Области держат сессию учётки: `Leave` — только ответ на выход программы. `Stored`/`SsoReply` —
+                // ответы услуг ядра каналов, сюда сообщением не приходят.
+                ToPlugin::Leave | ToPlugin::Stored(_) | ToPlugin::SsoReply(_) => {}
+            }
+        }
+    }
+
+    fn ask(self: &Rc<Self>, id: u64, ask: Ask) {
+        match ask {
+            Ask::AreaOpen { session, url, profile, login } => {
+                tokio::task::spawn_local(Rc::clone(self).open(id, session, url, profile, login));
+            }
+            Ask::AreaCommand { session, cmd } => {
+                tokio::task::spawn_local(Rc::clone(self).command(id, session, cmd));
+            }
+            Ask::AreaRespond { session, invite, status, answer } => {
+                tokio::task::spawn_local(Rc::clone(self).respond(id, session, invite, status, answer));
+            }
+            Ask::AreaChanged { session } => {
+                tokio::task::spawn_local(Rc::clone(self).changed(id, session));
+            }
+            Ask::AreaTask { session, op } => {
+                tokio::task::spawn_local(Rc::clone(self).task(id, session, op));
+            }
+            Ask::Probe(url) => {
+                tokio::task::spawn_local(Rc::clone(self).probe(id, url));
+            }
+            Ask::Fetch { url, max, etag } => {
+                tokio::task::spawn_local(Rc::clone(self).fetch(id, url, max, etag));
+            }
+            // Вопросы описания (`Hello`, память) отвечает поток чтения; остальное — не про области.
+            other => {
+                let _ = other;
+                answer(&self.link, id, Reply::Unit(Err(ChannelError::Unsupported)), &[]);
+            }
+        }
+    }
+
+    async fn open(self: Rc<Self>, id: u64, session: u64, url: String, profile: Option<String>, login: AreaLogin) {
+        let login = Login { user: login.user, password: String::from_utf8_lossy(login.password.expose()).into_owned(), email: login.email };
+        let reply = match self.server.connect(&url, &login, profile.as_deref()).await {
+            Ok(area) => {
+                let features = area.features();
+                let owner = profile.as_ref().map(|_| Owner { email: login.email.clone(), name: login.email.clone() });
+                let s = Session { area: Rc::new(RefCell::new(area)), profile, owner };
+                self.sessions.borrow_mut().insert(session, s);
+                Ok(features)
+            }
+            Err(e) => Err(e),
+        };
+        answer(&self.link, id, Reply::AreaOpened(reply), &[]);
+    }
+
+    /// Событие команды сессии — хосту (`FromPlugin::AreaEvent`): тот же договор `sync::Event`, что у почтового пути.
+    fn notify(&self, session: u64) -> impl Fn(crate::sync::Event) {
+        let link = Arc::clone(&self.link);
+        move |e: crate::sync::Event| {
+            if let Err(e) = link.send(&FromPlugin::AreaEvent { session, event: e }, &[]) {
+                tracing::debug!("plugin area event not sent: {e}");
+            }
+        }
+    }
+
+    async fn command(self: Rc<Self>, id: u64, session: u64, cmd: crate::sync::Command) {
+        // Задачи поверх кэша — услуга ядра: кэш у ядра, хранилище плагина спрашивают операциями ([`Ask::AreaTask`]).
+        if matches!(cmd, crate::sync::Command::Tasks(_)) {
+            return answer(&self.link, id, Reply::AreaCommand(Ok(false)), &[]);
+        }
+        let Some(s) = self.sessions.borrow().get(&session).map(|s| (Rc::clone(&s.area), s.profile.clone(), s.owner.clone())) else {
+            return answer(&self.link, id, Reply::AreaCommand(Ok(false)), &[]);
+        };
+        let (area, profile, owner) = s;
+        let notify = self.notify(session);
+        let ctx = AreaCtx { cache: &self.cache, profile: profile.as_deref(), owner: owner.as_ref(), notify: &notify };
+        let done = area.borrow_mut().handle(cmd, ctx).await.is_none();
+        answer(&self.link, id, Reply::AreaCommand(Ok(done)), &[]);
+    }
+
+    async fn respond(
+        self: Rc<Self>,
+        id: u64,
+        session: u64,
+        invite: postman_calendar::Invitation,
+        status: postman_calendar::Partstat,
+        answer: crate::invite::Answer,
+    ) {
+        let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
+            Some(area) => area.borrow_mut().respond(&invite, status, &answer).await,
+            None => Err(ModelError::Protocol("no such area session".into())),
+        };
+        answer(&self.link, id, Reply::AreaResponded(reply), &[]);
+    }
+
+    async fn changed(self: Rc<Self>, id: u64, session: u64) {
+        let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
+            Some(area) => area.borrow_mut().changed().await,
+            None => Err(ModelError::Protocol("no such area session".into())),
+        };
+        answer(&self.link, id, Reply::AreaChanged(reply), &[]);
+    }
+
+    async fn task(self: Rc<Self>, id: u64, session: u64, op: TaskOp) {
+        let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
+            Some(area) => area.borrow_mut().task_op(op).await,
+            None => Err(ModelError::Protocol("no such area session".into())),
+        };
+        answer(&self.link, id, Reply::AreaTask(reply), &[]);
+    }
+
+    async fn probe(self: Rc<Self>, id: u64, url: String) {
+        let found = self.server.probe(&url).await;
+        answer(&self.link, id, Reply::Url(found), &[]);
+    }
+
+    async fn fetch(self: Rc<Self>, id: u64, url: String, max: u32, etag: Option<String>) {
+        let max = max.min(MAX_BIN as u32);
+        let got = self.server.fetch(&url, max, etag.as_deref()).await;
+        match got {
+            Ok(Some(body)) => answer(&self.link, id, Reply::Fetched(Ok(Fetched::Body { etag: body.etag })), &body.body),
+            Ok(None) => answer(&self.link, id, Reply::Fetched(Ok(Fetched::NotModified)), &[]),
+            Err(e) => answer(&self.link, id, Reply::Fetched(Err(e)), &[]),
         }
     }
 }

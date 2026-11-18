@@ -144,7 +144,6 @@ impl Live {
             index: None,
             events: tx,
             repaint: Box::new(|| {}),
-            areas: Vec::new(),
         });
         let mut live = Live { commands, events, cache, features: Features::NONE, me: String::new() };
         let Event::Features(f) = live.wait("Features", |e| matches!(e, Event::Features(_))) else { unreachable!() };

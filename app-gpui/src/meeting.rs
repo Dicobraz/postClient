@@ -1416,7 +1416,7 @@ impl MeetingView {
             self.busy.links.insert(email.clone(), Link::Loading);
             let (live, worker, tz) = (self.live, self.worker.clone(), tz.clone());
             let task = cx.background_spawn(async move {
-                let bytes = if live { postman_backend_dav::fetch_public(&url, postman_worker::MAX_FREE_BUSY)? } else { demo::free_busy(from) };
+                let bytes = if live { crate::plugins::fetch_public(&url, postman_worker::MAX_FREE_BUSY)? } else { demo::free_busy(from) };
                 let mut w = worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let busy = w.free_busy(&bytes, from, to, &tz);
                 if let Some(cut) = w.take_cut() {
@@ -1475,7 +1475,7 @@ impl MeetingView {
     fn save_link(&mut self, cx: &mut Context<Self>) {
         let Some(email) = self.link_for.clone() else { return };
         let url = self.link_input.read(cx).value().trim().to_owned();
-        if !postman_backend_dav::public_url_ok(&url) {
+        if !postman_core::backend::public_url_ok(&url) {
             self.link_bad = true;
             cx.notify();
             return;

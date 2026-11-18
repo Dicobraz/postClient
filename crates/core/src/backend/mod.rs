@@ -217,7 +217,7 @@ impl Registry {
         cache: Cache,
         index: Index,
         events: mpsc::Sender<Event>,
-        repaint: impl Fn() + Send + 'static,
+        repaint: impl Fn() + Send + Sync + 'static,
     ) -> UnboundedSender<Command> {
         let Some(p) = self.mail_for(&account.url) else {
             let _ = events.send(Event::Error(SyncError::internal("no server backend registered")));
@@ -229,7 +229,7 @@ impl Registry {
         if addresses.is_empty() {
             return p.spawn(Spawn { account, profile, cache, index, events, repaint: Box::new(repaint) });
         }
-        let repaint: Arc<dyn Fn() + Send> = Arc::new(repaint);
+        let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
         areas::serve(account, profile, cache, index, events, repaint, Arc::clone(&p), self.areas.clone(), addresses)
     }
 
@@ -292,6 +292,27 @@ pub fn insecure_tls() -> bool {
 pub fn area_address(url: &str, key: &str) -> Option<String> {
     let (_, query) = url.split_once('?')?;
     query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned())).filter(|v| !v.is_empty())
+}
+
+/// Ссылка годится для публичного ресурса (FBURL, календарь `.ics`; S8-42, PLG-07): `https://` или `webcal://` с
+/// именем сервера, без имени и пароля в адресе; IP-адрес и `localhost` не годятся — ссылка приходит из чужой
+/// карточки контакта, а запрос идёт процессу плагина DAV ([`crate::backend::wire::Ask::Fetch`]), он проверит так
+/// же. Интерфейсу — для проверки до загрузки (подписки, «Открыть занятость»).
+pub fn public_url_ok(text: &str) -> bool {
+    let text = text.trim();
+    let text = match text.get(..9) {
+        Some(p) if p.eq_ignore_ascii_case("webcal://") => format!("https://{}", &text[9..]),
+        _ => text.to_owned(),
+    };
+    let Ok(url) = url::Url::parse(&text) else { return false };
+    let host_ok = match url.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            d != "localhost" && !d.ends_with(".localhost") && d.contains('.')
+        }
+        _ => false,
+    };
+    url.scheme() == "https" && host_ok && url.username().is_empty() && url.password().is_none()
 }
 
 #[cfg(test)]

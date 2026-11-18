@@ -127,12 +127,12 @@ pub(crate) trait Fetch: Send + Sync {
     fn fetch(&self, url: &str, max: usize) -> Result<Vec<u8>, String>;
 }
 
-/// Сеть: публичный ресурс без входа (`postman_backend_dav::fetch_public`).
+/// Сеть: публичный ресурс без входа — процессом DAV (`crate::plugins::fetch_public`, PLG-07).
 pub(crate) struct Web;
 
 impl Fetch for Web {
     fn fetch(&self, url: &str, max: usize) -> Result<Vec<u8>, String> {
-        postman_backend_dav::fetch_public(&https(url), max)
+        crate::plugins::fetch_public(&https(url), max)
     }
 }
 

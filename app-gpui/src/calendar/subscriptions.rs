@@ -222,7 +222,7 @@ impl CalendarView {
                     return stored(postman_demo::calendar::holidays(from), None);
                 }
                 let etag = local::subscription_etag(&db, &url).map_err(|e| e.to_string())?;
-                match postman_backend_dav::fetch_changed(&url, MAX_ICS, etag.as_deref())? {
+                match crate::plugins::fetch_changed(&url, MAX_ICS, etag.as_deref())? {
                     Some((body, etag)) => stored(body, etag),
                     None => Ok(()),
                 }
@@ -251,7 +251,7 @@ impl CalendarView {
     /// Добавить календарь по ссылке; ссылка не годится — `false`.
     pub(crate) fn add_subscription(&mut self, url: &str, cx: &mut Context<Self>) -> bool {
         let url = url.trim().to_owned();
-        if !postman_backend_dav::public_url_ok(&url) {
+        if !postman_core::backend::public_url_ok(&url) {
             return false;
         }
         if self.subs.iter().all(|s| s.url != url) {

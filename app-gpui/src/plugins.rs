@@ -7,8 +7,9 @@
 //! Плагины отдельными процессами (ADR 0013): строка плагина ([`ROWS`]) — идентификатор, вид, как узнать свой адрес,
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
 //! по запросу. Так работают демо-канал (PLG-02, общий набор `postman-plugins`), Matrix (PLG-04, свой файл
-//! `postman-plugins-matrix`), Telegram (PLG-05, свой файл `postman-plugins-telegram`) и каталог сертификатов
-//! (PLG-06, общий набор `postman-plugins`); почтовые пути — внутри `postman.exe`, как были.
+//! `postman-plugins-matrix`), Telegram (PLG-05, свой файл `postman-plugins-telegram`), каталог сертификатов
+//! (PLG-06, общий набор) и CalDAV/CardDAV (PLG-07, общий набор: области учётки и публичные загрузки); почтовые
+//! пути — внутри `postman.exe`, как были (PLG-08…10).
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -56,8 +57,15 @@ const TELEGRAM: Row = Row {
 const LDAP: Row =
     Row { id: "ldap", kind: Kind::Directory, claim: Claim::None, set: "postman-plugins", profile: Profile::Network { enterprise_auth: true } };
 
+/// CalDAV и CardDAV (PLG-07) — общим набором `postman-plugins` (решение владельца 2026-11-16): области учётки
+/// «стандарты» (почта — IMAP) и публичные загрузки (картинки письма, подписки на календари, занятость по ссылке).
+/// Адрес области — в адресе учётки ([`Claim::Area`]: `?dav=https://…`); процесс стартует по первому запросу
+/// (вход учётки или загрузка), простой 5 минут завершает его до следующего ([`IDLE_EXIT`]).
+const DAV: Row =
+    Row { id: "dav", kind: Kind::Area, claim: Claim::Area("dav"), set: "postman-plugins", profile: Profile::Network { enterprise_auth: false } };
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV];
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -93,6 +101,30 @@ pub(crate) fn remote_directory(query: DirectoryQuery) -> Arc<dyn Directory> {
     host().directory(LDAP, query)
 }
 
+/// Заместитель пути областей (PLG-07): CalDAV и CardDAV — процессом общего набора; реестр вставляет его вместо
+/// плагина, для ядра разницы нет ([`postman_core::backend::areas`]).
+pub(crate) fn remote_area() -> postman_core::backend::remote::RemoteAreas {
+    host().area(DAV)
+}
+
+/// Публичный ресурс без входа — процессом DAV ([`Host::fetch`](postman_core::backend::remote::Host::fetch),
+/// PLG-07): картинка письма, занятость по ссылке. Блокирует поток — звать из фона. Ошибка — текстом, как её
+/// показал бы плагин.
+pub(crate) fn fetch_public(url: &str, max: usize) -> Result<Vec<u8>, String> {
+    match host().fetch(DAV, url.to_owned(), max, None)? {
+        (postman_core::backend::wire::Fetched::Body { .. }, body) => Ok(body),
+        (postman_core::backend::wire::Fetched::NotModified, _) => Err("HTTP: 304 Not Modified".into()),
+    }
+}
+
+/// Публичный ресурс, если изменился (S8-44: подписки), — процессом DAV: `None` — не менялся с `etag`.
+pub(crate) fn fetch_changed(url: &str, max: usize, etag: Option<&str>) -> Result<Option<(Vec<u8>, Option<String>)>, String> {
+    match host().fetch(DAV, url.to_owned(), max, etag.map(str::to_owned))? {
+        (postman_core::backend::wire::Fetched::Body { etag }, body) => Ok(Some((body, etag))),
+        (postman_core::backend::wire::Fetched::NotModified, _) => Ok(None),
+    }
+}
+
 /// Набор — рядом с `postman.exe` (как воркер); namespaces Linux — по политике `SandboxNamespaces`.
 struct Beside;
 
@@ -121,7 +153,9 @@ pub(crate) fn registry() -> &'static Registry {
             .with_mail(postman_backend_jmap::JmapPlugin)
             .with_mail(postman_backend_ews::EwsPlugin)
             .with_mail(postman_backend_imap::ImapPlugin)
-            .with_area(postman_backend_dav::DavPlugin)
+            // CalDAV и CardDAV — процессом общего набора (PLG-07, ADR 0013); EWS у IMAP-учётки на Exchange —
+            // внутри postman.exe до своей волны (PLG-08).
+            .with_area(remote_area())
             .with_area(postman_backend_ews::EwsAreaPlugin);
         // Каналы бесед (ADR 0012 п. 12) — заместителями своих наборов (ADR 0013): процесс — у хоста, после первого
         // кадра и по запросу; включает настройка и политика (`account_telegram`, `account_matrix`).
