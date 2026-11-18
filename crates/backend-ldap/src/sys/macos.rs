@@ -35,12 +35,6 @@ struct Oid {
 }
 
 #[repr(C, packed(2))]
-struct OidSet {
-    count: usize,
-    elements: *const Oid,
-}
-
-#[repr(C, packed(2))]
 struct ChannelBindings {
     initiator_addrtype: OmUint32,
     initiator_address: Buffer,
