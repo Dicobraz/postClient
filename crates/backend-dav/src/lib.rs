@@ -809,7 +809,7 @@ impl AreaPlugin for DavPlugin {
         postman_dav::set_tls13_only(on);
     }
 
-    fn connect<'a>(&'a self, url: &'a str, login: &'a Login) -> BoxFuture<'a, CoreResult<Box<dyn Areas>>> {
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, CoreResult<Box<dyn Areas>>> {
         Box::pin(async move {
             match Dav::connect(url, &login.user, &login.password, &login.email).await {
                 Ok(d) => Ok(Box::new(d) as Box<dyn Areas>),

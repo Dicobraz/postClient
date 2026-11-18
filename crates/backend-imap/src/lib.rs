@@ -39,8 +39,7 @@ use postman_imap::state::{FolderState, Plan};
 use postman_imap::{AppendError, Config, Header, Role, Security, Session, flags, smtp, uid_set};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use postman_core::backend::Login;
-use postman_core::backend::{AreaCtx, AreaPlugin, Areas, BoxFuture, MailPlugin, Spawn};
+use postman_core::backend::{BoxFuture, MailPlugin, Spawn};
 use postman_core::model::{Auth, Feature, Features, ImportError, JobId, Remote, Selector};
 use postman_core::settings;
 use postman_core::sync::{Account, Command, ErrorKind, Event, FOLDER_UNSUPPORTED, Index, SendReceive, Sender, Stage, Status, SyncError};
@@ -186,7 +185,7 @@ impl MailPlugin for ImapPlugin {
 
     fn spawn(&self, s: Spawn) -> UnboundedSender<Command> {
         match ImapAccount::of(&s.account) {
-            Some(a) => spawn(a, s.profile, s.cache, s.index, s.events, s.repaint, s.areas),
+            Some(a) => spawn(a, s.profile, s.cache, s.index, s.events, s.repaint),
             None => {
                 let detail = format!("not an IMAP account: {}", s.account.url);
                 let _ = s.events.send(Event::Error(SyncError { kind: ErrorKind::Protocol, stage: Stage::Start, detail }));
@@ -420,11 +419,10 @@ pub fn spawn(
     index: Index,
     events: mpsc::Sender<Event>,
     repaint: impl Fn() + Send + 'static,
-    areas: Vec<Arc<dyn AreaPlugin>>,
 ) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     postman_core::sync::spawn_thread("sync-imap", events, Box::new(repaint), move |notify| async move {
-        run(account, profile, cache, index, rx, areas, &|e| notify.send(e)).await;
+        run(account, profile, cache, index, rx, &|e| notify.send(e)).await;
     });
     tx
 }
@@ -441,9 +439,6 @@ struct Imap {
     /// Письма в окне «Отменить» (S7-04в): уходят по сроку, отмена возвращает их в черновики.
     held: Vec<Held>,
     next_hold: u64,
-    /// Календарь, задачи и контакты — пути областей (S7-05б): ключ и подключение; пусто — у учётной записи только
-    /// почта.
-    areas: Vec<(&'static str, Box<dyn Areas>)>,
     /// Первая сверка прошла: опрос раз в [`POLL`] идёт молча, `Status::Loading` — только первая загрузка.
     loaded: bool,
 }
@@ -457,15 +452,7 @@ struct Held {
     at: tokio::time::Instant,
 }
 
-async fn run(
-    account: ImapAccount,
-    profile: Option<String>,
-    cache: Cache,
-    index: Index,
-    mut rx: UnboundedReceiver<Command>,
-    plugins: Vec<Arc<dyn AreaPlugin>>,
-    notify: &impl Fn(Event),
-) {
+async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index: Index, mut rx: UnboundedReceiver<Command>, notify: &impl Fn(Event)) {
     notify(Event::Status(Status::Connecting { url: format!("{}:{}", account.imap.host, account.imap.port) }));
     let session = match Session::connect(&account.imap).await {
         Ok(s) => s,
@@ -483,32 +470,15 @@ async fn run(
         worker: None,
         held: Vec::new(),
         next_hold: 0,
-        areas: Vec::new(),
         loaded: false,
     };
     notify(Event::Status(Status::SignedIn { user: me.account.email.clone() }));
-    let login = Login { user: me.account.imap.user.clone(), password: me.account.imap.password.clone(), email: me.account.email.clone() };
-    for (key, url) in me.account.areas.clone() {
-        let Some(plugin) = plugins.iter().find(|p| p.key() == key) else {
-            tracing::warn!(area = %key, "imap: no area backend");
-            continue;
-        };
-        match plugin.connect(&url, &login).await {
-            Ok(a) => me.areas.push((plugin.key(), a)),
-            // Без календаря почта всё равно работает: ошибка — тостом календаря, области скрыты.
-            Err(e) => {
-                tracing::warn!(area = %key, "imap: area unavailable, mail works without it: {e}");
-                notify(Event::CalendarFailed(e.to_string()));
-            }
-        }
-    }
     let address = Address::new("", &me.account.email);
-    // Задачи — у основной учётной записи, как у JMAP (S7-03б): сами они не приходят, сверять нужно из этого цикла.
-    let tasks = me.profile.is_none() && me.areas.iter().any(|(_, a)| a.features().has(Feature::Tasks));
     if me.profile.is_none() {
-        // Основная учётная запись IMAP: почта и то, что нашлось по CalDAV/CardDAV (S7-03а «Нет у сервера — нет на
-        // экране»). Ключевые слова (категории, сроки, «Ждём») — если сервер их хранит: `PERMANENTFLAGS \*` у «Входящих».
-        // Выгрузка писем из других учёток (S8-13) — `APPEND`; квота — если сервер объявил `QUOTA` (RFC 9208).
+        // Основная учётная запись IMAP: только почта — календарь, задачи и контакты ведёт ядро путями областей
+        // (PLG-07, `backend::areas`), их `Features` объединяет мост ядра. Ключевые слова (категории, сроки, «Ждём»)
+        // — если сервер их хранит: `PERMANENTFLAGS \*` у «Входящих». Выгрузка писем из других учёток (S8-13) —
+        // `APPEND`; квота — если сервер объявил `QUOTA` (RFC 9208).
         let (keywords, quota) = match me.session().await {
             Ok(s) => {
                 let quota = s.capabilities().iter().any(|c| c.eq_ignore_ascii_case("QUOTA") || c.to_ascii_uppercase().starts_with("QUOTA="));
@@ -516,8 +486,7 @@ async fn run(
             }
             Err(_) => (false, false),
         };
-        let areas = me.areas.iter().fold(Features::NONE, |f, (_, a)| f.union(a.features()));
-        notify(Event::Features(areas.with(Feature::Keywords, keywords).with(Feature::Quota, quota).with_import(true)));
+        notify(Event::Features(Features::NONE.with(Feature::Keywords, keywords).with(Feature::Quota, quota).with_import(true)));
         notify(Event::Me { address: address.clone(), signature: String::new() });
     }
     let senders = vec![Sender { account: me.scope.clone(), address, signature: String::new() }];
@@ -532,10 +501,6 @@ async fn run(
     };
     if let Err(e) = me.cache.replace_accounts_of(me.profile.as_deref(), &rows) {
         return notify(Event::Error(error(Stage::Load, &db(e))));
-    }
-    // Задачи — из кэша сразу, с сервера — дельта; экран задач ждёт этого ответа. Сбой — тостом, почта работает.
-    if tasks {
-        me.area_command(Command::Tasks(postman_core::tasks::Request::Load), notify).await;
     }
     if let Err(e) = me.refresh_all(notify).await {
         let stop = e.kind == ErrorKind::Auth;
@@ -590,21 +555,6 @@ async fn run(
             _ = poll.tick() => {
                 if let Err(e) = me.refresh_all(notify).await {
                     notify(Event::Error(e));
-                }
-                // Области без push (CalDAV): изменения календарей — опросом (ctag и sync-token).
-                let mut changed = false;
-                for (key, a) in me.areas.iter_mut() {
-                    match a.changed().await {
-                        Ok(c) => changed |= c,
-                        Err(e) => tracing::debug!("{key} poll: {e}"),
-                    }
-                }
-                if changed {
-                    // Задачи — те же записи календаря (VTODO): сверить и их.
-                    if tasks {
-                        me.area_command(Command::Tasks(postman_core::tasks::Request::Refresh), notify).await;
-                    }
-                    notify(Event::CalendarChanged);
                 }
             }
         }
@@ -1567,7 +1517,7 @@ impl Imap {
             Command::Settings(settings::Request::Quota) => notify(Event::Settings(self.quota().await)),
             // Календарь, задачи, занятость, контакты — путям областей. Правил и автоответа у IMAP нет, календаря и
             // контактов без путей областей — тоже: интерфейс их не показывает (`Features`).
-            other => self.area_command(other, notify).await,
+            other => self.area_command(other, notify),
         }
         Ok(())
     }
@@ -1730,18 +1680,10 @@ impl Imap {
         notify: &impl Fn(Event),
     ) {
         use postman_core::invite::{Delivery, Responded, delivery};
+        // Свою копию, если она была, уже ответила область (PLG-07, развод команд ядром): сюда команда доходит,
+        // когда копии на сервере нет, — ответ организатору письмом (iMIP).
         let uid = inv.event.uid.clone();
-        let mut done = Responded::NoCopy;
-        if let Some(a) = self.areas.iter_mut().find(|(_, a)| a.features().has(Feature::Calendar)).map(|(_, a)| a) {
-            match a.respond(&inv, status, &answer).await {
-                Ok(d) => done = d,
-                Err(e) => return notify(Event::InviteFailed { uid, error: e.to_string() }),
-            }
-        }
-        if done != Responded::NoCopy {
-            notify(Event::CalendarChanged);
-        }
-        let imported = match delivery(done, &answer) {
+        let imported = match delivery(Responded::NoCopy, &answer) {
             Ok(delivery) => return notify(Event::InviteAnswered { uid, status, delivery }),
             Err(imported) => imported,
         };
@@ -1759,14 +1701,8 @@ impl Imap {
     /// Шаг поручения (S6-09): своя копия задачи — на CalDAV (без рассылки сервером, `SCHEDULE-AGENT=CLIENT`), затем
     /// письма iTIP шага по SMTP; окно «Отменить» — как у `Send`.
     async fn delegate(&mut self, uid: String, drafts: Vec<Draft>, ticket: u64, release: postman_core::model::Release, notify: &impl Fn(Event)) {
-        let owner = self.owner();
-        let Some((_, a)) = self.areas.iter_mut().find(|(_, a)| a.features().has(Feature::Tasks)) else {
-            return notify(Event::Delegated { ticket, uid, error: Some("no tasks on the server".into()), scheduled: Vec::new() });
-        };
-        let ctx = AreaCtx { cache: &self.cache, profile: self.profile.as_deref(), owner: owner.as_ref(), notify };
-        if let Err(e) = a.flush_tasks(ctx).await {
-            return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled: Vec::new() });
-        }
+        // Копию задачи на сервер отправляет ядро (PLG-07, развод команд ядром): сюда шаг доходит после неё —
+        // письма iTIP шага по SMTP; окно «Отменить» — как у `Send`.
         let mut scheduled = Vec::new();
         for draft in drafts {
             match release {
@@ -1781,24 +1717,10 @@ impl Imap {
         notify(Event::Delegated { ticket, uid, error: None, scheduled });
     }
 
-    /// Владелец событий дополнительной учётной записи в общем календаре (S7-03б); у основной — `None`.
-    fn owner(&self) -> Option<postman_calendar::Owner> {
-        self.profile.as_ref().map(|_| postman_calendar::Owner { email: self.account.email.clone(), name: self.account.email.clone() })
-    }
-
-    /// Календарь, задачи и контакты — путям областей по порядку (`postman_core::backend::Areas`), тот же договор
-    /// событий, что у JMAP.
-    async fn area_command(&mut self, cmd: Command, notify: &impl Fn(Event)) {
-        let owner = self.owner();
-        let mut cmd = cmd;
-        for (_, a) in self.areas.iter_mut() {
-            let ctx = AreaCtx { cache: &self.cache, profile: self.profile.as_deref(), owner: owner.as_ref(), notify };
-            match a.handle(cmd, ctx).await {
-                None => return,
-                Some(back) => cmd = back,
-            }
-        }
-        // Справочника у IMAP нет; не ответила ни одна область — состав списка «не поддерживается» (T3-09).
+    /// Календарь, задачи, занятость и контакты ведёт ядро путями областей (PLG-07, `backend::areas`): сюда доходят
+    /// команды, которых области не взяли. Справочника у IMAP нет — список рассылки «не поддерживается» (T3-09);
+    /// остальное — в журнал.
+    fn area_command(&self, cmd: Command, notify: &impl Fn(Event)) {
         if let Command::ExpandList { ticket, address } = cmd {
             return notify(Event::ListMembers { ticket, address, members: Vec::new(), error: Some(postman_core::sync::ListError::Unsupported) });
         }

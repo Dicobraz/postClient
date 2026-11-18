@@ -5,8 +5,10 @@
 //!   плагина — канал команд, поэтому `async` через `dyn` здесь не нужен.
 //! - **Пути областей** ([`AreaPlugin`]) — календарь, задачи, занятость, контакты, справочник у учётной записи, где
 //!   почтовый путь их не даёт (IMAP + CalDAV/CardDAV, позже IMAP + EWS). Адрес области — в адресе учётной записи
-//!   (`?<ключ>=https://…`); почтовый путь подключает её в своём потоке и передаёт ей команды её областей
-//!   ([`Areas`]). Методы — с упакованными футурами ([`BoxFuture`]): трейты остаются dyn-совместимыми.
+//!   (`?<ключ>=https://…`). Команды областей разводит ядро ([`areas`], PLG-07): сначала область («не моя —
+//!   назад», [`Areas::handle`]), затем почтовый путь; область-процесс для ядра — как область в процессе
+//!   (заместитель, [`crate::backend::remote`]). Методы — с упакованными футурами ([`BoxFuture`]): трейты остаются
+//!   dyn-совместимыми.
 //! - **Что умеет сервер** — `model::Features`: путь сообщает их событием `Event::Features`, области — через
 //!   [`Areas::features`] (почтовый путь объединяет). Правило «Нет у сервера — нет на экране» — у интерфейса.
 //! - **Перенос между учётками** (ADR 0006 п. 4) — функция ядра: задание ведёт ядро, почтовый путь выполняет шаги
@@ -24,6 +26,7 @@
 //! - **Плагин отдельным процессом** (ADR 0013): сообщения по обмену — [`wire`], хост и заместитель с тем же трейтом —
 //!   [`remote`]. Процесс создаётся после первого кадра и только по запросу; в этой волне так работает демо-канал.
 
+pub(crate) mod areas;
 pub mod remote;
 pub mod wire;
 
@@ -52,8 +55,6 @@ pub struct Spawn {
     pub index: Index,
     pub events: mpsc::Sender<Event>,
     pub repaint: Box<dyn Fn() + Send>,
-    /// Пути областей реестра: почтовый путь подключает те, чьи адреса есть у учётной записи.
-    pub areas: Vec<Arc<dyn AreaPlugin>>,
 }
 
 /// Почтовый путь к серверу (JMAP, IMAP + SMTP…): синхронизация учётной записи целиком.
@@ -116,8 +117,9 @@ pub trait AreaPlugin: Send + Sync {
     /// Только TLS 1.3 для новых подключений (S5-30).
     fn set_tls13_only(&self, _on: bool) {}
 
-    /// Войти и найти области. Ошибка — тостом календаря; почта работает без областей.
-    fn connect<'a>(&'a self, url: &'a str, login: &'a Login) -> BoxFuture<'a, Result<Box<dyn Areas>, Error>>;
+    /// Войти и найти области. `profile` — учётная запись профиля (`None` — основная): у пути-процесса она одна на
+    /// сессию, события команды плагин метит сам (PLG-07). Ошибка — тостом календаря; почта работает без областей.
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login, profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Areas>, Error>>;
 }
 
 /// Что нужно областям от потока учётной записи.
@@ -205,6 +207,9 @@ impl Registry {
     }
 
     /// Синхронизация учётной записи путём её адреса. Путей нет — ошибка в окне, команды уходят в никуда.
+    /// Адресам областей в адресе учётки (`?dav=https://…`) команды разводит ядро ([`areas::serve`], PLG-07):
+    /// сначала области («не моя — назад»), затем почтовый путь; `Event::Features` — объединённые. Без областей в
+    /// адресе учётки — почтовый путь как был (JMAP и EWS ведут свои области сами).
     pub fn spawn(
         &self,
         account: Account,
@@ -219,7 +224,13 @@ impl Registry {
             return tokio::sync::mpsc::unbounded_channel().0;
         };
         tracing::debug!("sync backend: {}", p.name());
-        p.spawn(Spawn { account, profile, cache, index, events, repaint: Box::new(repaint), areas: self.areas.clone() })
+        let addresses: Vec<(String, String)> =
+            self.areas.iter().filter_map(|a| area_address(&account.url, a.key()).map(|address| (a.key(), address))).collect();
+        if addresses.is_empty() {
+            return p.spawn(Spawn { account, profile, cache, index, events, repaint: Box::new(repaint) });
+        }
+        let repaint: Arc<dyn Fn() + Send> = Arc::new(repaint);
+        areas::serve(account, profile, cache, index, events, repaint, Arc::clone(&p), self.areas.clone(), addresses)
     }
 
     /// Только TLS 1.3 («Настройки → Безопасность», S5-30); иначе — 1.2 и выше. Действует на новые подключения всех
@@ -276,6 +287,13 @@ pub fn insecure_tls() -> bool {
     std::env::var("POSTMAN_INSECURE_TLS").is_ok_and(|v| v == "1")
 }
 
+/// Адрес области с ключом `key` в адресе учётной записи (`?dav=https://…`); нет — `None`. Как
+/// [`crate::backend::remote::Row::claims`] у области ([`crate::backend::remote::Claim::Area`]), но со значением.
+pub fn area_address(url: &str, key: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned())).filter(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,9 +335,19 @@ mod tests {
         fn probe<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Option<String>> {
             Box::pin(async move { (host == "x-host").then(|| "https://x-host".to_owned()) })
         }
-        fn connect<'a>(&'a self, _url: &'a str, _login: &'a Login) -> BoxFuture<'a, Result<Box<dyn Areas>, Error>> {
+        fn connect<'a>(&'a self, _url: &'a str, _login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn Areas>, Error>> {
             Box::pin(async { Err(Error::Protocol("no areas in tests".into())) })
         }
+    }
+
+    /// Адрес области в адресе учётной записи — для развода команд ядром (PLG-07).
+    #[test]
+    fn area_address_from_the_account_url() {
+        let dav = "https://dav.example.test";
+        assert_eq!(area_address("imaps://mail.example.test?smtp=mail.example.test&dav=https://dav.example.test", "dav"), Some(dav.to_owned()));
+        assert_eq!(area_address("imaps://mail.example.test?dav=", "dav"), None, "пустое значение — не адрес");
+        assert_eq!(area_address("imaps://mail.example.test", "dav"), None);
+        assert_eq!(area_address("https://dav.example.test?dav=x&dav=y", "dav"), Some("y".to_owned()), "последнее значение");
     }
 
     #[test]

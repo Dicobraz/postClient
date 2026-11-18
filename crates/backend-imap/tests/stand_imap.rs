@@ -12,7 +12,7 @@
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use postman_backend_imap::{self as imap, ImapAccount};
+use postman_backend_imap as imap;
 use postman_cache::{Cache, EmailRow};
 use postman_compose::{Address, Attachment, Draft};
 use postman_core::model::Release;
@@ -58,7 +58,7 @@ impl Live {
         let account = ImapAccount::from_url(&url, &me, &env("POSTMAN_STAND_PASSWORD1")).unwrap();
         let cache = Cache::open_in_memory().unwrap();
         let (tx, events) = std::sync::mpsc::channel();
-        let commands = imap::spawn(account, None, cache.clone(), None, tx, || {}, Vec::new());
+        let commands = imap::spawn(account, None, cache.clone(), None, tx, || {});
         let live = Live { cache, commands, events, me };
         live.wait("Synced", |e| matches!(e, Event::Status(Status::Synced)));
         live
