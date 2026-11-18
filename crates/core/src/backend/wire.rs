@@ -195,9 +195,9 @@ pub enum Ask {
     /// Команда области (`Areas::handle`, PLG-07): сначала область («не моя — назад»), затем почтовый путь — так
     /// разводит ядро. События во время команды — [`FromPlugin::AreaEvent`]. Задачи (`Command::Tasks`) ядро не
     /// посылает: кэш у него, хранилище — [`Ask::AreaTask`]. Ответ — [`Reply::AreaCommand`].
-    AreaCommand { session: u64, cmd: SyncCommand },
+    AreaCommand { session: u64, cmd: Box<SyncCommand> },
     /// Ответ на приглашение своей копией (`Areas::respond`, PLG-07). Ответ — [`Reply::AreaResponded`].
-    AreaRespond { session: u64, invite: Invitation, status: Partstat, answer: InviteAnswer },
+    AreaRespond { session: u64, invite: Box<Invitation>, status: Partstat, answer: InviteAnswer },
     /// Изменилось ли что-то без push (`Areas::changed`, PLG-07): опрос — таймер ядра, раз в 2 минуты. Ответ —
     /// [`Reply::AreaChanged`].
     AreaChanged { session: u64 },
@@ -702,10 +702,10 @@ mod tests {
                 profile: None,
                 login: AreaLogin { user: "me@example.test".into(), password: Secret::new(b"pw".to_vec()), email: "me@example.test".into() },
             },
-            Ask::AreaCommand { session: 3, cmd: area_command() },
+            Ask::AreaCommand { session: 3, cmd: Box::new(area_command()) },
             Ask::AreaRespond {
                 session: 3,
-                invite: invitation(),
+                invite: Box::new(invitation()),
                 status: Partstat::Accepted,
                 answer: InviteAnswer { comment: Some("буду".into()), silent: false },
             },

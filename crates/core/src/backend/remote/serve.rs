@@ -21,7 +21,7 @@ use super::super::wire::{
 };
 use super::{BROWSER_WAIT as HOST_BROWSER_WAIT, MAX_BIN, PluginLink};
 use super::{Claim, Profile, Row};
-use crate::backend::{AreaCtx, AreaPlugin, Areas, BoxFuture, Login};
+use crate::backend::{AreaCtx, Areas, BoxFuture, Login};
 use crate::channel::{
     AccountId, Answer, ByteSink, ByteSource, ChannelError, ChannelEvent, ChannelPlugin, ChannelSession, ConnectCtx, FlowCtx, PluginStore, Secret, Sso,
 };
@@ -312,12 +312,30 @@ pub fn serve_area(link: PluginLink, id: &'static str, make: impl FnOnce() -> Arc
     0
 }
 
-/// Подключённая сессия области: плагин, учётка профиля и владелец её событий ([`Owner`]). Плагин — в `Rc`:
-/// команды одной сессии ядро ведёт по одной, а реестр сессий не держит заём на время команды.
+/// Подключённая сессия области: очередь операций к рабочей задаче. Плагин ведёт одна задача-владелец — по одной
+/// операции, как локальный раннер ядра; реестр держит только отправителя, заём на время операции живёт в задаче.
 struct Session {
-    area: Rc<RefCell<Box<dyn AreaSession>>>,
-    profile: Option<String>,
-    owner: Option<Owner>,
+    jobs: UnboundedSender<Job>,
+}
+
+/// Операция сессии области — из очереди по одной ([`Session::jobs`]).
+enum Job {
+    Command { id: u64, cmd: crate::sync::Command },
+    Respond { id: u64, respond: Box<(postman_calendar::Invitation, postman_calendar::Partstat, crate::invite::Answer)> },
+    Changed { id: u64 },
+    TaskOp { id: u64, op: TaskOp },
+}
+
+impl Job {
+    /// Ответ хосту, когда сессии нет или очередь уже закрыта.
+    fn miss(&self) -> Reply {
+        match self {
+            Job::Command { .. } => Reply::AreaCommand(Ok(false)),
+            Job::Respond { .. } => Reply::AreaResponded(Err(ModelError::Protocol("no such area session".into()))),
+            Job::Changed { .. } => Reply::AreaChanged(Err(ModelError::Protocol("no such area session".into()))),
+            Job::TaskOp { .. } => Reply::AreaTask(Err(ModelError::Protocol("no such area session".into()))),
+        }
+    }
 }
 
 /// Область учётной записи в процессе плагина.
@@ -332,7 +350,7 @@ struct ServedAreas {
 
 impl ServedAreas {
     async fn run(self: Rc<Self>, mut rx: UnboundedReceiver<(ToPlugin, Vec<u8>)>) {
-        while let Some((msg, bin)) = rx.recv().await {
+        while let Some((msg, _bin)) = rx.recv().await {
             match msg {
                 ToPlugin::Ask { id, ask } => self.ask(id, ask),
                 ToPlugin::Close { session } => {
@@ -353,18 +371,12 @@ impl ServedAreas {
             Ask::AreaOpen { session, url, profile, login } => {
                 tokio::task::spawn_local(Rc::clone(self).open(id, session, url, profile, login));
             }
-            Ask::AreaCommand { session, cmd } => {
-                tokio::task::spawn_local(Rc::clone(self).command(id, session, cmd));
-            }
+            Ask::AreaCommand { session, cmd } => self.area_send(session, id, Job::Command { id, cmd: *cmd }),
             Ask::AreaRespond { session, invite, status, answer } => {
-                tokio::task::spawn_local(Rc::clone(self).respond(id, session, invite, status, answer));
+                self.area_send(session, id, Job::Respond { id, respond: Box::new((*invite, status, answer)) });
             }
-            Ask::AreaChanged { session } => {
-                tokio::task::spawn_local(Rc::clone(self).changed(id, session));
-            }
-            Ask::AreaTask { session, op } => {
-                tokio::task::spawn_local(Rc::clone(self).task(id, session, op));
-            }
+            Ask::AreaChanged { session } => self.area_send(session, id, Job::Changed { id }),
+            Ask::AreaTask { session, op } => self.area_send(session, id, Job::TaskOp { id, op }),
             Ask::Probe(url) => {
                 tokio::task::spawn_local(Rc::clone(self).probe(id, url));
             }
@@ -385,8 +397,9 @@ impl ServedAreas {
             Ok(area) => {
                 let features = area.features();
                 let owner = profile.as_ref().map(|_| Owner { email: login.email.clone(), name: login.email.clone() });
-                let s = Session { area: Rc::new(RefCell::new(area)), profile, owner };
-                self.sessions.borrow_mut().insert(session, s);
+                let (jobs, rx) = unbounded_channel();
+                tokio::task::spawn_local(Rc::clone(&self).area_worker(session, area, profile.clone(), owner.clone(), rx));
+                self.sessions.borrow_mut().insert(session, Session { jobs });
                 Ok(features)
             }
             Err(e) => Err(e),
@@ -404,50 +417,53 @@ impl ServedAreas {
         }
     }
 
-    async fn command(self: Rc<Self>, id: u64, session: u64, cmd: crate::sync::Command) {
-        // Задачи поверх кэша — услуга ядра: кэш у ядра, хранилище плагина спрашивают операциями ([`Ask::AreaTask`]).
-        if matches!(cmd, crate::sync::Command::Tasks(_)) {
-            return answer(&self.link, id, Reply::AreaCommand(Ok(false)), &[]);
+    /// Операция — в очередь сессии; выполнит задача-владелец ([`ServedAreas::area_worker`]) по одной.
+    fn area_send(&self, session: u64, id: u64, job: Job) {
+        let miss = job.miss();
+        let sent = self.sessions.borrow().get(&session).is_some_and(|s| s.jobs.send(job).is_ok());
+        if !sent {
+            answer(&self.link, id, miss, &[]);
         }
-        let Some(s) = self.sessions.borrow().get(&session).map(|s| (Rc::clone(&s.area), s.profile.clone(), s.owner.clone())) else {
-            return answer(&self.link, id, Reply::AreaCommand(Ok(false)), &[]);
-        };
-        let (area, profile, owner) = s;
-        let notify = self.notify(session);
-        let ctx = AreaCtx { cache: &self.cache, profile: profile.as_deref(), owner: owner.as_ref(), notify: &notify };
-        let done = area.borrow_mut().handle(cmd, ctx).await.is_none();
-        answer(&self.link, id, Reply::AreaCommand(Ok(done)), &[]);
     }
 
-    async fn respond(
+    /// Владелец сессии области: операции из очереди по одной — заём на время операции не пересекается с соседним
+    /// (команды одной сессии ядро ведёт по одной, как в локальном раннере), повторный вход в `RefCell` невозможен.
+    async fn area_worker(
         self: Rc<Self>,
-        id: u64,
         session: u64,
-        invite: postman_calendar::Invitation,
-        status: postman_calendar::Partstat,
-        user_answer: crate::invite::Answer,
+        mut area: Box<dyn AreaSession>,
+        profile: Option<String>,
+        owner: Option<Owner>,
+        mut rx: UnboundedReceiver<Job>,
     ) {
-        let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
-            Some(area) => area.borrow_mut().respond(&invite, status, &user_answer).await,
-            None => Err(ModelError::Protocol("no such area session".into())),
-        };
-        answer(&self.link, id, Reply::AreaResponded(reply), &[]);
-    }
-
-    async fn changed(self: Rc<Self>, id: u64, session: u64) {
-        let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
-            Some(area) => area.borrow_mut().changed().await,
-            None => Err(ModelError::Protocol("no such area session".into())),
-        };
-        answer(&self.link, id, Reply::AreaChanged(reply), &[]);
-    }
-
-    async fn task(self: Rc<Self>, id: u64, session: u64, op: TaskOp) {
-        let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
-            Some(area) => area.borrow_mut().task_op(op).await,
-            None => Err(ModelError::Protocol("no such area session".into())),
-        };
-        answer(&self.link, id, Reply::AreaTask(reply), &[]);
+        let notify = self.notify(session);
+        while let Some(job) = rx.recv().await {
+            let ctx = AreaCtx { cache: &self.cache, profile: profile.as_deref(), owner: owner.as_ref(), notify: &notify };
+            match job {
+                Job::Command { id, cmd } => {
+                    // Задачи поверх кэша — услуга ядра: кэш у ядра, хранилище плагина спрашивают операциями ([`Ask::AreaTask`]).
+                    if matches!(cmd, crate::sync::Command::Tasks(_)) {
+                        answer(&self.link, id, Reply::AreaCommand(Ok(false)), &[]);
+                        continue;
+                    }
+                    let done = area.handle(cmd, ctx).await.is_none();
+                    answer(&self.link, id, Reply::AreaCommand(Ok(done)), &[]);
+                }
+                Job::Respond { id, respond } => {
+                    let (invite, status, a) = *respond;
+                    let reply = area.respond(&invite, status, &a).await;
+                    answer(&self.link, id, Reply::AreaResponded(reply), &[]);
+                }
+                Job::Changed { id } => {
+                    let reply = area.changed().await;
+                    answer(&self.link, id, Reply::AreaChanged(reply), &[]);
+                }
+                Job::TaskOp { id, op } => {
+                    let reply = area.task_op(op).await;
+                    answer(&self.link, id, Reply::AreaTask(reply), &[]);
+                }
+            }
+        }
     }
 
     async fn probe(self: Rc<Self>, id: u64, url: String) {

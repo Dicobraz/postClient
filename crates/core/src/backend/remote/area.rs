@@ -246,13 +246,14 @@ impl RemoteAreasSession {
         }
     }
 
-    /// Работающая связь сессии: процесс завершился — войти заново ([`RemoteAreasSession::hello`]).
-    async fn ensure(&mut self) -> Result<&Arc<Conn>, Error> {
+    /// Работающая связь сессии: процесс завершился — войти заново ([`RemoteAreasSession::hello`]). Связь —
+    /// своя копия: дальше заместитель зовёт `self.no()` и берёт `ctx`.
+    async fn ensure(&mut self) -> Result<Arc<Conn>, Error> {
         if self.conn.as_ref().is_none_or(|c| c.link.is_closed()) {
             self.hello().await?;
         }
         match self.conn.as_ref() {
-            Some(conn) => Ok(conn),
+            Some(conn) => Ok(Arc::clone(conn)),
             None => Err(Error::Protocol("area session is not open".into())),
         }
     }
@@ -284,7 +285,7 @@ impl Areas for RemoteAreasSession {
             if let crate::sync::Command::Tasks(request) = cmd {
                 return match self.ensure().await {
                     Ok(conn) => {
-                        let store = WireTasks { conn: Arc::clone(conn), session: self.no() };
+                        let store = WireTasks { conn, session: self.no() };
                         let replies = |r: crate::tasks::Reply| (ctx.notify)(crate::sync::Event::Tasks(r));
                         match crate::tasks::handle(&store, ctx.cache, request, &replies).await {
                             Ok(()) => None,
@@ -301,13 +302,13 @@ impl Areas for RemoteAreasSession {
                 };
             }
             let conn = match self.ensure().await {
-                Ok(conn) => Arc::clone(conn),
+                Ok(conn) => conn,
                 Err(e) => {
                     (ctx.notify)(crate::sync::Event::CalendarFailed(e.to_string()));
                     return None;
                 }
             };
-            let back = match conn.ask(Ask::AreaCommand { session: self.no(), cmd: cmd.clone() }, &[]).await {
+            let back = match conn.ask(Ask::AreaCommand { session: self.no(), cmd: Box::new(cmd.clone()) }, &[]).await {
                 Ok((Reply::AreaCommand(Ok(true)), _)) => None,
                 // «Не моя» — назад почтовому пути; ошибка обмена — процесс не донёс: команды нет и ответа нет.
                 Ok((Reply::AreaCommand(Ok(false)), _)) => Some(cmd),
@@ -337,7 +338,7 @@ impl Areas for RemoteAreasSession {
     ) -> BoxFuture<'a, Result<crate::invite::Responded, Error>> {
         Box::pin(async move {
             let conn = self.ensure().await?;
-            let ask = Ask::AreaRespond { session: self.no(), invite: invite.clone(), status, answer: answer.clone() };
+            let ask = Ask::AreaRespond { session: self.no(), invite: Box::new(invite.clone()), status, answer: answer.clone() };
             match conn.ask(ask, &[]).await {
                 Ok((Reply::AreaResponded(r), _)) => r,
                 Ok(_) => Err(Error::Protocol("plugin: unexpected reply".into())),
@@ -349,7 +350,7 @@ impl Areas for RemoteAreasSession {
     fn flush_tasks<'a>(&'a mut self, ctx: AreaCtx<'a>) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             let conn = match self.ensure().await {
-                Ok(conn) => Arc::clone(conn),
+                Ok(conn) => conn,
                 Err(e) => return Err(e),
             };
             let store = WireTasks { conn, session: self.no() };
@@ -444,6 +445,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::backend::remote::serve::AreaSession;
     use crate::backend::remote::{AreaServer, FetchedBody, serve_area};
     use crate::model::Feature;
     use crate::sync::Command;
@@ -515,6 +517,19 @@ mod tests {
 
     /// Путь областей на стороне процесса — тот же `serve_area`, что у набора.
     struct MockServer;
+
+    /// Приглашение для ответа своей копией — как в wire-тестах.
+    fn invitation() -> postman_calendar::Invitation {
+        let v = serde_json::json!({ "method": "REQUEST", "data": {
+            "@type": "Event", "uid": "mtg-7@example.test", "title": "Планёрка",
+            "start": "2026-10-20T10:00:00", "timeZone": "Europe/Moscow", "duration": "PT1H",
+            "participants": {
+                "o": { "name": "Иван", "calendarAddress": "mailto:ivan@example.test", "roles": { "owner": true } },
+                "m": { "calendarAddress": "mailto:me@example.test", "roles": { "attendee": true }, "participationStatus": "needs-action" }
+            }
+        }});
+        postman_calendar::Invitation::from_worker(&v, &jiff::tz::TimeZone::UTC).unwrap()
+    }
 
     impl AreaServer for MockServer {
         fn probe<'a>(&'a self, _host: &'a str) -> BoxFuture<'a, Option<String>> {
@@ -599,7 +614,7 @@ mod tests {
         assert!(back.is_none(), "неделя — области");
         assert_eq!(*seen.lock().unwrap(), [crate::sync::Event::CalendarChanged], "событие команды — до ответа");
         // Ответ на приглашение своей копией.
-        let invite = crate::invite::tests::inv();
+        let invite = invitation();
         let answered = rt().block_on(session.respond(&invite, postman_calendar::Partstat::Accepted, &crate::invite::Answer::default()));
         assert_eq!(answered, Ok(crate::invite::Responded::Sent));
         // Изменилось ли что-то.

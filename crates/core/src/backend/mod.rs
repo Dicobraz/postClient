@@ -230,7 +230,7 @@ impl Registry {
             return p.spawn(Spawn { account, profile, cache, index, events, repaint: Box::new(repaint) });
         }
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
-        areas::serve(account, profile, cache, index, events, repaint, Arc::clone(&p), self.areas.clone(), addresses)
+        areas::serve(account, profile, cache, index, events, repaint, Arc::clone(p), self.areas.clone(), addresses)
     }
 
     /// Только TLS 1.3 («Настройки → Безопасность», S5-30); иначе — 1.2 и выше. Действует на новые подключения всех

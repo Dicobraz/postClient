@@ -11,6 +11,7 @@ use std::io::pipe;
 use std::sync::Arc;
 
 use postman_backend_dav::{ID, serve};
+use postman_core::backend::AreaPlugin;
 use postman_core::backend::remote::{self, Claim, Host, Launcher, Profile, Row, Started};
 use postman_core::backend::wire::{AreaLogin, Kind, Settings};
 use postman_core::channel::Secret;
@@ -65,7 +66,7 @@ fn connect_refusal_crosses_the_exchange() {
         &postman_core::backend::Login { user: login.user.clone(), password: "pw".into(), email: login.email.clone() },
         None,
     ));
-    assert!(got.is_err(), "сервера нет — вход не удаётся: {got:?}");
+    assert!(got.is_err(), "сервера нет — вход не удаётся: {:?}", got.as_ref().err());
     assert_eq!(host.launches(), 1);
 }
 

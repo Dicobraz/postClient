@@ -19,7 +19,7 @@
 //! - **Изменения** — опрос по таймеру синхронизации: ctag и sync-token календарей → `CalendarChanged`.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use postman_core::backend::remote::{AreaServer, AreaSession, FetchedBody, PluginLink, serve_area};

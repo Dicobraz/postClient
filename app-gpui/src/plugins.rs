@@ -117,8 +117,11 @@ pub(crate) fn fetch_public(url: &str, max: usize) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Тело публичного ресурса с его ETag.
+pub(crate) type FetchedBody = (Vec<u8>, Option<String>);
+
 /// Публичный ресурс, если изменился (S8-44: подписки), — процессом DAV: `None` — не менялся с `etag`.
-pub(crate) fn fetch_changed(url: &str, max: usize, etag: Option<&str>) -> Result<Option<(Vec<u8>, Option<String>)>, String> {
+pub(crate) fn fetch_changed(url: &str, max: usize, etag: Option<&str>) -> Result<Option<FetchedBody>, String> {
     match host().fetch(DAV, url.to_owned(), max, etag.map(str::to_owned))? {
         (postman_core::backend::wire::Fetched::Body { etag }, body) => Ok(Some((body, etag))),
         (postman_core::backend::wire::Fetched::NotModified, _) => Ok(None),

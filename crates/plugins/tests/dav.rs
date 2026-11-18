@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use postman_core::backend::AreaPlugin;
 use postman_core::backend::remote::{Claim, Host, Launcher, Namespaces, ProcLauncher, Profile, Row, Started};
 use postman_core::backend::wire::{Kind, Settings};
 
@@ -43,7 +44,7 @@ fn connect_refusal_over_a_real_process() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let login = postman_core::backend::Login { user: "me@example.test".into(), password: "pw".into(), email: "me@example.test".into() };
     let got = rt.block_on(area.connect(&closed_port(), &login, None));
-    assert!(got.is_err(), "сервера нет — вход не удаётся: {got:?}");
+    assert!(got.is_err(), "сервера нет — вход не удаётся: {:?}", got.as_ref().err());
     assert_eq!(host.launches(), 1);
     let got = rt.block_on(area.connect(&closed_port(), &login, None));
     assert!(got.is_err());

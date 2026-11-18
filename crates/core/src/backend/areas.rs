@@ -61,11 +61,11 @@ pub(crate) fn serve(
         let r = Arc::clone(&repaint);
         move || r()
     });
-    let (url, auth) = (account.url.clone(), account.auth.clone());
+    let auth = account.auth.clone();
     let commands = mail.spawn(Spawn { account, profile: profile.clone(), cache: cache.clone(), index, events: mail_events, repaint: for_mail });
     let (tx, rx) = unbounded_channel();
     sync::spawn_thread("sync-areas", events, Box::new(move || repaint()), move |notify| async move {
-        run(url, auth, profile, cache, plugins, addresses, commands, rx, &notify, &both).await;
+        run(auth, profile, cache, plugins, addresses, commands, rx, &notify, &both).await;
     });
     tx
 }
@@ -106,7 +106,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Жизнь областей учётной записи: подключение, развод команд, опрос. До конца канала команд интерфейса.
 #[allow(clippy::too_many_arguments)]
 async fn run(
-    url: String,
     auth: Auth,
     profile: Option<String>,
     cache: Cache,
@@ -117,7 +116,7 @@ async fn run(
     notify: &Notifier,
     both: &Mutex<Both>,
 ) {
-    let Some(login) = login_of(&url, &auth) else {
+    let Some(login) = login_of(&auth) else {
         // Вход по токену у путей с областями в адресе не бывает: области не подключить, команды — почте напрямую.
         while let Some(cmd) = rx.recv().await {
             let _ = mail.send(cmd);
@@ -181,7 +180,7 @@ async fn run(
 
 /// Вход в области учётной записи: как у почтовых путей без своих областей (IMAP) — логин и пароль, адрес — сам
 /// пользователь. Вход по токену областей не даёт.
-fn login_of(url: &str, auth: &Auth) -> Option<Login> {
+fn login_of(auth: &Auth) -> Option<Login> {
     match auth {
         Auth::Basic { user, password } => Some(Login { user: user.clone(), password: password.clone(), email: user.clone() }),
         _ => None,
