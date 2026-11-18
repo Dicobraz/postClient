@@ -338,6 +338,8 @@ impl ServedAreas {
                 ToPlugin::Close { session } => {
                     self.sessions.borrow_mut().remove(&session);
                 }
+                // Потоков вопросов у областей нет — закрывать нечего.
+                ToPlugin::CloseFlow { .. } => {}
                 ToPlugin::Settings(s) => apply(s),
                 // Области держат сессию учётки: `Leave` — только ответ на выход программы. `Stored`/`SsoReply` —
                 // ответы услуг ядра каналов, сюда сообщением не приходят.
@@ -423,10 +425,10 @@ impl ServedAreas {
         session: u64,
         invite: postman_calendar::Invitation,
         status: postman_calendar::Partstat,
-        answer: crate::invite::Answer,
+        user_answer: crate::invite::Answer,
     ) {
         let reply = match self.sessions.borrow().get(&session).map(|s| Rc::clone(&s.area)) {
-            Some(area) => area.borrow_mut().respond(&invite, status, &answer).await,
+            Some(area) => area.borrow_mut().respond(&invite, status, &user_answer).await,
             None => Err(ModelError::Protocol("no such area session".into())),
         };
         answer(&self.link, id, Reply::AreaResponded(reply), &[]);

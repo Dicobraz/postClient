@@ -285,16 +285,17 @@ impl Areas for RemoteAreasSession {
                 return match self.ensure().await {
                     Ok(conn) => {
                         let store = WireTasks { conn: Arc::clone(conn), session: self.no() };
-                        match crate::tasks::handle(&store, ctx.cache, request, ctx.notify).await {
+                        let replies = |r: crate::tasks::Reply| (ctx.notify)(crate::sync::Event::Tasks(r));
+                        match crate::tasks::handle(&store, ctx.cache, request, &replies).await {
                             Ok(()) => None,
                             Err(e) => {
-                                ctx.notify(crate::sync::Event::Tasks(crate::tasks::Reply::Failed { uid: None, error: e.to_string() }));
+                                (ctx.notify)(crate::sync::Event::Tasks(crate::tasks::Reply::Failed { uid: None, error: e.to_string() }));
                                 None
                             }
                         }
                     }
                     Err(e) => {
-                        ctx.notify(crate::sync::Event::Tasks(crate::tasks::Reply::Failed { uid: None, error: e.to_string() }));
+                        (ctx.notify)(crate::sync::Event::Tasks(crate::tasks::Reply::Failed { uid: None, error: e.to_string() }));
                         None
                     }
                 };
@@ -302,7 +303,7 @@ impl Areas for RemoteAreasSession {
             let conn = match self.ensure().await {
                 Ok(conn) => Arc::clone(conn),
                 Err(e) => {
-                    ctx.notify(crate::sync::Event::CalendarFailed(e.to_string()));
+                    (ctx.notify)(crate::sync::Event::CalendarFailed(e.to_string()));
                     return None;
                 }
             };
@@ -319,7 +320,7 @@ impl Areas for RemoteAreasSession {
                     Some(cmd)
                 }
                 Err(e) => {
-                    ctx.notify(crate::sync::Event::CalendarFailed(e.to_string()));
+                    (ctx.notify)(crate::sync::Event::CalendarFailed(e.to_string()));
                     return None;
                 }
             };
@@ -352,7 +353,8 @@ impl Areas for RemoteAreasSession {
                 Err(e) => return Err(e),
             };
             let store = WireTasks { conn, session: self.no() };
-            crate::tasks::handle(&store, ctx.cache, crate::tasks::Request::Flush, ctx.notify).await
+            let replies = |r: crate::tasks::Reply| (ctx.notify)(crate::sync::Event::Tasks(r));
+            crate::tasks::handle(&store, ctx.cache, crate::tasks::Request::Flush, &replies).await
         })
     }
 
@@ -468,7 +470,7 @@ mod tests {
                 match cmd {
                     Command::Events { from, to } => {
                         assert_eq!((from, to), (1, 2));
-                        ctx.notify(crate::sync::Event::CalendarChanged);
+                        (ctx.notify)(crate::sync::Event::CalendarChanged);
                         None
                     }
                     other => Some(other),

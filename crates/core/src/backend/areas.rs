@@ -109,7 +109,7 @@ async fn run(
     profile: Option<String>,
     cache: Cache,
     plugins: Vec<Arc<dyn AreaPlugin>>,
-    addresses: Vec<(String, String)>,
+    addresses: Vec<(&'static str, String)>,
     mail: UnboundedSender<Command>,
     mut rx: UnboundedReceiver<Command>,
     notify: &Notifier,
@@ -260,7 +260,7 @@ async fn delegate(
     cmd: &Command,
 ) -> bool {
     let Command::Delegate { uid, ticket, .. } = cmd else { return false };
-    let Some((_, a)) = areas.iter_mut().find(|(_, a)| a.features().has(Feature::Tasks)).map(|(_, a)| a) else {
+    let Some(a) = areas.iter_mut().find(|(_, a)| a.features().has(Feature::Tasks)).map(|(_, a)| a) else {
         return send_and_done(
             notify,
             Event::Delegated { ticket: *ticket, uid: uid.clone(), error: Some("no tasks on the server".into()), scheduled: Vec::new() },

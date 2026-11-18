@@ -24,7 +24,7 @@ mod area;
 mod serve;
 mod sso;
 
-pub use area::{FetchOut, RemoteAreas};
+pub use area::RemoteAreas;
 pub use serve::{AreaServer, AreaSession, FetchedBody, SetEntry, on_log, on_stats, serve_area, serve_channel, serve_directory, set_main, settings};
 pub(crate) use sso::BROWSER_WAIT;
 
