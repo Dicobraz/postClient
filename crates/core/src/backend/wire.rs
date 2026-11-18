@@ -11,18 +11,69 @@
 //!
 //! Номер сессии и номер входа выдаёт хост: им же помечены события и вызовы хранилища, хост по ним находит учётку.
 
+use postman_calendar::{Invitation, Partstat};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::channel::{
     AccountId, Action, Address, Answer, AttachmentSource, ChannelError, ChannelEvent, ChannelFeatures, ConversationId, Cursor, Done, FileMeta,
     FlowKind, MessageId, Page, Participant, Prompt, Secret, Uploaded,
 };
+use crate::invite::{Answer as InviteAnswer, Responded};
+use crate::model::{Error as ModelError, Features};
 use crate::smime::directory::DirectoryError;
+use crate::sync::{Command as SyncCommand, Event as SyncEvent};
+use crate::tasks::Delta;
 
 /// Версия договора обмена: меняется с любым несовместимым изменением сообщений. №2 — `PluginHello` сообщает наличие
 /// ключа приложения (PLG-05: ключ Telegram остался в плагине, интерфейс его больше не читает из сборки); №3 — запрос
-/// каталога (`Ask::Certificates`, PLG-06: LDAP — процессом набора).
-pub const WIRE: u32 = 3;
+/// каталога (`Ask::Certificates`, PLG-06: LDAP — процессом набора); №4 — области учётки и публичные загрузки
+/// (`Ask::Area*`, `Ask::Fetch`, PLG-07: CalDAV и CardDAV — процессом, задачи поверх кэша — услугой ядра).
+pub const WIRE: u32 = 4;
+
+/// `serde_json::Value` и `Map` в сообщениях обмена (задачи областей, PLG-07): кодек postcard — формат без
+/// самоописания, `Value` он не разбирает (`deserialize_any` не поддержан), поэтому значение едет байтами JSON — тем
+/// же значением. Как `crate::json` у календаря (PLG-07 serde).
+pub(crate) mod json {
+    pub mod value {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use serde_json::Value;
+
+        pub fn serialize<S: Serializer>(v: &Value, s: S) -> Result<S::Ok, S::Error> {
+            serde_json::to_vec(v).map_err(serde::ser::Error::custom)?.serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Value, D::Error> {
+            serde_json::from_slice(&Vec::<u8>::deserialize(d)?).map_err(serde::de::Error::custom)
+        }
+    }
+
+    pub mod vec {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use serde_json::Value;
+
+        pub fn serialize<S: Serializer>(v: &[Value], s: S) -> Result<S::Ok, S::Error> {
+            serde_json::to_vec(v).map_err(serde::ser::Error::custom)?.serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Value>, D::Error> {
+            serde_json::from_slice(&Vec::<u8>::deserialize(d)?).map_err(serde::de::Error::custom)
+        }
+    }
+
+    pub mod map {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+        use serde_json::{Map, Value};
+
+        pub fn serialize<S: Serializer>(v: &Map<String, Value>, s: S) -> Result<S::Ok, S::Error> {
+            serde_json::to_vec(v).map_err(serde::ser::Error::custom)?.serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Map<String, Value>, D::Error> {
+            serde_json::from_slice(&Vec::<u8>::deserialize(d)?).map_err(serde::de::Error::custom)
+        }
+    }
+}
 
 /// Чья сборка: версия договора, версия программы и номер сборки. Хост и плагин из разных сборок (обновление прервано)
 /// не работают вместе.
@@ -136,6 +187,28 @@ pub enum Ask {
     Session { session: u64, call: Call },
     /// Поиск сертификатов в каталоге (`Directory::certificates`, PLG-06). Ответ — [`Reply::Certs`].
     Certificates(DirectoryQuery),
+    /// Войти в область учётной записи (`AreaPlugin::connect`, PLG-07); сессия — как у каналов. Ответ —
+    /// [`Reply::AreaOpened`] (что нашлось на сервере). Возможности объединяет ядро (`Event::Features` области не
+    /// шлют); `profile` — учётная запись профиля (`None` — основная) — один раз: события команды
+    /// ([`FromPlugin::AreaEvent`]) плагин метит сам по ней и по адресу участника из `login`.
+    AreaOpen { session: u64, url: String, profile: Option<String>, login: AreaLogin },
+    /// Команда области (`Areas::handle`, PLG-07): сначала область («не моя — назад»), затем почтовый путь — так
+    /// разводит ядро. События во время команды — [`FromPlugin::AreaEvent`]. Задачи (`Command::Tasks`) ядро не
+    /// посылает: кэш у него, хранилище — [`Ask::AreaTask`]. Ответ — [`Reply::AreaCommand`].
+    AreaCommand { session: u64, cmd: SyncCommand },
+    /// Ответ на приглашение своей копией (`Areas::respond`, PLG-07). Ответ — [`Reply::AreaResponded`].
+    AreaRespond { session: u64, invite: Invitation, status: Partstat, answer: InviteAnswer },
+    /// Изменилось ли что-то без push (`Areas::changed`, PLG-07): опрос — таймер ядра, раз в 2 минуты. Ответ —
+    /// [`Reply::AreaChanged`].
+    AreaChanged { session: u64 },
+    /// Операция хранилища задач плагина (услуга ядра, PLG-07). Ответ — [`Reply::AreaTask`].
+    AreaTask { session: u64, op: TaskOp },
+    /// Есть ли путь областей на узле (`AreaPlugin::probe`, PLG-07): вид сервера по адресу узнают и без учётки.
+    /// Ответ — [`Reply::Url`].
+    Probe(String),
+    /// Скачать публичный ресурс без входа (картинка письма, подписка на календарь, занятость по ссылке, S8-42/S8-44;
+    /// PLG-07): `etag` — условный запрос (`If-None-Match`). Ответ — [`Reply::Fetched`], тело — двоичной частью.
+    Fetch { url: String, max: u32, etag: Option<String> },
 }
 
 /// Как входить в каталог ([`DirectoryQuery`], PLG-06): то же, что «Настройки → Безопасность», но пароль простого
@@ -164,6 +237,59 @@ pub struct DirectoryQuery {
     pub login: DirectoryLogin,
     /// Адреса для поиска сертификатов.
     pub addresses: Vec<String>,
+}
+
+/// Вход в область учётной записи ([`Ask::AreaOpen`], PLG-07): логин и пароль учётной записи (пароль — байтами
+/// [`Secret`], как у каталога) и её адрес (участник встреч, если сервер не дал свой).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaLogin {
+    pub user: String,
+    pub password: Secret,
+    pub email: String,
+}
+
+/// Операция хранилища задач плагина областей ([`Ask::AreaTask`], PLG-07): задачи поверх кэша — услуга ядра
+/// ([`tasks::handle`](crate::tasks::handle) у хоста), само хранилище (VTODO календарей CalDAV) — у плагина.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TaskOp {
+    Load,
+    Changes(String),
+    Get(Vec<String>),
+    Create(#[serde(with = "json::value")] Value),
+    Update {
+        id: String,
+        #[serde(with = "json::map")]
+        patch: Map<String, Value>,
+    },
+    Destroy(String),
+    DefaultCalendar,
+}
+
+/// Ответ на операцию хранилища задач.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TaskDone {
+    Loaded {
+        #[serde(with = "json::vec")]
+        tasks: Vec<Value>,
+        state: String,
+    },
+    Delta(Delta),
+    Got(#[serde(with = "json::vec")] Vec<Value>),
+    Created(String),
+    /// Правка, удаление.
+    Done,
+    /// Календарь для новых задач.
+    Calendar(String),
+}
+
+/// Итог публичной загрузки ([`Ask::Fetch`], PLG-07): тело — двоичной частью кадра.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Fetched {
+    /// Ресурс не менялся с прошлого раза (ETag, S8-44: подписки).
+    NotModified,
+    Body {
+        etag: Option<String>,
+    },
 }
 
 /// Вызов `ChannelSession`.
@@ -199,6 +325,9 @@ pub enum FromPlugin {
     /// Услуга SSO (ADR 0013 «Договор»): возврат из браузера на `127.0.0.1` слушает ядро, песочница плагина входящих
     /// не принимает. Ответ — [`ToPlugin::SsoReply`].
     Sso { flow: u64, op: SsoOp },
+    /// Событие области учётки во время команды ([`Ask::AreaCommand`], PLG-07): тот же договор `sync::Event`, что у
+    /// почтового пути; заместитель отдаёт их потоку учётки по номеру сессии.
+    AreaEvent { session: u64, event: SyncEvent },
 }
 
 /// Вызов `PluginStore`.
@@ -244,6 +373,20 @@ pub enum Reply {
     Uploaded(Result<Uploaded, ChannelError>),
     /// Сертификаты из каталога ([`Ask::Certificates`], PLG-06) — DER как есть: чужие данные, их проверяет воркер.
     Certs(Result<Vec<Vec<u8>>, DirectoryError>),
+    /// Что нашлось в области учётки ([`Ask::AreaOpen`], PLG-07): возможности сервера.
+    AreaOpened(Result<Features, ModelError>),
+    /// Команда области ([`Ask::AreaCommand`], PLG-07): `true` — область её выполнила, `false` — «не моя, назад».
+    /// Ошибка обмена — как у каналов: заместитель лечит её подъёмом процесса.
+    AreaCommand(Result<bool, ChannelError>),
+    /// Что сделала область с ответом на приглашение ([`Ask::AreaRespond`], PLG-07).
+    AreaResponded(Result<Responded, ModelError>),
+    /// Изменилось ли что-то ([`Ask::AreaChanged`], PLG-07).
+    AreaChanged(Result<bool, ModelError>),
+    /// Данные хранилища задач плагина ([`Ask::AreaTask`], PLG-07).
+    AreaTask(Result<TaskDone, ModelError>),
+    /// Публичная загрузка ([`Ask::Fetch`], PLG-07): `Body` — тело двоичной частью кадра, `NotModified` — ресурс
+    /// не менялся; ошибка — строкой, как её показал бы интерфейс.
+    Fetched(Result<Fetched, String>),
 }
 
 #[cfg(test)]
@@ -553,6 +696,23 @@ mod tests {
                 login: DirectoryLogin::Password { user: "CN=svc".into(), password: Secret::new(b"pw".to_vec()) },
                 addresses: vec!["a@corp.example".into()],
             }),
+            Ask::AreaOpen {
+                session: 3,
+                url: "https://dav.example.test".into(),
+                profile: None,
+                login: AreaLogin { user: "me@example.test".into(), password: Secret::new(b"pw".to_vec()), email: "me@example.test".into() },
+            },
+            Ask::AreaCommand { session: 3, cmd: area_command() },
+            Ask::AreaRespond {
+                session: 3,
+                invite: invitation(),
+                status: Partstat::Accepted,
+                answer: InviteAnswer { comment: Some("буду".into()), silent: false },
+            },
+            Ask::AreaChanged { session: 3 },
+            Ask::AreaTask { session: 3, op: task_op() },
+            Ask::Probe("dav.example.test".into()),
+            Ask::Fetch { url: "https://cal.example.test/f.ics".into(), max: 1024, etag: Some("\"1\"".into()) },
         ];
         let covered = |a: &Ask| match a {
             Ask::Hello(_) => 0,
@@ -566,6 +726,13 @@ mod tests {
             Ask::Step { .. } => 8,
             Ask::Session { .. } => 9,
             Ask::Certificates(_) => 10,
+            Ask::AreaOpen { .. } => 11,
+            Ask::AreaCommand { .. } => 12,
+            Ask::AreaRespond { .. } => 13,
+            Ask::AreaChanged { .. } => 14,
+            Ask::AreaTask { .. } => 15,
+            Ask::Probe(_) => 16,
+            Ask::Fetch { .. } => 17,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all
@@ -591,6 +758,16 @@ mod tests {
                 source: AttachmentSource(vec![]),
             })),
             Reply::Certs(Ok(vec![b"der".to_vec(), b"pkcs7".to_vec()])),
+            Reply::AreaOpened(Ok(Features::NONE.with(crate::model::Feature::Calendar, true).with(crate::model::Feature::Tasks, true))),
+            Reply::AreaCommand(Ok(true)),
+            Reply::AreaCommand(Err(ChannelError::Network("plugin process is not running".into()))),
+            Reply::AreaResponded(Ok(Responded::Sent)),
+            Reply::AreaResponded(Err(crate::model::Error::Protocol("no calendar".into()))),
+            Reply::AreaChanged(Ok(true)),
+            Reply::AreaTask(Ok(task_done())),
+            Reply::Fetched(Ok(Fetched::Body { etag: Some("\"2\"".into()) })),
+            Reply::Fetched(Ok(Fetched::NotModified)),
+            Reply::Fetched(Err("bad public address".into())),
         ];
         let covered = |r: &Reply| match r {
             Reply::Hello(_) => 0,
@@ -605,9 +782,66 @@ mod tests {
             Reply::Done(_) => 9,
             Reply::Uploaded(_) => 10,
             Reply::Certs(_) => 11,
+            Reply::AreaOpened(_) => 12,
+            Reply::AreaCommand(Ok(_)) => 13,
+            Reply::AreaCommand(Err(_)) => 14,
+            Reply::AreaResponded(Ok(_)) => 15,
+            Reply::AreaResponded(Err(_)) => 16,
+            Reply::AreaChanged(_) => 17,
+            Reply::AreaTask(_) => 18,
+            Reply::Fetched(Ok(Fetched::Body { .. })) => 19,
+            Reply::Fetched(Ok(Fetched::NotModified)) => 20,
+            Reply::Fetched(Err(_)) => 21,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all
+    }
+
+    /// Команда областей для примера: неделя календаря.
+    fn area_command() -> SyncCommand {
+        SyncCommand::Events { from: 1_768_400_000, to: 1_768_900_000 }
+    }
+
+    /// Событие областей для примера.
+    fn area_event() -> SyncEvent {
+        SyncEvent::CalendarChanged
+    }
+
+    /// Приглашение из письма (`text/calendar`).
+    fn invitation() -> Invitation {
+        let v = serde_json::json!({ "method": "REQUEST", "data": {
+            "@type": "Event", "uid": "mtg-7@example.test", "title": "Планёрка",
+            "start": "2026-10-20T10:00:00", "timeZone": "Europe/Moscow", "duration": "PT1H",
+            "participants": {
+                "o": { "name": "Иван", "calendarAddress": "mailto:ivan@example.test", "roles": { "owner": true } },
+                "m": { "calendarAddress": "mailto:me@example.test", "roles": { "attendee": true }, "participationStatus": "needs-action" }
+            }
+        }});
+        Invitation::from_worker(&v, &jiff::tz::TimeZone::UTC).unwrap()
+    }
+
+    /// Операция хранилища задач плагина: правка с патчем JMAP.
+    fn task_op() -> TaskOp {
+        TaskOp::Update {
+            id: "/dav/cal/u/default/t1.ics".into(),
+            patch: serde_json::from_value::<Map<String, Value>>(serde_json::json!({ "title/xx": "готово", "keywords/x": null })).unwrap(),
+        }
+    }
+
+    /// Ответ хранилища задач: записи и состояние.
+    fn task_done() -> TaskDone {
+        TaskDone::Loaded { tasks: vec![serde_json::json!({ "@type": "Task", "title": "Отчёт" })], state: "/dav/cal/u/default/\tsync:3".into() }
+    }
+
+    /// Задача едет байтами JSON, но остаётся тем же значением.
+    #[test]
+    fn task_values_cross_the_wire_as_json() {
+        round(&TaskDone::Delta(Delta {
+            changed: vec![serde_json::json!({ "@type": "Task", "uid": "t2" }), serde_json::json!([1, "x", null, { "a": true }])],
+            destroyed: vec!["/dav/cal/u/default/gone.ics".into()],
+            state: "sync:4".into(),
+        }));
+        round(&TaskOp::Create(serde_json::json!({ "@type": "Task", "title": "Новая" })));
     }
 
     #[test]
@@ -658,6 +892,7 @@ mod tests {
             FromPlugin::Store { scope: 1, op: StoreOp::RemovePrefix("state/".into()) },
             FromPlugin::Sso { flow: 2, op: SsoOp::Listen },
             FromPlugin::Sso { flow: 2, op: SsoOp::Wait },
+            FromPlugin::AreaEvent { session: 3, event: area_event() },
         ];
         from.iter().for_each(round);
         let covered = |m: &FromPlugin| match m {
@@ -665,6 +900,7 @@ mod tests {
             FromPlugin::Event { .. } => 1,
             FromPlugin::Store { .. } => 2,
             FromPlugin::Sso { .. } => 3,
+            FromPlugin::AreaEvent { .. } => 4,
         };
         assert!(from.iter().map(covered).all(|i| i > 0), "ответы — выше");
     }

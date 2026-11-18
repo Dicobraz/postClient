@@ -147,10 +147,12 @@ pub fn new_uid(now_nanos: u128) -> String {
 // ---------------------------------------------------------------------------------------------------------------
 // Хранилище.
 
-/// Изменения задач на сервере с состояния `since`.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Изменения задач на сервере с состояния `since`. Сериализуется — по обмену областями (PLG-07): записи JSCalendar
+/// едут байтами JSON (postcard `Value` не разбирает).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Delta {
     /// Новые и изменённые задачи (JSCalendar); события календаря сюда не попадают.
+    #[serde(with = "crate::backend::wire::json::vec")]
     pub changed: Vec<Value>,
     /// id удалённых записей календаря (задач и событий — кэш знает только свои).
     pub destroyed: Vec<String>,
