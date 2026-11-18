@@ -13,7 +13,7 @@ use postman_backend_ldap::fake::{BASE, closed_port, entry, server};
 use postman_backend_ldap::{ID, serve};
 use postman_core::backend::remote::{self, Claim, Host, Launcher, Profile, Row, Started};
 use postman_core::backend::wire::{DirectoryLogin, DirectoryQuery, Kind, Settings};
-use postman_core::smime::directory::{Directory, DirectoryError};
+use postman_core::smime::directory::DirectoryError;
 use postman_proc::link::Link;
 
 const ROW: Row =
