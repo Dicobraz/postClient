@@ -33,7 +33,7 @@ impl Hash {
 }
 
 /// Кодирование листовой части (`Content-Transfer-Encoding`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Encoding {
     Base64,
     QuotedPrintable,
@@ -41,7 +41,8 @@ pub enum Encoding {
 
 /// Листовая часть письма от воркера (его `MimeSplit`, S8-07; сопоставление — у ядра): где в исходных байтах её
 /// закодированное тело, что в нём после раскодирования и её тип MIME (`type/subtype` строчными, пусто — не указан).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Сериализуется — части едут по обмену с записью содержимого (PLG-08: хранилище учётки — услуга ядра).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitPart {
     pub range: Range<usize>,
     pub encoding: Encoding,

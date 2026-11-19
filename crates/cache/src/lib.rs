@@ -43,6 +43,11 @@ impl Error {
     pub fn is_newer_format(&self) -> bool {
         self.0.starts_with(NEWER)
     }
+
+    /// Ошибка не самой базы, а услуги над ней (хранилище учётки по обмену, PLG-08).
+    pub fn other(what: impl Into<String>) -> Self {
+        Error(what.into())
+    }
 }
 
 macro_rules! from_err {

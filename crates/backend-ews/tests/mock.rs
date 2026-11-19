@@ -851,7 +851,7 @@ fn windows_sign_in_without_password() {
     assert!(log.iter().any(|b| b.contains("<m:ResolveNames") && b.contains(">anna<")), "свой адрес — ResolveNames по имени учётной записи");
 }
 
-/// Сервер не принял текущего пользователя Windows: одна ошибка `Auth` с причиной, без повторов.
+/// Сервер не принял текущего пользователя Windows: одна ошибка `WindowsSignInUnavailable`, без повторов.
 #[test]
 fn windows_sign_in_refused() {
     let (url, log) = ntlm_server(|_| false);
@@ -864,8 +864,7 @@ fn windows_sign_in_refused() {
             Err(e) => panic!("нет ошибки входа ({e})"),
         }
     };
-    assert_eq!(err.kind, postman_core::model::ErrorKind::Auth);
-    assert!(err.detail.starts_with(postman_backend_ews::WINDOWS_SIGN_IN_UNAVAILABLE), "{}", err.detail);
+    assert_eq!(err.kind, postman_core::model::ErrorKind::WindowsSignInUnavailable, "{}", err.detail);
     std::thread::sleep(Duration::from_millis(500));
     assert!(live.events.try_iter().all(|e| !matches!(e, Event::Error(_))), "одна ошибка, без повторов");
     assert!(log.lock().unwrap().iter().all(|b| b != "NTLM AUTHENTICATE"), "не вошли");
@@ -912,8 +911,7 @@ fn wrong_password_is_one_attempt_per_login() {
             Err(e) => panic!("нет ошибки входа ({e})"),
         }
     };
-    assert_eq!(err.kind, postman_core::model::ErrorKind::Auth);
-    assert!(err.detail.contains(postman_ews::CREDENTIALS_REJECTED), "{}", err.detail);
+    assert_eq!(err.kind, postman_core::model::ErrorKind::CredentialsRejected, "{}", err.detail);
     let log = log.lock().unwrap();
     let rejected: Vec<_> = log.iter().filter(|b| b.starts_with("NTLM REJECTED")).cloned().collect();
     assert_eq!(rejected, ["NTLM REJECTED anna@corp.example", r"NTLM REJECTED EXAMPLE\anna"]);

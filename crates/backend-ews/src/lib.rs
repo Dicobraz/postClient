@@ -16,12 +16,17 @@
 pub mod areas;
 pub mod sync;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use postman_core::backend::mail::{MailServer, MailServices};
+use postman_core::backend::remote::{AreaServer, AreaSession, FetchedBody, PluginLink, serve_mail_area};
+use postman_core::backend::wire::MailLogin;
 use postman_core::backend::{AreaPlugin, Areas, BoxFuture, Login, MailPlugin, Spawn};
-use postman_core::model::{Auth, ErrorKind};
+use postman_core::model::{Auth, Error as CoreError, ErrorKind};
 use postman_core::sync::{Account, Command, Event, Stage, SyncError, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 pub use areas::EwsAreas;
 
@@ -80,19 +85,14 @@ pub fn auth(user: &str, password: &str) -> postman_ews::Auth {
     if password.is_empty() { postman_ews::Auth::Windows } else { postman_ews::Auth::password(user, password) }
 }
 
-/// Причина отказа входа учётной записью Windows (в `SyncError::detail`): машина не в домене, нет билета Kerberos,
-/// сервер не принял текущего пользователя.
-pub const WINDOWS_SIGN_IN_UNAVAILABLE: &str = "windows sign-in unavailable";
-
-/// Сервер отклонил логин и пароль (в `SyncError::detail`): неверный пароль или логин не того вида.
-pub use postman_ews::CREDENTIALS_REJECTED;
-
-/// Ошибка входа: у входа учётной записью Windows отказ SSPI или сервера — с причиной
-/// [`WINDOWS_SIGN_IN_UNAVAILABLE`], род — `Auth`.
+/// Ошибка входа (PLG-08): отказ входа учётной записью Windows — род `WindowsSignInUnavailable` (интерфейс предложит
+/// войти с паролем), отклонённые логин и пароль — `CredentialsRejected` (подсказка про вид логина); прочее — как есть.
 pub fn sign_in_error(stage: Stage, a: &postman_ews::Auth, e: &postman_ews::Error) -> SyncError {
     let mut err = sync_error(stage, e);
     if matches!(a, postman_ews::Auth::Windows) && err.kind == ErrorKind::Auth {
-        err.detail = format!("{WINDOWS_SIGN_IN_UNAVAILABLE}: {e}");
+        err.kind = ErrorKind::WindowsSignInUnavailable;
+    } else if err.kind == ErrorKind::Auth {
+        err.kind = ErrorKind::CredentialsRejected;
     }
     err
 }
@@ -204,6 +204,85 @@ impl AreaPlugin for EwsAreaPlugin {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Путь EWS отдельным процессом (PLG-08, ADR 0013): `postman-plugins --plugin=ews`. Почта и свои области — один
+// процесс и один сетевой стек; хранилище учётки, разбор письма и S/MIME — услуги ядра по обмену
+// ([`postman_core::backend::mail`]).
+
+/// Идентификатор плагина пути EWS в наборе (`postman-plugins`, PLG-08); тот же в строке композиционного корня
+/// (`app-gpui/src/plugins.rs`) — совпадение сверяет тест корня.
+pub const ID: &str = "ews";
+
+/// Путь EWS на стороне процесса: вид сервера и запуск синхронизации учётки с услугами ядра ([`MailServices`]).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EwsServer;
+
+impl MailServer for EwsServer {
+    /// Exchange по введённому узлу: EWS узла или `autodiscover.<узел>` ([`EwsPlugin::probe`]).
+    fn probe<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Option<String>> {
+        EwsPlugin.probe(url)
+    }
+
+    /// Запустить синхронизацию учётной записи: свой поток с рантаймом, как у пути в ядре; события — хосту
+    /// (`FromPlugin::MailEvent`), команды — из канала. `Err` — поток не завёлся.
+    fn open(
+        &self,
+        url: String,
+        profile: Option<String>,
+        login: MailLogin,
+        services: MailServices,
+        commands: UnboundedReceiver<Command>,
+        notify: Arc<dyn Fn(Event) + Send + Sync>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let user = login.user;
+        let password = String::from_utf8_lossy(login.password.expose()).into_owned();
+        let spawned = std::thread::Builder::new().name(format!("sync-{ID}")).spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => return notify(Event::Error(SyncError::internal(format!("tokio runtime: {e}")))),
+            };
+            rt.block_on(async move {
+                sync::run(url, user, password, profile, services, commands, &*notify).await;
+            });
+        });
+        Box::pin(async move {
+            spawned.map_err(|e| format!("sync thread: {e}"))?;
+            Ok(())
+        })
+    }
+}
+
+/// Путь областей на стороне процесса (PLG-08): календарь и контакты учётки IMAP на Exchange (`?ews=…`) — тот же
+/// процесс, что и почта Exchange. Публичных загрузок по ссылке у EWS нет (занятость и календарь — учёткой).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EwsAreaServer;
+
+impl AreaServer for EwsAreaServer {
+    fn probe<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Option<String>> {
+        EwsAreaPlugin.probe(host)
+    }
+
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn AreaSession>, CoreError>> {
+        Box::pin(async move {
+            // Политику TLS процесс берёт из настроек ядра (`Hello` и смены), как у областей в наборе (PLG-07).
+            EwsAreaPlugin.set_tls13_only(postman_core::backend::remote::settings().tls13_only);
+            match EwsAreas::connect(url, &login.user, &login.password, &login.email).await {
+                Ok(a) => Ok(Box::new(a) as Box<dyn AreaSession>),
+                Err(e) => Err(core_error(e)),
+            }
+        })
+    }
+
+    fn fetch<'a>(&'a self, _url: &'a str, _max: u32, _etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>> {
+        Box::pin(async { Err("EWS does not serve public resources".to_owned()) })
+    }
+}
+
+/// Точка входа процесса: `postman-plugins --plugin=ews` (PLG-08). Ответ — код выхода.
+pub fn serve(link: PluginLink) -> i32 {
+    serve_mail_area(link, ID, Some(Arc::new(EwsServer)), || Arc::new(EwsAreaServer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,15 +314,18 @@ mod tests {
         assert!(matches!(auth("u", ""), postman_ews::Auth::Windows));
     }
 
+    /// Отказ входа — своим родом: учётной записью Windows — «войти с паролем», отклонённые логин и пароль —
+    /// подсказка про вид логина; сеть — не отказ входа.
     #[test]
     fn windows_sign_in_refusal_has_a_reason() {
         let e = postman_ews::Error::Sspi { call: "AcquireCredentialsHandleW", code: 0x8009_030e };
         let w = sign_in_error(Stage::Connect, &postman_ews::Auth::Windows, &e);
-        assert_eq!(w.kind, ErrorKind::Auth);
-        assert!(w.detail.starts_with(WINDOWS_SIGN_IN_UNAVAILABLE), "{}", w.detail);
+        assert_eq!(w.kind, ErrorKind::WindowsSignInUnavailable);
+        assert!(w.kind.is_auth());
         let p = sign_in_error(Stage::Connect, &auth("u", "p"), &postman_ews::Error::Auth("credentials rejected".into()));
-        assert!(p.kind == ErrorKind::Auth && !p.detail.contains(WINDOWS_SIGN_IN_UNAVAILABLE), "с паролем — обычный отказ");
+        assert_eq!(p.kind, ErrorKind::CredentialsRejected);
         let net = sign_in_error(Stage::Connect, &postman_ews::Auth::Windows, &postman_ews::Error::Timeout);
         assert_eq!(net.kind, ErrorKind::Network, "сеть — не отказ входа");
+        assert!(!net.kind.is_auth());
     }
 }

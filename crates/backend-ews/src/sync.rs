@@ -31,13 +31,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use postman_cache::{
-    AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, LetterId, MailboxRow, RemoteRef, Rights, in_profile, scoped, unscoped,
-};
+use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, EmailRow, LetterId, MailboxRow, RemoteRef, Rights, in_profile, scoped, unscoped};
 use postman_compose::{Address, Attachment, Draft};
+use postman_core::backend::mail::{LocalCache, LocalSeal, LocalWorker, MailCache, MailSeal, MailServices, MailWorker};
 use postman_core::backend::{AreaCtx, Spawn};
 use postman_core::model::{ImportError, JobId, Remote, Selector};
 use postman_core::sync::{Command, ErrorKind, Event, FOLDER_UNSUPPORTED, SendReceive, Sender, Stage, Status, SyncError};
@@ -212,10 +210,10 @@ impl Folder {
     }
 }
 
-/// Все письма папки в кэше.
-fn letters(cache: &Cache, folder: &str) -> postman_cache::Result<Vec<EmailRow>> {
-    let n = cache.count(folder)?;
-    cache.page(folder, 0, n)
+/// Все письма папки в кэше (услуга хранилища).
+fn letters(store: &dyn MailCache, folder: &str) -> postman_cache::Result<Vec<EmailRow>> {
+    let n = store.count(folder)?;
+    store.page(folder, 0, n)
 }
 
 /// Письма нет на сервере (удалено или перенесено в другом клиенте).
@@ -248,6 +246,11 @@ fn no_folder() -> postman_ews::Error {
 
 fn db(e: postman_cache::Error) -> postman_ews::Error {
     postman_ews::Error::Xml(format!("cache: {e}"))
+}
+
+/// Отказ услуги ядра (воркер, S/MIME) — ошибка пути.
+fn ews_of(e: String) -> postman_ews::Error {
+    postman_ews::Error::Xml(e)
 }
 
 /// Ошибка EWS при выгрузке → отказ задания переноса: больше предела, ящик полон; сервер занят — пауза
@@ -283,12 +286,18 @@ fn body_as(mut b: BodyRow, key: &str) -> BodyRow {
     b
 }
 
-/// Синхронизация учётной записи EWS: свой поток.
+/// Синхронизация учётной записи EWS: свой поток (у ядра, до своей волны — и в тестах). Услуги ядра — настоящие:
+/// кэш, воркер-песочница и свои ключи S/MIME ([`LocalCache`], [`LocalWorker`], [`LocalSeal`]).
 pub(crate) fn spawn(s: Spawn, user: String, password: String) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     let Spawn { account, profile, cache, events, repaint, .. } = s;
     postman_core::sync::spawn_thread("sync-ews", events, repaint, move |notify| async move {
-        run(account.url, user, password, profile, cache, rx, &|e| notify.send(e)).await;
+        let services = MailServices {
+            store: Box::new(LocalCache(cache)),
+            worker: Box::new(LocalWorker::new(postman_worker::Client::default_exe(), WORKER_TIMEOUT)),
+            seal: Box::new(LocalSeal),
+        };
+        run(account.url, user, password, profile, services, rx, &|e| notify.send(e)).await;
     });
     tx
 }
@@ -311,39 +320,15 @@ struct Ews {
     subscribed: bool,
     /// Подписки не было какое-то время: события могли пропасть — сверить, когда она вернётся.
     missed: bool,
-    cache: Cache,
-    worker: Option<postman_worker::Client>,
-    held: Vec<Held>,
-    next_hold: u64,
+    store: Box<dyn MailCache>,
+    worker: Box<dyn MailWorker>,
+    seal: Box<dyn MailSeal>,
+    /// Кэш договору областей ([`AreaCtx::cache`]): команд задач Exchange не умеет, и ядро их не посылает —
+    /// память процесса, в файлах не участвует (как у областей в наборе, PLG-07). `None` — память не дали.
+    area_cache: Option<postman_cache::Cache>,
     areas: Option<EwsAreas>,
     /// Первая сверка прошла: дальше сверки молчат, `Status::Loading` — только первая загрузка.
     loaded: bool,
-}
-
-/// Писем в окне «Отменить» у всех учётных записей этого пути, ещё не ушедших.
-static HOLDING: AtomicUsize = AtomicUsize::new(0);
-/// Приложение выходит: удержанные письма — сейчас, а не по сроку.
-static LEAVING: AtomicBool = AtomicBool::new(false);
-/// Как часто удержание смотрит на [`LEAVING`].
-const LEAVE_LOOK: Duration = Duration::from_millis(100);
-
-/// Приложение выходит: письма в окне «Отменить» уходят сейчас. Процесс ждёт их по [`holding`]: без этого письмо пропало бы
-/// вместе с потоком синхронизации.
-pub fn leave() {
-    LEAVING.store(true, Ordering::Relaxed);
-}
-
-/// Сколько писем ещё держит этот путь.
-pub fn holding() -> usize {
-    HOLDING.load(Ordering::Relaxed)
-}
-
-/// Письмо, которое держит синхронизация до срока окна «Отменить».
-struct Held {
-    id: String,
-    draft: Draft,
-    replace: Option<String>,
-    at: tokio::time::Instant,
 }
 
 /// Логин похож на адрес почты (`user@domain`, не `DOMAIN\user`).
@@ -437,15 +422,19 @@ async fn sign_in(url: &str, user: &str, password: &str) -> Result<(Client, Strin
     Err(last.unwrap_or(postman_ews::Error::Closed))
 }
 
-async fn run(
+/// Синхронизация учётной записи EWS (у ядра — поток, у пути-процесса — то же с услугами по обмену, PLG-08).
+pub(crate) async fn run(
     url: String,
     user: String,
     password: String,
     profile: Option<String>,
-    cache: Cache,
+    services: MailServices,
     mut rx: UnboundedReceiver<Command>,
-    notify: &impl Fn(Event),
+    notify: &dyn Fn(Event),
 ) {
+    let MailServices { store, worker, seal } = services;
+    // Конкретное замыкание вместо `&dyn` — дальше договор как был (`&impl Fn`).
+    let notify = &|e: Event| notify(e);
     notify(Event::Status(Status::Connecting { url: host_of(&url).unwrap_or_default() }));
     let (mut client, ews_url, roles) = match sign_in(&url, &user, &password).await {
         Ok(x) => x,
@@ -463,6 +452,14 @@ async fn run(
         tracing::info!("ews: Exchange server {}.{}.{}", v.major, v.minor, v.build);
     }
     let scope = in_profile(profile.as_deref(), None);
+    // Областям кэш нужен только договору (команд задач Exchange не умеет): память процесса.
+    let area_cache = match postman_cache::Cache::open_in_memory() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("ews: area commands are not available: {e}");
+            None
+        }
+    };
     let mut me = Ews {
         client,
         email,
@@ -476,10 +473,10 @@ async fn run(
         tree_at: None,
         subscribed: false,
         missed: false,
-        cache,
-        worker: None,
-        held: Vec::new(),
-        next_hold: 0,
+        store,
+        worker,
+        seal,
+        area_cache,
         areas: None,
         loaded: false,
     };
@@ -502,7 +499,7 @@ async fn run(
     }
     let senders = vec![Sender { account: me.scope.clone(), address, signature: String::new() }];
     // Адрес ящика — в адреса бесед писем (ADR 0012, поиск `беседа:`).
-    postman_core::channel::mail::remember_senders(&me.cache, &senders);
+    let _ = me.store.remember_senders(&senders);
     notify(Event::Senders(senders));
     // Сервер письмо не держит: «Отправить позже» нет (интерфейс прячет его по `max_delay: 0`).
     notify(Event::Scheduled { list: Vec::new(), max_delay: 0 });
@@ -510,7 +507,7 @@ async fn run(
         Some(p) => vec![AccountRow { id: p.clone(), name: me.email.clone(), is_personal: true, read_only: false }],
         None => Vec::new(),
     };
-    if let Err(e) = me.cache.replace_accounts_of(me.profile.as_deref(), &rows) {
+    if let Err(e) = me.store.replace_accounts_of(me.profile.as_deref(), &rows) {
         return notify(Event::Error(sync_error(Stage::Load, &db(e))));
     }
     // Подписка — своим клиентом и соединением (поток держит его до получаса); до первой сверки, чтобы не пропустить
@@ -532,19 +529,14 @@ async fn run(
         tokio::select! {
             biased;
             cmd = rx.recv() => {
-                let Some(cmd) = cmd else {
-                    // Интерфейс закрылся: письма в окне «Отменить» — отправить сейчас, а не потерять.
-                    me.release_held(true, notify).await;
-                    return;
-                };
+                let Some(cmd) = cmd else { return };
                 // Перенос папки в себя, в подпапку, в другой аккаунт — отказ ядра до сервера.
-                let Some(cmd) = postman_core::sync::admit(cmd, || me.cache.mailboxes().unwrap_or_default(), notify) else { continue };
+                let Some(cmd) = postman_core::sync::admit(cmd, || me.store.mailboxes().unwrap_or_default(), notify) else { continue };
                 if let Err(e) = me.handle(cmd, notify).await {
                     tracing::error!("ews: command failed: {e}");
                     notify(Event::Error(sync_error(Stage::Command, &e)));
                 }
             }
-            () = held_until(me.held.iter().map(|h| h.at).min()) => me.release_held(LEAVING.load(Ordering::Relaxed), notify).await,
             Some(w) = watch_rx.recv() => me.on_watch(w, notify).await,
             _ = poll.tick() => {
                 if let Some(tree) = poll_plan(me.subscribed, me.tree_at, tokio::time::Instant::now())
@@ -695,17 +687,6 @@ async fn watch(url: String, auth: postman_ews::Auth, tx: UnboundedSender<Watch>)
     }
 }
 
-async fn held_until(at: Option<tokio::time::Instant>) {
-    let Some(at) = at else { return std::future::pending().await };
-    while !LEAVING.load(Ordering::Relaxed) {
-        let now = tokio::time::Instant::now();
-        if now >= at {
-            return;
-        }
-        tokio::time::sleep((at - now).min(LEAVE_LOOK)).await;
-    }
-}
-
 impl Ews {
     fn scope(&self) -> Option<&str> {
         self.scope.as_deref()
@@ -776,14 +757,14 @@ impl Ews {
         }
         let hash = format!("f{}", hash(&id.id));
         let key = scoped(self.scope(), &hash);
-        let mut rows = letters(&self.cache, &old.key).map_err(db)?;
+        let mut rows = letters(&*self.store, &old.key).map_err(db)?;
         for r in &mut rows {
             r.mailbox_ids = vec![key.clone()];
         }
-        self.cache.upsert_emails(&rows).map_err(db)?;
+        self.store.upsert_emails(&rows).map_err(db)?;
         let state = |h: &str| scoped(self.scope(), &format!("ews.{h}"));
-        if let Some(s) = self.cache.state(&state(&old.hash)).map_err(db)? {
-            self.cache.set_state(&state(&hash), &s).map_err(db)?;
+        if let Some(s) = self.store.state(&state(&old.hash)).map_err(db)? {
+            self.store.set_state(&state(&hash), &s).map_err(db)?;
         }
         Ok(())
     }
@@ -987,7 +968,7 @@ impl Ews {
             .iter()
             .enumerate()
             .map(|(i, f)| {
-                let letters = letters(&self.cache, &f.key).unwrap_or_default();
+                let letters = letters(&*self.store, &f.key).unwrap_or_default();
                 MailboxRow {
                     id: f.key.clone(),
                     parent_id: f.parent.clone(),
@@ -1000,7 +981,7 @@ impl Ews {
                 }
             })
             .collect();
-        self.cache.replace_mailboxes(self.scope(), &rows).map_err(db)
+        self.store.replace_mailboxes(self.scope(), &rows).map_err(db)
     }
 
     /// Заголовки по id → строки папки `folder_key` (в кэш).
@@ -1011,14 +992,14 @@ impl Ews {
         let headers = self.client.mail_headers(ids).await?;
         let scope = self.scope.clone();
         let rows: Vec<EmailRow> = headers.iter().map(|h| row(scope.as_deref(), folder_key, h)).collect();
-        self.cache.upsert_emails(&rows).map_err(db)?;
+        self.store.upsert_emails(&rows).map_err(db)?;
         Ok(rows.len())
     }
 
     /// Сверить папку с сервером; `true` — письма в кэше изменились.
     async fn refresh(&mut self, f: &Folder) -> postman_ews::Result<bool> {
         let state_key = scoped(self.scope(), &format!("ews.{}", f.hash));
-        let old = self.cache.state(&state_key).map_err(db)?.filter(|s| !s.is_empty()).map(SyncState);
+        let old = self.store.state(&state_key).map_err(db)?.filter(|s| !s.is_empty()).map(SyncState);
         let Some(mut state) = old else { return self.first_load(f, &state_key).await };
         let scope = self.scope.clone();
         let mut fetch: Vec<ItemId> = Vec::new();
@@ -1028,8 +1009,8 @@ impl Ews {
             let page = match self.client.sync_mail(&f.at(), Some(&state), SYNC_PAGE).await {
                 Err(e) if e.is_invalid_sync_state() => {
                     // Сервер забыл состояние: папку — заново.
-                    let here: Vec<String> = letters(&self.cache, &f.key).map_err(db)?.into_iter().map(|r| r.id).collect();
-                    self.cache.delete_emails(&here).map_err(db)?;
+                    let here: Vec<String> = letters(&*self.store, &f.key).map_err(db)?.into_iter().map(|r| r.id).collect();
+                    self.store.delete_emails(&here).map_err(db)?;
                     return self.first_load(f, &state_key).await;
                 }
                 r => r?,
@@ -1045,22 +1026,22 @@ impl Ews {
         }
         let fetched = self.headers_into(&fetch, &f.key).await?;
         if !gone.is_empty() {
-            self.cache.delete_emails(&gone).map_err(db)?;
+            self.store.delete_emails(&gone).map_err(db)?;
         }
         let mut flagged = 0;
         if !reads.is_empty() {
             let keys: Vec<String> = reads.iter().map(|(k, _)| k.clone()).collect();
             let by_key: HashMap<&str, bool> = reads.iter().map(|(k, r)| (k.as_str(), *r)).collect();
-            let mut rows = self.cache.rows_by_ids(&keys).map_err(db)?;
+            let mut rows = self.store.rows_by_ids(&keys).map_err(db)?;
             for r in &mut rows {
                 if let Some(read) = by_key.get(r.id.as_str()) {
                     r.set_keyword("$seen", *read);
                 }
             }
             flagged = rows.len();
-            self.cache.upsert_emails(&rows).map_err(db)?;
+            self.store.upsert_emails(&rows).map_err(db)?;
         }
-        self.cache.set_state(&state_key, state.as_str()).map_err(db)?;
+        self.store.set_state(&state_key, state.as_str()).map_err(db)?;
         Ok(fetched > 0 || !gone.is_empty() || flagged > 0)
     }
 
@@ -1077,7 +1058,7 @@ impl Ews {
             }
         }
         if let Some(s) = state {
-            self.cache.set_state(state_key, s.as_str()).map_err(db)?;
+            self.store.set_state(state_key, s.as_str()).map_err(db)?;
         }
         Ok(added > 0)
     }
@@ -1085,9 +1066,9 @@ impl Ews {
     /// Письмо целиком: содержимое письма в хранилище или с сервера (`MimeContent`, тогда — в содержимое).
     async fn raw(&mut self, key: &str) -> postman_ews::Result<Vec<u8>> {
         let key = key.split_once('#').map_or(key, |(k, _)| k);
-        let letter = self.cache.letter_of(self.account(), unscoped(key).1).map_err(db)?;
+        let letter = self.store.letter_of(self.account(), unscoped(key).1).map_err(db)?;
         if let Some(l) = letter
-            && let Some(raw) = self.cache.letter_content(l).map_err(db)?
+            && let Some(raw) = self.store.letter_content(l).map_err(db)?
         {
             return Ok(raw);
         }
@@ -1100,40 +1081,23 @@ impl Ews {
         Ok(mail.mime)
     }
 
-    /// Письмо целиком — содержимым письма: крупные части — отдельно (разбор — воркером); не разобралось — целиком.
+    /// Письмо целиком — содержимым письма: крупные части — отдельно (разбор — воркер-услуга, PLG-08); не разобралось —
+    /// целиком.
     async fn put_content(&mut self, letter: LetterId, raw: &[u8]) -> postman_ews::Result<()> {
-        let bytes = raw.to_vec();
-        let parts = match self.in_worker(move |w| w.mime_split(&bytes).and_then(|(split, decoded)| postman_core::store::parts(split, &decoded))).await
-        {
+        let parts = match self.worker.mime_split(raw.to_vec()).and_then(|(split, decoded)| postman_core::store::parts(split, &decoded)) {
             Ok(p) => p,
             Err(e) => {
                 tracing::debug!("ews: content split: {e}");
                 Vec::new()
             }
         };
-        self.cache.put_content(letter, raw, &parts).map_err(db)?;
+        self.store.put_content(letter, raw, &parts).map_err(db)?;
         Ok(())
-    }
-
-    /// Работа воркера-песочницы — в отдельном потоке (он блокирует).
-    async fn in_worker<T: Send + 'static>(
-        &mut self,
-        f: impl FnOnce(&mut postman_worker::Client) -> Result<T, String> + Send + 'static,
-    ) -> postman_ews::Result<T> {
-        let mut worker = self.worker.take().unwrap_or_else(|| postman_worker::Client::new(postman_worker::Client::default_exe(), WORKER_TIMEOUT));
-        let (worker, out) = tokio::task::spawn_blocking(move || {
-            let out = f(&mut worker);
-            (worker, out)
-        })
-        .await
-        .map_err(|e| postman_ews::Error::Xml(format!("worker task: {e}")))?;
-        self.worker = Some(worker);
-        out.map_err(|e| postman_ews::Error::Xml(format!("worker: {e}")))
     }
 
     async fn body(&mut self, key: &str) -> postman_ews::Result<()> {
         let raw = self.raw(key).await?;
-        let m = self.in_worker(move |w| w.mime(&raw)).await?;
+        let m = self.worker.mime(raw).map_err(ews_of)?;
         let addrs = |v: Vec<postman_worker::mime::Addr>| v.into_iter().map(|a| Addr { name: a.name, email: a.email }).collect();
         let (message_id, references) = (m.message_id.clone(), m.references.clone());
         let body = BodyRow {
@@ -1158,8 +1122,8 @@ impl Ews {
                 .collect(),
             blob_id: Some(key.to_owned()),
         };
-        self.cache.put_body(key, &body).map_err(db)?;
-        if let Some(mut r) = self.cache.rows_by_ids(&[key.to_owned()]).map_err(db)?.pop() {
+        self.store.put_body(key, &body).map_err(db)?;
+        if let Some(mut r) = self.store.rows_by_ids(&[key.to_owned()]).map_err(db)?.pop() {
             let mut dirty = false;
             // Превью — из текста письма, как у JMAP.
             if r.preview.is_empty()
@@ -1177,7 +1141,7 @@ impl Ews {
                 }
             }
             if dirty {
-                self.cache.upsert_emails(&[r]).map_err(db)?;
+                self.store.upsert_emails(&[r]).map_err(db)?;
             }
         }
         Ok(())
@@ -1186,7 +1150,7 @@ impl Ews {
     /// Письма, которых больше нет на сервере: из кэша, счётчики папок заново — событиями, без ошибки.
     fn vanished(&mut self, keys: &[String], notify: &impl Fn(Event)) -> postman_ews::Result<()> {
         tracing::debug!(count = keys.len(), "ews: letters gone on the server, dropped from the cache");
-        self.cache.delete_emails(keys).map_err(db)?;
+        self.store.delete_emails(keys).map_err(db)?;
         self.write_folders()?;
         notify(Event::MailboxesChanged);
         notify(Event::EmailsChanged);
@@ -1194,14 +1158,14 @@ impl Ews {
     }
 
     async fn blob(&mut self, blob_id: &str) -> postman_ews::Result<Vec<u8>> {
-        if let Some(b) = self.cache.blob(blob_id).map_err(db)? {
+        if let Some(b) = self.store.blob(blob_id).map_err(db)? {
             return Ok(b);
         }
         let raw = self.raw(blob_id).await?;
         let Some((_, index)) = blob_id.split_once('#') else { return Ok(raw) };
         let index: u32 = index.parse().map_err(|_| postman_ews::Error::Xml(format!("bad blob {blob_id}")))?;
-        let data = self.in_worker(move |w| w.mime_part(&raw, index)).await?;
-        self.cache.put_blob(blob_id, &data).map_err(db)?;
+        let data = self.worker.mime_part(raw, index).map_err(ews_of)?;
+        self.store.put_blob(blob_id, &data).map_err(db)?;
         Ok(data)
     }
 
@@ -1211,7 +1175,7 @@ impl Ews {
 
     /// Папки писем по ключам (из кэша) — сверить после правки.
     fn folders_of(&self, keys: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = self.cache.rows_by_ids(keys).unwrap_or_default().into_iter().flat_map(|r| r.mailbox_ids).collect();
+        let mut out: Vec<String> = self.store.rows_by_ids(keys).unwrap_or_default().into_iter().flat_map(|r| r.mailbox_ids).collect();
         out.sort();
         out.dedup();
         out
@@ -1243,7 +1207,7 @@ impl Ews {
             }
         }
         // Строки кэша — сразу (сервер ответил); опрос сверит.
-        let mut rows = self.cache.rows_by_ids(keys).map_err(db)?;
+        let mut rows = self.store.rows_by_ids(keys).map_err(db)?;
         for r in &mut rows {
             for k in add {
                 r.set_keyword(k, true);
@@ -1252,7 +1216,7 @@ impl Ews {
                 r.set_keyword(k, false);
             }
         }
-        self.cache.upsert_emails(&rows).map_err(db)
+        self.store.upsert_emails(&rows).map_err(db)
     }
 
     async fn move_letters(&mut self, keys: &[String], to: &Folder) -> postman_ews::Result<()> {
@@ -1265,7 +1229,7 @@ impl Ews {
             self.relink(&keys, &moved, to).map_err(db)
         } else {
             // Новых id сервер не назвал: прежние строки убрать, новые придут сверкой папки.
-            self.cache.delete_emails(&keys).map_err(db)
+            self.store.delete_emails(&keys).map_err(db)
         }
     }
 
@@ -1273,30 +1237,30 @@ impl Ews {
     /// тело (под новым ключом) — те же (ADR 0006 п. 1).
     fn relink(&self, keys: &[String], moved: &[ItemId], to: &Folder) -> postman_cache::Result<()> {
         let account = self.account();
-        let folder = self.cache.folder_of(account, &to.hash)?;
+        let folder = self.store.folder_of(account, &to.hash)?;
         let mut rows = Vec::new();
         for (key, new) in keys.iter().zip(moved) {
-            let Some(letter) = self.cache.letter_of(account, unscoped(key).1)? else { continue };
-            let Some(mut row) = self.cache.letter(letter)? else { continue };
+            let Some(letter) = self.store.letter_of(account, unscoped(key).1)? else { continue };
+            let Some(mut row) = self.store.letter(letter)? else { continue };
             let id = encode_id(&new.id);
-            self.cache.attach_remote(letter, RemoteRef { account: account.to_owned(), id: id.clone(), data: Vec::new(), detached: false })?;
+            self.store.attach_remote(letter, RemoteRef { account: account.to_owned(), id: id.clone(), data: Vec::new(), detached: false })?;
             row.folders = folder.into_iter().collect();
-            if let Some(b) = self.cache.body(key)? {
+            if let Some(b) = self.store.body(key)? {
                 let k = scoped(self.scope(), &id);
-                self.cache.put_body(&k, &body_as(b, &k))?;
+                self.store.put_body(&k, &body_as(b, &k))?;
             }
             rows.push((id, row));
         }
-        self.cache.upsert_remotes(account, &rows)?;
+        self.store.upsert_remotes(account, &rows)?;
         // Прежние связи (и тела под прежними ключами): у письма уже есть новая — само письмо остаётся.
-        self.cache.delete_emails(keys)
+        self.store.delete_emails(keys)
     }
 
     async fn destroy(&mut self, keys: &[String]) -> postman_ews::Result<()> {
         let ids = Self::ids(keys);
         if !ids.is_empty() {
             self.client.delete_mail(&ids, DeleteMode::HardDelete).await?;
-            self.cache.delete_emails(keys).map_err(db)?;
+            self.store.delete_emails(keys).map_err(db)?;
         }
         Ok(())
     }
@@ -1339,10 +1303,10 @@ impl Ews {
         Ok(())
     }
 
-    /// Письмо — в байты (S/MIME «Конфиденциально» — как у JMAP); вложения пересылки — из кэша или с сервера.
+    /// Письмо — в байты (S/MIME «Конфиденциально» — услуга ядра, PLG-08); вложения пересылки — из кэша или с сервера.
     async fn message_bytes(&mut self, draft: &mut Draft, message_id: &str) -> postman_ews::Result<Vec<u8>> {
         self.fill(&mut draft.attachments).await?;
-        message_bytes(draft, jiff::Timestamp::now().as_second(), message_id)
+        message_bytes(&*self.seal, draft, jiff::Timestamp::now().as_second(), message_id)
     }
 
     /// Отправить; копию в «Отправленные» кладёт сервер (`SendAndSaveCopy`). Exchange доставляет всем из заголовков,
@@ -1354,7 +1318,7 @@ impl Ews {
         if let Some(share) = draft.share.as_mut().filter(|_| newcomers) {
             self.fill(&mut share.attachments).await?;
         }
-        for (raw, save) in to_send(&draft, jiff::Timestamp::now().as_second())? {
+        for (raw, save) in to_send(&*self.seal, &draft, jiff::Timestamp::now().as_second())? {
             self.client.send_mail(&raw, save).await?;
         }
         if let Some(old) = replace.filter(|k| parse_key(k).is_some()) {
@@ -1373,7 +1337,7 @@ impl Ews {
         let old = replace.as_deref().and_then(parse_key);
         let saved = self.client.save_draft(&raw, old.as_ref()).await?;
         if let Some(k) = replace {
-            self.cache.delete_emails(&[k]).map_err(db)?;
+            self.store.delete_emails(&[k]).map_err(db)?;
         }
         Ok(email_key(self.scope(), &saved))
     }
@@ -1389,7 +1353,7 @@ impl Ews {
         for f in folders {
             let ids = self.client.search_mail(&f.at(), aqs, SEARCH_LIMIT).await?;
             let keys: Vec<String> = ids.iter().map(|i| email_key(scope.as_deref(), i)).collect();
-            let known: HashSet<String> = self.cache.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
+            let known: HashSet<String> = self.store.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
             let missing: Vec<ItemId> = ids.iter().zip(&keys).filter(|(_, k)| !known.contains(*k)).map(|(i, _)| i.clone()).collect();
             self.headers_into(&missing, &f.key).await?;
             out.extend(keys);
@@ -1406,7 +1370,7 @@ impl Ews {
         for f in self.folders.clone() {
             let ids = self.client.find_message_id(&f.at(), &wanted).await?;
             let keys: Vec<String> = ids.iter().map(|i| email_key(scope.as_deref(), i)).collect();
-            let known: HashSet<String> = self.cache.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
+            let known: HashSet<String> = self.store.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
             let missing: Vec<ItemId> = ids.iter().zip(&keys).filter(|(_, k)| !known.contains(*k)).map(|(i, _)| i.clone()).collect();
             self.headers_into(&missing, &f.key).await?;
             out.extend(keys);
@@ -1417,11 +1381,11 @@ impl Ews {
     /// Следующая страница папки: письма старше уже загруженных (по дате получения).
     async fn load_more(&mut self, mailbox: &str) -> postman_ews::Result<usize> {
         let f = self.folder_by_key(mailbox).cloned().ok_or_else(|| postman_ews::Error::Xml(format!("no folder {mailbox}")))?;
-        let have = u32::try_from(self.cache.count(&f.key).map_err(db)?).unwrap_or(u32::MAX);
+        let have = u32::try_from(self.store.count(&f.key).map_err(db)?).unwrap_or(u32::MAX);
         let (ids, _) = self.client.mail_page(&f.at(), have, PAGE).await?;
         let scope = self.scope.clone();
         let keys: Vec<String> = ids.iter().map(|i| email_key(scope.as_deref(), i)).collect();
-        let known: HashSet<String> = self.cache.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
+        let known: HashSet<String> = self.store.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
         let missing: Vec<ItemId> = ids.iter().zip(&keys).filter(|(_, k)| !known.contains(*k)).map(|(i, _)| i.clone()).collect();
         self.headers_into(&missing, &f.key).await
     }
@@ -1449,42 +1413,12 @@ impl Ews {
     async fn store_letters(&mut self, mailbox: &str, keys: &[String]) -> postman_ews::Result<Vec<String>> {
         let ids: Vec<ItemId> = keys.iter().filter_map(|k| parse_key(k)).collect();
         self.headers_into(&ids, mailbox).await?;
-        let found: HashSet<String> = self.cache.rows_by_ids(keys).map_err(db)?.into_iter().map(|r| r.id).collect();
+        let found: HashSet<String> = self.store.rows_by_ids(keys).map_err(db)?.into_iter().map(|r| r.id).collect();
         Ok(keys.iter().filter(|k| !found.contains(*k)).cloned().collect())
-    }
-
-    /// Отправить удержанные письма, срок которых вышел (`all` — все).
-    async fn release_held(&mut self, all: bool, notify: &impl Fn(Event)) {
-        let now = tokio::time::Instant::now();
-        let (due, keep): (Vec<Held>, Vec<Held>) =
-            std::mem::take(&mut self.held).into_iter().partition(|h| postman_core::send_later::release_now(h.at, now, all));
-        self.held = keep;
-        if due.is_empty() {
-            return;
-        }
-        for h in due {
-            if let Err(e) = self.send(h.draft, h.replace).await {
-                tracing::error!("ews: held letter not sent: {e}");
-                notify(Event::Error(sync_error(Stage::Command, &e)));
-            }
-            HOLDING.fetch_sub(1, Ordering::Relaxed);
-        }
-        let folders = self.sent_and_drafts();
-        self.after(&folders, notify).await;
     }
 
     fn sent_and_drafts(&self) -> Vec<String> {
         [MailRole::Sent, MailRole::Drafts].iter().filter_map(|r| self.folder_by_role(*r).map(|f| f.key.clone())).collect()
-    }
-
-    fn hold(&mut self, draft: Draft, replace: Option<String>, secs: u32) -> postman_core::send_later::Scheduled {
-        self.next_hold += 1;
-        let id = scoped(self.scope(), &format!("hold.{}", self.next_hold));
-        let send_at = jiff::Timestamp::now().as_second() + i64::from(secs);
-        let at = tokio::time::Instant::now() + Duration::from_secs(u64::from(secs));
-        self.held.push(Held { id: id.clone(), draft, replace, at });
-        HOLDING.fetch_add(1, Ordering::Relaxed);
-        postman_core::send_later::Scheduled { submission: id.clone(), email: id, send_at }
     }
 
     async fn handle(&mut self, cmd: Command, notify: &impl Fn(Event)) -> postman_ews::Result<()> {
@@ -1496,11 +1430,11 @@ impl Ews {
                 Err(e) => return Err(e),
             },
             Command::Thread(thread) => {
-                let mut rows = self.cache.thread(&thread).map_err(db)?;
+                let mut rows = self.store.thread(&thread).map_err(db)?;
                 rows.sort_by_key(|r| r.received_at);
                 let mut gone = Vec::new();
                 for r in &rows {
-                    if self.cache.body(&r.id).map_err(db)?.is_none() {
+                    if self.store.body(&r.id).map_err(db)?.is_none() {
                         match self.body(&r.id).await {
                             Ok(()) => {}
                             Err(e) if is_gone(&e) => gone.push(r.id.clone()),
@@ -1609,29 +1543,16 @@ impl Ews {
                 }
                 notify(Event::Counts { ticket, counts: Some(counts) });
             }
-            Command::Send { draft, replace, ticket, release } => {
-                let hold = match release {
-                    postman_core::model::Release::At(_) => {
-                        notify(Event::ComposeFailed { ticket, error: "send later is not available for Exchange".into() });
-                        return Ok(());
-                    }
-                    postman_core::model::Release::After(s) => s,
-                    postman_core::model::Release::Now => 0,
-                };
-                if hold > 0 {
-                    let scheduled = self.hold(*draft, replace, hold);
-                    notify(Event::Sent { ticket, scheduled: Some(scheduled) });
-                    return Ok(());
+            // Окно «Отменить» и «Отправить позже» держит ядро (PLG-08): путь получает письмо в момент отправки,
+            // `Release` всегда «сейчас»; ответ — итог отправки.
+            Command::Send { draft, replace, ticket, .. } => match self.send(*draft, replace).await {
+                Ok(()) => {
+                    notify(Event::Sent { ticket, scheduled: None });
+                    let folders = self.sent_and_drafts();
+                    self.after(&folders, notify).await;
                 }
-                match self.send(*draft, replace).await {
-                    Ok(()) => {
-                        notify(Event::Sent { ticket, scheduled: None });
-                        let folders = self.sent_and_drafts();
-                        self.after(&folders, notify).await;
-                    }
-                    Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
-                }
-            }
+                Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
+            },
             Command::SaveDraft { draft, replace, ticket } => match self.save_draft(*draft, replace).await {
                 Ok(id) => {
                     notify(Event::DraftSaved { ticket, id });
@@ -1641,14 +1562,8 @@ impl Ews {
                 Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
             },
             Command::Scheduled => notify(Event::Scheduled { list: Vec::new(), max_delay: 0 }),
-            Command::Unsend { scheduled, ticket } => match self.held.iter().position(|h| h.id == scheduled.submission) {
-                Some(i) => {
-                    self.held.remove(i);
-                    HOLDING.fetch_sub(1, Ordering::Relaxed);
-                    notify(Event::Unsent { ticket, email: String::new() });
-                }
-                None => notify(Event::UnsendFailed { ticket, too_late: true, error: String::new() }),
-            },
+            // Отменять нечего: письма в окне «Отменить» держит ядро (PLG-08) и команду не пересылает.
+            Command::Unsend { ticket, .. } => notify(Event::UnsendFailed { ticket, too_late: true, error: String::new() }),
             Command::FetchRaw { letter } => notify(self.fetch_raw(letter).await),
             Command::Import { job, letter, folder, keywords, received_at, message_id, retry } => {
                 notify(match self.import(letter, folder, &keywords, received_at, message_id.as_deref(), retry).await {
@@ -1692,19 +1607,7 @@ impl Ews {
             Command::Delegate { uid, ticket, .. } => {
                 notify(Event::Delegated { ticket, uid, error: Some("no tasks on the server".into()), scheduled: Vec::new() });
             }
-            Command::Withhold { scheduled, ticket } => {
-                let mut too_late = false;
-                for s in &scheduled {
-                    match self.held.iter().position(|h| h.id == s.submission) {
-                        Some(i) => {
-                            self.held.remove(i);
-                            HOLDING.fetch_sub(1, Ordering::Relaxed);
-                        }
-                        None => too_late = true,
-                    }
-                }
-                notify(Event::Withheld { ticket, too_late, error: None });
-            }
+            Command::Withhold { ticket, .. } => notify(Event::Withheld { ticket, too_late: true, error: None }),
             // Календарь, занятость, справочник — областям EWS; правил, автоответа и задач у Exchange в Postman нет.
             other => self.area_command(other, notify).await,
         }
@@ -1713,7 +1616,7 @@ impl Ews {
 
     /// Связь письма с сервером этой учётки — и `detached` (письмо задания переноса у источника); `None` — связи нет.
     fn remote_of(&self, letter: postman_core::model::LetterId) -> postman_cache::Result<Option<String>> {
-        Ok(self.cache.remotes(LetterId(letter.0))?.into_iter().find(|r| r.account == self.account()).map(|r| r.id))
+        Ok(self.store.remotes(LetterId(letter.0))?.into_iter().find(|r| r.account == self.account()).map(|r| r.id))
     }
 
     /// `Command::FetchRaw`: письмо целиком с сервера (`MimeContent`).
@@ -1735,7 +1638,7 @@ impl Ews {
 
     /// Папка этой учётки по папке хранилища (цель выгрузки).
     fn folder_at(&self, folder: postman_core::model::FolderId) -> Option<&Folder> {
-        let row = self.cache.folder(postman_cache::FolderId(folder.0)).ok()??;
+        let row = self.store.folder(postman_cache::FolderId(folder.0)).ok()??;
         let postman_cache::Owner::Account(a) = &row.owner else { return None };
         let remote = row.remote.as_deref().filter(|_| a == self.account())?;
         self.folders.iter().find(|f| f.hash == remote)
@@ -1754,7 +1657,7 @@ impl Ews {
         retry: bool,
     ) -> Result<String, ImportError> {
         let to = self.folder_at(folder).map(Folder::at).ok_or_else(|| ImportError::Rejected("no such folder".into()))?;
-        let raw = match self.cache.letter_content(LetterId(letter.0)) {
+        let raw = match self.store.letter_content(LetterId(letter.0)) {
             Ok(Some(raw)) => raw,
             Ok(None) => return Err(ImportError::Rejected("letter content is not stored".into())),
             Err(e) => return Err(ImportError::Rejected(e.to_string())),
@@ -1787,7 +1690,7 @@ impl Ews {
         let mut out = Vec::new();
         let mut found: Vec<(postman_core::model::LetterId, ItemId)> = Vec::new();
         for &letter in letters {
-            match self.cache.remotes(LetterId(letter.0)) {
+            match self.store.remotes(LetterId(letter.0)) {
                 Ok(refs) => match refs.into_iter().find(|r| r.account == account).map(|r| parse_key(&r.id)) {
                     Some(Some(id)) => found.push((letter, id)),
                     Some(None) => out.push(Event::DestroyFailed { job, letter, error: "not an ews key".into() }),
@@ -1848,8 +1751,8 @@ impl Ews {
 
     async fn area_command(&mut self, cmd: Command, notify: &impl Fn(Event)) {
         let owner = self.profile.as_ref().map(|_| postman_calendar::Owner { email: self.email.clone(), name: self.email.clone() });
-        if let Some(a) = self.areas.as_mut() {
-            let ctx = AreaCtx { cache: &self.cache, profile: self.profile.as_deref(), owner: owner.as_ref(), notify };
+        if let (Some(a), Some(cache)) = (self.areas.as_mut(), self.area_cache.as_ref()) {
+            let ctx = AreaCtx { cache, profile: self.profile.as_deref(), owner: owner.as_ref(), notify };
             match postman_core::backend::Areas::handle(a, cmd, ctx).await {
                 None => return,
                 Some(back) => return tracing::debug!("ews: command not supported: {}", name(&back)),
@@ -1879,25 +1782,26 @@ fn name(c: &Command) -> &'static str {
     }
 }
 
-/// Письмо — в байты: сборка и S/MIME «Конфиденциально» (как у JMAP). Вложения — уже с байтами.
-fn message_bytes(draft: &Draft, now: i64, message_id: &str) -> postman_ews::Result<Vec<u8>> {
+/// Письмо — в байты: сборка и S/MIME «Конфиденциально» ([`MailSeal`] — услуга ядра, ключи пользователя плагину
+/// недоступны, PLG-08). Вложения — уже с байтами.
+fn message_bytes(seal: &dyn MailSeal, draft: &Draft, now: i64, message_id: &str) -> postman_ews::Result<Vec<u8>> {
     let raw = postman_compose::build(draft, now, message_id).map_err(|e| postman_ews::Error::Xml(format!("building the message: {e}")))?;
     if draft.encrypt_to.is_empty() {
         return Ok(raw);
     }
-    postman_core::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_ews::Error::Xml(format!("{e:?}")))
+    seal.seal_outgoing(raw, draft.encrypt_to.clone()).map_err(|e| postman_ews::Error::Xml(format!("{e:?}")))
 }
 
 /// Письма на отправку и класть ли копию в «Отправленные». Новых участников нет (или прежних среди адресатов нет) —
 /// одно письмо, как его даёт [`Draft::outgoing`]. Есть — основное всем из заголовков (копия у себя) и «Вложения из
 /// беседы» новым ([`Draft::attachments_letter`], без копии): оно первым — не ушло, не уходит и основное.
-fn to_send(draft: &Draft, now: i64) -> postman_ews::Result<Vec<(Vec<u8>, bool)>> {
+fn to_send(seal: &dyn MailSeal, draft: &Draft, now: i64) -> postman_ews::Result<Vec<(Vec<u8>, bool)>> {
     let mut out = Vec::new();
     if let Some(extra) = draft.attachments_letter() {
-        out.push((message_bytes(&extra, now, &postman_compose::new_message_id(&extra.from, now))?, false));
+        out.push((message_bytes(seal, &extra, now, &postman_compose::new_message_id(&extra.from, now))?, false));
     }
     let main = draft.outgoing().into_iter().next().map(|c| c.draft).unwrap_or_else(|| draft.clone());
-    out.push((message_bytes(&main, now, &postman_compose::new_message_id(&main.from, now))?, true));
+    out.push((message_bytes(seal, &main, now, &postman_compose::new_message_id(&main.from, now))?, true));
     Ok(out)
 }
 
@@ -1938,7 +1842,7 @@ mod tests {
     fn newcomers_get_a_separate_attachments_letter() {
         use postman_worker::mime::{parse, part};
         let d = reply_with_newcomer();
-        let out = to_send(&d, 1_792_240_200).unwrap();
+        let out = to_send(&LocalSeal, &d, 1_792_240_200).unwrap();
         assert_eq!(out.iter().map(|(_, save)| *save).collect::<Vec<_>>(), [false, true]);
         let (extra, main) = (parse(&out[0].0).unwrap(), parse(&out[1].0).unwrap());
         assert_eq!(extra.to.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(), ["olga@x.example"]);
@@ -1954,12 +1858,12 @@ mod tests {
         // Отключили в черновике — одно письмо, как раньше.
         let mut off = d.clone();
         off.share.as_mut().unwrap().off = true;
-        let out = to_send(&off, 0).unwrap();
+        let out = to_send(&LocalSeal, &off, 0).unwrap();
         assert_eq!((out.len(), out[0].1), (1, true));
         // Прежних среди адресатов нет — одно письмо всем, с вложениями.
         let mut fresh = d.clone();
         fresh.to.clear();
-        let out = to_send(&fresh, 0).unwrap();
+        let out = to_send(&LocalSeal, &fresh, 0).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(parse(&out[0].0).unwrap().parts.len(), 1);
     }

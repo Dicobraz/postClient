@@ -25,7 +25,11 @@ mod serve;
 mod sso;
 
 pub use area::RemoteAreas;
-pub use serve::{AreaServer, AreaSession, FetchedBody, SetEntry, on_log, on_stats, serve_area, serve_channel, serve_directory, set_main, settings};
+pub(in crate::backend) use area::{PROBE_WAIT, ready_async};
+pub(in crate::backend) use serve::STORE_WAIT;
+pub use serve::{
+    AreaServer, AreaSession, FetchedBody, SetEntry, on_log, on_stats, serve_area, serve_channel, serve_directory, serve_mail_area, set_main, settings,
+};
 pub(crate) use sso::BROWSER_WAIT;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -36,6 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
+use postman_cache::Cache;
 use postman_proc::journal::{Journal, JournalLevel};
 use postman_proc::link::{CallId, Incoming, Link};
 pub use postman_proc::sandbox::{Namespaces, Profile};
@@ -43,6 +48,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::{oneshot, watch};
 
 use super::BoxFuture;
+use super::mail::{run_cache, run_smime, run_worker};
 use super::wire::{
     Ask, Build, Call, DirectoryQuery, FromPlugin, HostHello, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, ToPlugin,
 };
@@ -115,7 +121,9 @@ impl Row {
         match self.claim {
             Claim::Channel => url.starts_with(&format!("{}{}/", crate::channel::SCHEME, self.id)),
             Claim::Scheme(s) => url.starts_with(&s.to_ascii_lowercase()),
-            Claim::Path(p) => url.split(['?', '#']).next().is_some_and(|u| u.contains(&p.to_ascii_lowercase())),
+            // Путь в конце адреса (до запроса и фрагмента), как у `is_ews_url` пути EWS (PLG-08) — иначе путь
+            // совпал бы и в середине чужого адреса.
+            Claim::Path(p) => url.split(['?', '#']).next().is_some_and(|u| u.trim_end_matches('/').ends_with(&p.to_ascii_lowercase())),
             Claim::Area(key) => url.split_once('?').is_some_and(|(_, q)| q.split('&').any(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))),
             Claim::None => false,
         }
@@ -222,8 +230,19 @@ pub fn plugins_rss() -> u64 {
     metrics_lock().rss.values().sum()
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(in crate::backend) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Сессия почтового пути на хосте (PLG-08): события учётки — в её канал, база — у ядра, ошибка записи без ответа —
+/// до ближайшего чтения.
+pub(in crate::backend) struct MailScope {
+    pub(in crate::backend) events: mpsc::Sender<crate::sync::Event>,
+    pub(in crate::backend) repaint: Mutex<Box<dyn Fn() + Send>>,
+    pub(in crate::backend) cache: Cache,
+    pub(in crate::backend) failed: Mutex<Option<String>>,
+    /// Очередь отправки учётки (PLG-08): ответы пути на её билеты — сюда, интерфейсу — только её ошибки.
+    pub(in crate::backend) queue: Arc<super::mail::MailQueue>,
 }
 
 fn gone() -> ChannelError {
@@ -236,9 +255,9 @@ fn unexpected() -> ChannelError {
 
 /// Хост плагинов процесса: один на программу. Клонируется дёшево.
 #[derive(Clone)]
-pub struct Host(Arc<Inner>);
+pub struct Host(pub(in crate::backend) Arc<Inner>);
 
-struct Inner {
+pub(in crate::backend) struct Inner {
     launcher: Arc<dyn Launcher>,
     settings: Mutex<Settings>,
     gate: Mutex<Gate>,
@@ -328,7 +347,7 @@ impl Host {
 }
 
 impl Inner {
-    fn plugin(&self, row: Row) -> Arc<Plugin> {
+    pub(in crate::backend) fn plugin(&self, row: Row) -> Arc<Plugin> {
         let mut plugins = lock(&self.plugins);
         Arc::clone(plugins.entry(row.id).or_insert_with(|| {
             Arc::new(Plugin {
@@ -409,8 +428,8 @@ enum Phase {
     },
 }
 
-struct Plugin {
-    row: Row,
+pub(in crate::backend) struct Plugin {
+    pub(in crate::backend) row: Row,
     phase: watch::Sender<Phase>,
     priority: Mutex<Priority>,
     /// Ключ приложения в сборке плагина — из его `Hello` (Telegram, PLG-05); `None` — процесса ещё не было.
@@ -568,6 +587,8 @@ fn hello(host: &Inner, plugin: &Arc<Plugin>, s: Started, started: Instant) -> Re
         scopes: Mutex::new(HashMap::new()),
         sso: Mutex::new(HashMap::new()),
         areas_events: Mutex::new(HashMap::new()),
+        mails: Mutex::new(HashMap::new()),
+        worker: Mutex::new(None),
         kill: Mutex::new(kill),
         exit_code: Mutex::new(exit_code),
         background: Mutex::new(background),
@@ -624,8 +645,8 @@ enum Waiter {
 }
 
 /// Работающий процесс плагина.
-struct Conn {
-    link: HostLink,
+pub(in crate::backend) struct Conn {
+    pub(in crate::backend) link: HostLink,
     next: AtomicU64,
     pending: Mutex<HashMap<u64, Waiter>>,
     /// Сессия → куда её события (`ConnectCtx::incoming`).
@@ -637,6 +658,10 @@ struct Conn {
     /// Сессия области учётки (PLG-07) → события её команды (`FromPlugin::AreaEvent`): ждущий ответ задачи
     /// заберёт их после ответа ([`Conn::drain_area_events`]).
     areas_events: Mutex<HashMap<u64, VecDeque<crate::sync::Event>>>,
+    /// Сессия почтового пути (PLG-08) → её учётка: события, база (у ядра) и ошибка записей без ответа.
+    pub(in crate::backend) mails: Mutex<HashMap<u64, MailScope>>,
+    /// Воркер-песочница разбора писем (PLG-08, услуга [`FromPlugin::Worker`]): один на процесс плагина.
+    worker: Mutex<Option<postman_worker::Client>>,
     kill: Mutex<Box<dyn FnMut() + Send>>,
     exit_code: Mutex<Box<dyn FnMut() -> Option<u32> + Send>>,
     background: Mutex<Box<dyn FnMut(bool) -> io::Result<()> + Send>>,
@@ -651,12 +676,33 @@ impl Conn {
         (lock(&self.kill))();
     }
 
+    /// Запись хранилища учётки без ответа (PLG-08): выполняется сразу; ошибка — запомнится до ближайшего чтения
+    /// (порядок записей сохраняется, ответа на запись нет).
+    fn cache_write(&self, session: u64, op: &super::wire::CacheOp) -> Result<(), String> {
+        let mails = lock(&self.mails);
+        let scope = mails.get(&session).ok_or_else(|| "no such mail session".to_owned())?;
+        match run_cache(&scope.cache, op) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                *lock(&scope.failed) = Some(e.to_string());
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Воркер-песочница этой связи (PLG-08): запускается при первом разборе письма и живёт до конца связи.
+    fn with_worker<T>(&self, f: impl FnOnce(&mut postman_worker::Client) -> T) -> T {
+        let mut slot = lock(&self.worker);
+        let worker = slot.get_or_insert_with(|| postman_worker::Client::new(postman_worker::Client::default_exe(), super::mail::WORKER_TIMEOUT));
+        f(worker)
+    }
+
     /// Код выхода для журнала: `, exit code …` или пусто.
     fn exit(&self) -> String {
         (lock(&self.exit_code))().map(|c| format!(", exit code {}", postman_proc::exit_name(c))).unwrap_or_default()
     }
 
-    fn id(&self) -> u64 {
+    pub(in crate::backend) fn id(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -671,13 +717,13 @@ impl Conn {
         Ok(id)
     }
 
-    async fn ask(&self, ask: Ask, bin: &[u8]) -> Result<Answered, ChannelError> {
+    pub(in crate::backend) async fn ask(&self, ask: Ask, bin: &[u8]) -> Result<Answered, ChannelError> {
         let (tx, rx) = oneshot::channel();
         self.post(ask, bin, Waiter::Async(tx))?;
         rx.await.map_err(|_| gone())
     }
 
-    fn ask_sync(&self, ask: Ask, wait: Duration) -> Option<Reply> {
+    pub(in crate::backend) fn ask_sync(&self, ask: Ask, wait: Duration) -> Option<Reply> {
         let (tx, rx) = mpsc::channel();
         let id = self.post(ask, &[], Waiter::Sync(tx)).ok()?;
         let reply = rx.recv_timeout(wait).ok().map(|(r, _)| r);
@@ -728,11 +774,58 @@ impl Conn {
                 Incoming::Message(FromPlugin::AreaEvent { session, event }, _) => {
                     lock(&self.areas_events).entry(session).or_default().push_back(event);
                 }
+                // Событие потока синхронизации учётки (PLG-08) — в её канал, интерфейсу.
+                Incoming::Message(FromPlugin::MailEvent { session, event }, _) => {
+                    if let Some(scope) = lock(&self.mails).get(&session) {
+                        // Ответы пути на билеты очереди ядра — очереди; интерфейсу — только её ошибки.
+                        let internal = match &event {
+                            crate::sync::Event::Sent { ticket, .. } | crate::sync::Event::ComposeFailed { ticket, .. } => {
+                                *ticket >= super::mail::INTERNAL_TICKET
+                            }
+                            _ => false,
+                        };
+                        if internal {
+                            if let Some(error) = scope.queue.confirm(&event) {
+                                let _ = scope.events.send(error);
+                                (lock(&scope.repaint))();
+                            }
+                        } else {
+                            let _ = scope.events.send(event);
+                            (lock(&scope.repaint))();
+                        }
+                    }
+                }
+                // Запись хранилища учётки без ответа (PLG-08): подряд, ошибка — на ближайшем чтении.
+                Incoming::Message(FromPlugin::CacheWrite { session, op }, _) => {
+                    if let Err(e) = self.cache_write(session, &op) {
+                        tracing::error!(plugin = plugin.row.id, session, "cache write failed: {e}; the error surfaces on the next read");
+                    }
+                }
                 Incoming::Call(call, FromPlugin::Store { scope, op }, _) => {
                     let sent = lock(&self.scopes).get(&scope).is_some_and(|tx| tx.send((call, op)).is_ok());
                     if !sent {
                         let _ = self.link.reply(call, &ToPlugin::Stored(Err(ChannelError::Storage("no store for the scope".into()))), &[]);
                     }
+                }
+                // Чтение хранилища учётки (PLG-08) и ошибка прошлых записей без ответа.
+                Incoming::Call(call, FromPlugin::Cache { session, op }, _) => {
+                    let reply = match lock(&self.mails).get(&session) {
+                        Some(scope) => match lock(&scope.failed).take() {
+                            Some(e) => Err(e),
+                            None => run_cache(&scope.cache, &op).map_err(|e| e.to_string()),
+                        },
+                        None => Err("no such mail session".into()),
+                    };
+                    let _ = self.link.reply(call, &ToPlugin::Cached(reply), &[]);
+                }
+                // Разбор письма воркером (PLG-08): воркер запускает ядро, не плагин.
+                Incoming::Call(call, FromPlugin::Worker { op }, _) => {
+                    let reply = self.with_worker(|w| run_worker(w, op));
+                    let _ = self.link.reply(call, &ToPlugin::Worked(reply), &[]);
+                }
+                // S/MIME исходящего (PLG-08): ключи пользователя — у ядра.
+                Incoming::Call(call, FromPlugin::Smime { op }, _) => {
+                    let _ = self.link.reply(call, &ToPlugin::Sealed(run_smime(op)), &[]);
                 }
                 Incoming::Call(call, FromPlugin::Sso { flow, op }, _) => self.sso(call, flow, op),
                 // Незнакомый вызов — отказом: плагин не виснет до своего предела ожидания.
@@ -758,6 +851,8 @@ impl Conn {
         lock(&self.scopes).clear();
         lock(&self.sso).clear();
         lock(&self.areas_events).clear();
+        lock(&self.mails).clear();
+        *lock(&self.worker) = None;
         for (_, tx) in lock(&self.sessions).drain() {
             let _ = tx.send(ChannelEvent::State(ChannelState::Offline { retry_in: 0 }));
         }

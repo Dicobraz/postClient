@@ -27,6 +27,7 @@
 //!   [`remote`]. Процесс создаётся после первого кадра и только по запросу; в этой волне так работает демо-канал.
 
 pub(crate) mod areas;
+pub mod mail;
 pub mod remote;
 pub mod wire;
 

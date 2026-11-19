@@ -35,7 +35,6 @@ postman-core.workspace = true
 # Пути к серверам — плагины (ADR 0004): регистрирует `src/plugins.rs`; протокольных крейтов интерфейс не знает.
 postman-backend-jmap.workspace = true
 postman-backend-imap.workspace = true
-postman-backend-ews.workspace = true
 # Каталог сертификатов адресатов (S5-12 Ф5) — процессом набора (PLG-06, ADR 0013): заместитель в src/plugins.rs
 # (хост плагинов), контроллер домена — функция ОС в src/sys/domain (решение №12), крейта плагина здесь нет.
 # QR-код входа в Telegram с другого устройства (MIT, без зависимостей). Сам канал — процессом набора

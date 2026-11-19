@@ -158,7 +158,7 @@ impl Profile {
                 Event::Status(Status::SignedIn { .. }) => {
                     self.signed_in.insert(key.clone());
                 }
-                Event::Error(e) if e.kind == ErrorKind::Auth => {
+                Event::Error(e) if e.kind.is_auth() => {
                     self.signed_in.remove(&key);
                 }
                 _ => {}
@@ -325,7 +325,7 @@ pub(crate) fn plan(events: &[Event]) -> Plan {
                 p.status = Some(s.clone());
             }
             Event::Error(e) => {
-                p.auth |= e.kind == ErrorKind::Auth;
+                p.auth |= e.kind.is_auth();
                 p.errors.push(e.clone());
             }
             Event::CalendarChanged => p.calendar = true,
@@ -366,7 +366,7 @@ fn log_sync_error(profile: Option<&str>, e: &SyncError, signing_in: bool) {
     let profile = profile.unwrap_or_default();
     match e.kind {
         ErrorKind::Network => tracing::warn!(profile, "sync: server unreachable, retrying: {e}"),
-        ErrorKind::Auth if signing_in => tracing::warn!(profile, "sync: sign-in rejected by the server: {e}"),
+        k if k.is_auth() && signing_in => tracing::warn!(profile, "sync: sign-in rejected by the server: {e}"),
         _ => tracing::error!(profile, "sync: sync failed: {e}"),
     }
 }
@@ -374,7 +374,7 @@ fn log_sync_error(profile: Option<&str>, e: &SyncError, signing_in: bool) {
 pub(crate) fn fresh_errors(last: &mut Option<String>, errors: Vec<SyncError>) -> Vec<SyncError> {
     errors
         .into_iter()
-        .filter(|e| e.kind != ErrorKind::Auth)
+        .filter(|e| !e.kind.is_auth())
         .filter(|e| {
             let key = format!("{:?}", e.kind);
             let fresh = last.as_deref() != Some(key.as_str());
@@ -397,7 +397,7 @@ pub(crate) fn status_text(s: &Status) -> String {
 /// Текст ошибки синхронизации: наш текст по роду, текст сервера — только подробностью.
 pub(crate) fn error_text(e: &SyncError) -> String {
     let what = match e.kind {
-        ErrorKind::Auth => tr!("sync-error-auth"),
+        ErrorKind::Auth | ErrorKind::WindowsSignInUnavailable | ErrorKind::CredentialsRejected => tr!("sync-error-auth"),
         ErrorKind::Network => tr!("sync-error-network"),
         ErrorKind::Server => tr!("sync-error-server"),
         ErrorKind::Protocol => tr!("sync-error-protocol"),
@@ -980,8 +980,7 @@ impl Mailer {
             self.show_offline(String::new(), false, cx);
             self.live.status.clear();
             if let (Some(panel), Some(e)) = (&self.live.signin, errors.last()) {
-                let text = error_text(e);
-                panel.update(cx, |p, cx| p.failed(&text, cx));
+                panel.update(cx, |p, cx| p.sync_failed(e, cx));
             }
             cx.notify();
             return;
