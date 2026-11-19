@@ -16,7 +16,8 @@
 //! - **Падение и зависание:** процесс завершился — сессии получают «без связи» (поток учётки повторит), хост
 //!   перезапускает с паузами [`PAUSES`]; [`CRASHES`] падений за [`CRASH_WINDOW`] — «проблема»
 //!   (`ChannelError::Plugin`) до «Повторить» (`Request::Reconnect`). Нет `Pong` за [`PONG_WAIT`] — процесс убит и
-//!   перезапущен. Сборки не совпали — «проблема» сразу, без перезапусков.
+//!   перезапущен. Сборки не совпали или файла набора нет (компонент не установлен, PLG-14 —
+//!   `ChannelError::Missing`) — «проблема» сразу, без перезапусков.
 //!
 //! Сторона плагина — [`serve_channel`].
 
@@ -497,6 +498,8 @@ fn want(host: &Arc<Inner>, plugin: &Arc<Plugin>) {
 enum Failed {
     /// Сборки не совпали или плагин не тот: перезапуск не поможет.
     Build(String),
+    /// Файла набора нет (PLG-14): компонент не установлен — интерфейс покажет установку.
+    Missing(String),
     Crash(String),
 }
 
@@ -522,8 +525,8 @@ fn supervise(host: &Inner, plugin: Arc<Plugin>) {
         host.entered(seq);
         let outcome = match launched {
             Ok(s) => hello(host, &plugin, s, started),
-            // Файла набора нет (не собран, не установлен): перезапуски не помогут.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Failed::Build(format!("plugin set {} not found", plugin.row.set))),
+            // Файла набора нет (не установлен, PLG-14): перезапуски не помогут, интерфейс предложит компонент.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Failed::Missing(plugin.row.set.to_owned())),
             Err(e) => Err(Failed::Crash(format!("launch: {e}"))),
         };
         host.release();
@@ -535,7 +538,13 @@ fn supervise(host: &Inner, plugin: Arc<Plugin>) {
             }
             Err(Failed::Build(why)) => {
                 tracing::error!(plugin = id, "plugin not used: {why}; restart Postman");
-                problem(host, &plugin, why);
+                problem(host, &plugin, ChannelError::Plugin(why));
+                crashes.clear();
+                continue;
+            }
+            Err(Failed::Missing(set)) => {
+                tracing::error!(plugin = id, "plugin set {set} is not installed");
+                problem(host, &plugin, ChannelError::Missing(set));
                 crashes.clear();
                 continue;
             }
@@ -556,7 +565,7 @@ fn supervise(host: &Inner, plugin: Arc<Plugin>) {
         }
         if crashes.len() >= CRASHES {
             tracing::error!(plugin = id, "plugin crashed {} times in {} min, waiting for retry: {cause}", crashes.len(), CRASH_WINDOW.as_secs() / 60);
-            problem(host, &plugin, format!("crashed {} times: {cause}", crashes.len()));
+            problem(host, &plugin, ChannelError::Plugin(format!("crashed {} times: {cause}", crashes.len())));
             crashes.clear();
             continue;
         }
@@ -566,8 +575,8 @@ fn supervise(host: &Inner, plugin: Arc<Plugin>) {
     }
 }
 
-fn problem(host: &Inner, plugin: &Plugin, why: String) {
-    plugin.set(Phase::Problem { serial: host.serial.fetch_add(1, Ordering::SeqCst) + 1, error: ChannelError::Plugin(why) });
+fn problem(host: &Inner, plugin: &Plugin, error: ChannelError) {
+    plugin.set(Phase::Problem { serial: host.serial.fetch_add(1, Ordering::SeqCst) + 1, error });
     plugin.wait_retry(None);
 }
 
@@ -1451,6 +1460,44 @@ mod tests {
         assert!(matches!(connect(&plugin), Some(ChannelError::Plugin(e)) if e.contains("other")));
         assert_eq!(launcher.0.load(Ordering::SeqCst), 1, "без перезапусков");
         assert!(matches!(connect(&plugin), Some(ChannelError::Plugin(_))), "«Повторить» — новая попытка и новая проблема");
+        assert_eq!(launcher.0.load(Ordering::SeqCst), 2);
+    }
+
+    /// Файла набора нет (PLG-14, компонент не установлен): «проблема» с той причиной, без перезапусков;
+    /// «Повторить» — новая попытка и та же причина, пока файл не появится.
+    #[test]
+    fn missing_set_is_a_problem_until_retry() {
+        #[derive(Default)]
+        struct Absent(AtomicUsize);
+
+        impl Launcher for Absent {
+            fn launch(&self, _row: &Row) -> io::Result<Started> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            }
+        }
+        let launcher = Arc::new(Absent::default());
+        let host = Host::new(launcher.clone(), Settings::default());
+        host.first_frame();
+        let plugin = host.channel(row("demo"));
+        let connect = |plugin: &RemoteChannel| {
+            let ctx = ConnectCtx {
+                account: AccountId::new("me@example.test"),
+                secret: Secret::new(b"s".to_vec()),
+                incoming: unbounded_channel().0,
+                store: Rc::new(crate::channel::LocalStore::new(
+                    postman_cache::Cache::open_in_memory().unwrap(),
+                    &ChannelId::new("demo"),
+                    &AccountId::new("me@example.test"),
+                )),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            tokio::task::LocalSet::new().block_on(&rt, async { plugin.connect(ctx).await.err() })
+        };
+        let set = row("demo").set;
+        assert!(matches!(connect(&plugin), Some(ChannelError::Missing(s)) if s == set));
+        assert_eq!(launcher.0.load(Ordering::SeqCst), 1, "без перезапусков");
+        assert!(matches!(connect(&plugin), Some(ChannelError::Missing(_))), "«Повторить» — новая попытка и та же причина");
         assert_eq!(launcher.0.load(Ordering::SeqCst), 2);
     }
 

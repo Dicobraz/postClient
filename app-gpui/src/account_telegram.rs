@@ -427,6 +427,8 @@ pub(crate) fn error_text(e: &ChannelError) -> String {
         ChannelError::Wait { secs } => tr!("tg-err-wait", secs = secs.to_string()),
         ChannelError::Network(_) => tr!("tg-err-network"),
         ChannelError::SignedOut(_) => tr!("tg-err-signed-out"),
+        // Файла набора нет (PLG-14): канал не установлен; установка компонента приходит с докачкой (PLG-15).
+        ChannelError::Missing(_) => tr!("comp-missing"),
         _ => tr!("tg-err-other"),
     }
 }

@@ -805,6 +805,7 @@ mod tests {
             ChannelError::Protocol("bad".into()),
             ChannelError::Storage("disk".into()),
             ChannelError::Plugin("exit 3".into()),
+            ChannelError::Missing("postman-plugins-matrix".into()),
         ];
         let covered = |e: &ChannelError| match e {
             ChannelError::Network(_) => 0,
@@ -817,6 +818,7 @@ mod tests {
             ChannelError::Protocol(_) => 7,
             ChannelError::Storage(_) => 8,
             ChannelError::Plugin(_) => 9,
+            ChannelError::Missing(_) => 10,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all

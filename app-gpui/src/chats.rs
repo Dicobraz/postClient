@@ -414,6 +414,8 @@ pub(crate) fn error_text(e: &ChannelError) -> String {
         ChannelError::TooLarge { .. } => tr!("chats-err-too-large"),
         ChannelError::Unsupported => tr!("chats-err-unsupported"),
         ChannelError::Protocol(_) | ChannelError::Storage(_) | ChannelError::Plugin(_) => tr!("chats-err-other"),
+        // Файла набора нет (PLG-14): канал не установлен.
+        ChannelError::Missing(_) => tr!("comp-missing"),
     }
 }
 

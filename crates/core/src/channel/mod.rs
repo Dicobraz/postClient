@@ -866,6 +866,11 @@ pub enum ChannelError {
     /// повторяет сам — ждёт «Повторить» (`run::Request::Reconnect`).
     #[error("plugin: {0}")]
     Plugin(String),
+    /// Файла набора нет (PLG-14, решение владельца 2026-11-19 «components»): канал не установлен. Как `Plugin` —
+    /// без автоповторов; интерфейс показывает установку компонента. Вариант в конце: `ChannelState::Problem` хранится
+    /// в базе postcard, порядок прежних вариантов не меняется.
+    #[error("component missing: {0}")]
+    Missing(String),
 }
 
 impl From<postman_cache::Error> for ChannelError {
