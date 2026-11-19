@@ -426,7 +426,14 @@ mod tests {
     }
 
     fn kit(dir: &Path, v: (u32, u32, u32)) {
-        for name in ["postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe", "postman-plugins-telegram.exe", "postman-plugins-matrix.exe"] {
+        for name in [
+            "postman.exe",
+            "postman-worker.exe",
+            "postman-viewer.exe",
+            "postman-plugins.exe",
+            "postman-plugins-telegram.exe",
+            "postman-plugins-matrix.exe",
+        ] {
             fs::write(dir.join(name), fake_exe(v)).unwrap();
         }
         fs::write(dir.join("README.txt"), "Postman\r\n").unwrap();
@@ -503,7 +510,15 @@ mod tests {
         let status =
             std::process::Command::new("msiexec.exe").arg("/a").arg(&out).arg("/qn").arg(format!("TARGETDIR={}", target.display())).status().unwrap();
         assert!(status.success(), "msiexec /a: {status}");
-        for name in ["postman.exe", "postman-worker.exe", "postman-viewer.exe", "postman-plugins.exe", "postman-plugins-telegram.exe", "postman-plugins-matrix.exe", "README.txt"] {
+        for name in [
+            "postman.exe",
+            "postman-worker.exe",
+            "postman-viewer.exe",
+            "postman-plugins.exe",
+            "postman-plugins-telegram.exe",
+            "postman-plugins-matrix.exe",
+            "README.txt",
+        ] {
             assert!(target.join("Postman").join(name).is_file(), "{name}");
         }
         assert_eq!(fs::read_to_string(target.join("Postman/README.txt")).unwrap(), "Postman\r\n");
