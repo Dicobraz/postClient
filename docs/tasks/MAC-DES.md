@@ -1,7 +1,7 @@
 # MAC-DES: главное окно macOS по макету MainMac
 
 lane: x
-status: review
+status: done
 deps: [MAC-02]
 class: B
 files: [app-gpui/src/chrome.rs, app-gpui/src/bar.rs, app-gpui/src/mailer.rs, docs/DESIGN.md]
@@ -11,6 +11,8 @@ manual: docs/manual-tests/MAC-DES.md
 
 > Владелец 2026-11-13: главное окно на macOS — по макетам `MainMac`, `MainMacDark`, `MainMacFull`
 > (`docs/decisions/2026-11-13-macos-main-window.md`). Windows и Linux — без изменений (`MainNav_title`).
+> Влиты в main: 5bb2226 (PR #658). CI main зелёный (clippy, nextest, macOS, 706433e); ручная проверка
+> `docs/manual-tests/MAC-DES.md` на MacBook — не блокирует (по готовности владельца).
 
 ## Цель
 На Mac окно выглядит как в утверждённом макете в обеих темах и в полноэкранном режиме.

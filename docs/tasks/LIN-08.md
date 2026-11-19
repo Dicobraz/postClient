@@ -1,7 +1,7 @@
 # LIN-08: кнопки окна по настройке ОС; при кнопках слева — раскладка macOS
 
 lane: app-gpui
-status: review
+status: done
 deps: [LIN-02, MAC-DES]
 class: A
 files: [app-gpui/src/chrome.rs, app-gpui/src/mailer.rs, app-gpui/src/bar.rs, app-gpui/src/actions.rs, app-gpui/src/sys/, docs/manual-tests/LIN-08.md]
@@ -10,6 +10,7 @@ checks: [clippy, nextest, ci-linux, screens:list-left]
 manual: docs/manual-tests/LIN-08.md
 
 > Решение владельца 2026-11-14 (сессия дизайна). Макет: `MainLinuxLeft`.
+> Влиты в main: 98c7bdf (PR #7; ранняя версия — dfa50b5, PR #680). CI main зелёный (nextest, clippy, 706433e).
 
 ## Сделать
 1. Читать `button-layout` (XDG Settings portal, `org.gnome.desktop.wm.preferences`), следить за сменой; разбор строки

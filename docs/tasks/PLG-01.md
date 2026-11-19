@@ -1,13 +1,15 @@
 # PLG-01: общий механизм процессов и песочница «сеть без файлов»
 
 lane: x/plg-proc            # новый крейт crates/proc, crates/worker, deps, lanes.toml
-status: review
+status: done
 deps: []
 class: B                    # песочница (CODEOWNERS), новый крейт, lanes.toml
 files: [crates/proc/*, crates/worker/src/lib.rs, crates/worker/src/sandbox/*, crates/worker/tests/*, crates/worker/Cargo.toml, crates/core/tests/layers.rs, Cargo.toml, Cargo.lock, lanes.toml, docs/adr/0013-plugins-on-demand.md, docs/00-ARCHITECTURE.md, docs/DEV.md]
 read: [docs/adr/0013-plugins-on-demand.md, docs/decisions/2026-11-14-plugins-on-demand.md, docs/adr/0007-format-viewers.md, docs/adr/0009-macos-sandbox.md, docs/adr/0010-linux-sandbox.md, docs/adr/0011-platform-contract.md]
 checks: [nextest]
 manual: no
+
+> Влиты в main: 1cc52af (PR #705). CI main зелёный (nextest, clippy, macOS, CodeQL, 706433e).
 
 ## Задача
 - Крейт `postman-proc` (L1, полоса `sandbox`): из `crates/worker` переезжают запуск в песочнице (`sandbox::spawn`,

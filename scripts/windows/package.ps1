@@ -1,8 +1,8 @@
 # S4-01: the delivery zip postman-<version>-windows-x64.zip: postman.exe, postman-worker.exe, README.txt, install.ps1,
 # postman.portable (the self-update flag), postman-viewer.exe (S8-24, ADR 0007), postman-plugins.exe (the common
-# plugin set, ADR 0013: mail and directory together, owner decision 2026-11-16) and postman-plugins-telegram.exe
-# (the Telegram set file, PLG-05; Matrix gets its own set file in a later wave). WASM viewer modules (viewers/*) are
-# not packaged.
+# plugin set, ADR 0013: mail and directory together, owner decision 2026-11-16), postman-plugins-telegram.exe
+# (the Telegram set file, PLG-05) and postman-plugins-matrix.exe (the Matrix set file, PLG-04). WASM viewer modules
+# (viewers/*) are not packaged.
 # The MSI postman-<version>-windows-x64.msi (owner decision 2026-11-07) - the same files without install.ps1, made by
 # postman-pack.exe of the same build (tools/pack); signed afterwards by scripts\windows\sign.ps1 in CI.
 # Takes the exes of a finished release build (cargo build --release --workspace --features postman-worker/viewer);
@@ -49,6 +49,10 @@ Copy-Item -LiteralPath $plugins -Destination $dir
 $pluginsTelegram = Join-Path $release "postman-plugins-telegram.exe"
 if (-not (Test-Path -LiteralPath $pluginsTelegram)) { throw "no $pluginsTelegram - build the whole workspace (cargo build --release --workspace)" }
 Copy-Item -LiteralPath $pluginsTelegram -Destination $dir
+# The Matrix set file (PLG-04): same place.
+$pluginsMatrix = Join-Path $release "postman-plugins-matrix.exe"
+if (-not (Test-Path -LiteralPath $pluginsMatrix)) { throw "no $pluginsMatrix - build the whole workspace (cargo build --release --workspace)" }
+Copy-Item -LiteralPath $pluginsMatrix -Destination $dir
 Copy-Item -LiteralPath "$PSScriptRoot\README.txt", "$PSScriptRoot\install.ps1" -Destination $dir
 # Portable flag (self-update, decision 2026-11-11): next to postman.exe the update takes the zip, not the MSI.
 # The MSI lists its files itself (tools/pack ITEMS) and does not install the flag.

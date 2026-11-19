@@ -3,8 +3,9 @@
 #   postman-<version>-linux-x64.AppImage - one file for any distribution (the self-update replaces it);
 #   postman-<version>-linux-x64.deb      - Debian, Ubuntu and derivatives;
 #   postman-<version>-linux-x64.rpm      - Fedora, openSUSE, RHEL and derivatives.
-# Each holds postman, postman-worker, postman-viewer, postman-plugins (the common plugin set, ADR 0013) and
-# postman-plugins-telegram (the Telegram set file, PLG-05) side by side
+# Each holds postman, postman-worker, postman-viewer, postman-plugins (the common plugin set, ADR 0013),
+# postman-plugins-telegram (the Telegram set file, PLG-05) and postman-plugins-matrix (the Matrix set file,
+# PLG-04) side by side
 # (the worker and the plugin host look for them next to postman), postman.desktop (the mailto scheme), hicolor icons
 # from app-gpui/res/postman.ico. deb and rpm also hold an AppArmor profile for the worker, the viewer and the plugin
 # set (data/apparmor/postman): Ubuntu 23.10+ forbids unprivileged user namespaces, and without them the worker
@@ -40,7 +41,7 @@ mkdir -p "$out"
 target="$(cd "$target" && pwd)"
 out="$(cd "$out" && pwd)"
 bin="$target/$profile"
-bins=(postman postman-worker postman-viewer postman-plugins postman-plugins-telegram)
+bins=(postman postman-worker postman-viewer postman-plugins postman-plugins-telegram postman-plugins-matrix)
 for b in "${bins[@]}"; do
   if [ ! -x "$bin/$b" ]; then
     echo "no $bin/$b - run cargo build --$profile --workspace --features postman-worker/viewer first" >&2
@@ -176,6 +177,7 @@ mkdir -p "$rpmtop/SPECS" "$rpmtop/RPMS"
   echo "/usr/bin/postman-viewer"
   echo "/usr/bin/postman-plugins"
   echo "/usr/bin/postman-plugins-telegram"
+  echo "/usr/bin/postman-plugins-matrix"
   echo "/usr/share/applications/postman.desktop"
   echo "/usr/share/icons/hicolor/*/apps/postman.png"
   echo "/usr/share/postman"

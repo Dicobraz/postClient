@@ -25,6 +25,11 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [lints]
 workspace = true
 
+[build-dependencies]
+# Версия `postman-plugins-matrix.exe` из Cargo — ресурсом в exe: MSI сверяет её с версией комплекта
+# (`tools/pack`, `pe::file_version`). Нужен rc.exe из Windows SDK. Как у воркера и наборов PLG-05.
+embed-resource = "3"
+
 [dev-dependencies]
 # Подставной сервер Matrix для сквозного теста без внешней сети (`tests/process.rs`).
 postman-backend-matrix = { workspace = true, features = ["testkit"] }

@@ -3,8 +3,8 @@
 # (Postman.app and README.txt - the self-update replaces the bundle from it) and the disk image
 # postman-<version>-macos-arm64.dmg (Postman.app, README.txt and the "Applications" shortcut to drag it onto).
 # Contents/MacOS: postman, postman-worker, postman-viewer (the worker looks for them next to postman),
-# postman-plugins (the common plugin set, ADR 0013) and postman-plugins-telegram (the Telegram set file, PLG-05;
-# signed together with the helpers);
+# postman-plugins (the common plugin set, ADR 0013), postman-plugins-telegram (the Telegram set file, PLG-05)
+# and postman-plugins-matrix (the Matrix set file, PLG-04; signed together with the helpers);
 # Info.plist: bundle id, version from Cargo.toml, LSMinimumSystemVersion 13.0, the mailto scheme; Postman.icns made
 # from app-gpui/res/postman.ico (PNG frames).
 # Signature: ad-hoc (codesign -s -) by default - no Apple Developer ID yet (docs/decisions/2026-11-11-macos.md), the
@@ -37,7 +37,7 @@ mkdir -p "$out"
 target="$(cd "$target" && pwd)"
 out="$(cd "$out" && pwd)"
 bin="$target/$profile"
-for b in postman postman-worker postman-viewer postman-plugins postman-plugins-telegram; do
+for b in postman postman-worker postman-viewer postman-plugins postman-plugins-telegram postman-plugins-matrix; do
   if [ ! -x "$bin/$b" ]; then
     echo "no $bin/$b - run cargo build --$profile --workspace --features postman-worker/viewer first" >&2
     exit 1
@@ -71,7 +71,7 @@ dmg="$assets/$name.dmg"
 rm -rf "$stage" "$assets"
 mkdir -p "$assets"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin/postman" "$bin/postman-worker" "$bin/postman-viewer" "$bin/postman-plugins" "$bin/postman-plugins-telegram" "$app/Contents/MacOS/"
+cp "$bin/postman" "$bin/postman-worker" "$bin/postman-viewer" "$bin/postman-plugins" "$bin/postman-plugins-telegram" "$bin/postman-plugins-matrix" "$app/Contents/MacOS/"
 
 # Icon: the PNG frames of postman.ico -> iconset -> icns (iconutil takes a partial set; 512 and 1024 are absent).
 iconset="$(mktemp -d)/Postman.iconset"
@@ -143,7 +143,7 @@ if [ -n "$identity" ]; then
 else
   sign=(codesign --force --sign -)
 fi
-"${sign[@]}" "$app/Contents/MacOS/postman-worker" "$app/Contents/MacOS/postman-viewer" "$app/Contents/MacOS/postman-plugins" "$app/Contents/MacOS/postman-plugins-telegram"
+"${sign[@]}" "$app/Contents/MacOS/postman-worker" "$app/Contents/MacOS/postman-viewer" "$app/Contents/MacOS/postman-plugins" "$app/Contents/MacOS/postman-plugins-telegram" "$app/Contents/MacOS/postman-plugins-matrix"
 "${sign[@]}" "$app"
 codesign --verify --deep --strict "$app"
 
