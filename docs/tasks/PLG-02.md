@@ -1,13 +1,15 @@
 # PLG-02: хост плагинов, договор каналов по обмену, запуск после первого кадра
 
 lane: x/plg-host            # core (договор), новый крейт crates/plugins, demo, app-gpui (корень, запуск), deps, lanes.toml
-status: review
+status: done
 deps: [PLG-01]
 class: B                    # договор плагинов (ADR 0004, 0012)
 files: [crates/core/src/backend/*, crates/core/src/channel/*, crates/core/src/bench.rs, crates/core/tests/layers.rs, crates/plugins/*, crates/demo/*, app-gpui/src/plugins.rs, app-gpui/src/live.rs, app-gpui/src/main.rs, app-gpui/src/channels.rs, Cargo.toml, Cargo.lock, lanes.toml, docs/MEMORY.md, docs/DEV.md]
 read: [docs/adr/0013-plugins-on-demand.md, docs/decisions/2026-11-14-plugins-on-demand.md, docs/adr/0012-channels.md, docs/adr/0004-protocol-plugins.md]
 checks: [nextest, bench]
 manual: no
+
+> Влиты в main: 629c5dd (PR #3). CI main зелёный (nextest, clippy, macOS, CodeQL, 706433e).
 
 ## Задача
 - `postman_core::backend::wire` — сообщения хоста и плагина (ADR 0013 «Договор»); `serde` на `ChannelEvent`, `Action`,

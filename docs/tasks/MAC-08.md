@@ -1,7 +1,7 @@
 # MAC-08: раскладка окна macOS — разделы над деревом, полный экран; вкладки без «Почты»
 
 lane: app-gpui
-status: review
+status: done
 deps: [MAC-02, T1-26]
 class: A
 files: [app-gpui/src/chrome.rs, app-gpui/src/bar.rs, app-gpui/src/tabs.rs, docs/manual-tests/MAC-08.md]
@@ -27,5 +27,6 @@ manual: docs/manual-tests/MAC-08.md
 - П. 1 (все ОС): главной вкладки в полосе нет — её показывают разделы; вкладка без плашки, активная — полужирная с
   чертой 2 px акцентом; значок 16 px по типу (письмо и вкладка почты — конверт синий, встреча — календарь розовый,
   настройки — шестерёнка цветом текста). Модель вкладок (`tabs.rs`) не менялась: главная вкладка есть, не рисуется.
-
-**Ждёт:** ручная проверка `docs/manual-tests/MAC-08.md` на MacBook; снимки `list` Windows — по CI.
+- Влиты в main: 488e3ac (п. 1) и 5bb2226 (п. 2–3, MAC-DES); снимки `list` Windows и macOS зелёные по CI
+  (706433e). Ручная проверка `docs/manual-tests/MAC-08.md` на MacBook — по готовности владельца, слияние не
+  блокирует.

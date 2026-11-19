@@ -1,7 +1,7 @@
 # MAC-06: выпуск для macOS
 
 lane: ci
-status: in-progress
+status: done                  # выпуск macOS с ad-hoc подписью (решение владельца 2026-11-16); вернуться при нотаризации
 deps: [MAC-02, MAC-03]
 class: B
 files: [.github/workflows/ci.yml, .github/workflows/macos.yml, .github/release-notes.md, scripts/macos/, docs/DEV.md]
@@ -32,8 +32,15 @@ Postman для Mac на странице Releases рядом с Windows: под�
 ## Сделано
 - Строка `macos-arm64` в `release` (`ci.yml`): `.zip` и `.dmg`, `SHA256SUMS.txt`, блок macOS в release-notes;
   `pets-update` заменяет `Postman.app` из `.zip`; шаг подписи Developer ID и нотаризации — по секретам, без них ad-hoc.
+- Решение владельца 2026-11-16: macOS выходит с подписью ad-hoc (`codesign -s -`), без нотаризации — на странице
+  выпуска блок `mac-unsigned` («Всё равно открыть», `xattr -dr com.apple.quarantine`; `docs/DEV.md#выпуск`).
+  Режим зафиксирован решением 2026-11-11 «macos» (`docs/decisions/2026-11-11-macos.md`); отдельной записи в
+  `docs/decisions/` от 2026-11-16 о выпусках нет. Нотаризация (Developer ID, `notarytool`, `stapler`) отложена до
+  аккаунта Apple Developer владельца (секреты `MACOS_CERT_*`, `APPLE_*`) — она включится сама, когда секреты
+  появятся; до того карточка не ждёт.
 
-**Ждёт:** подпись Developer ID и нотаризация — аккаунт Apple Developer владельца (секреты `MACOS_CERT_*`).
+**Вернуться:** при нотаризации — аккаунт Apple Developer владельца (секреты `MACOS_CERT_*`, `APPLE_*`); тогда
+снять блок `mac-unsigned` с страницы выпуска.
 
 ## Зависимости
 MAC-02, MAC-03; подпись — аккаунт Apple Developer (владелец).
