@@ -15,9 +15,10 @@ use postman_calendar::Owner;
 use postman_proc::link::Incoming;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use super::super::mail::{MailServer, MailServices, RemoteCache, RemoteWorker, WireSeal};
 use super::super::wire::{
-    AreaLogin, Ask, Build, Call, DirectoryQuery, Fetched, FromPlugin, Kind, Opened, PluginHello, Reply, Settings, SsoDone, SsoOp, StoreOp, TaskDone,
-    TaskOp, ToPlugin,
+    AreaLogin, Ask, Build, Call, DirectoryQuery, Fetched, FromPlugin, HostHello, Kind, MailLogin, Opened, PluginHello, Reply, Settings, SsoDone,
+    SsoOp, StoreOp, TaskDone, TaskOp, ToPlugin,
 };
 use super::{BROWSER_WAIT as HOST_BROWSER_WAIT, MAX_BIN, PluginLink};
 use super::{Claim, Profile, Row};
@@ -27,10 +28,11 @@ use crate::channel::{
 };
 use crate::model::Error as ModelError;
 use crate::smime::directory::{Directory, DirectoryError};
+use crate::sync::{Command as SyncCommand, Event as SyncEvent};
 use postman_cache::Cache;
 
-/// Вызов хранилища ядра ждёт ответа не дольше.
-const STORE_WAIT: Duration = Duration::from_secs(30);
+/// Вызов хранилища ядра ждёт ответа не дольше (и услуг хранилища учётки, PLG-08).
+pub(in crate::backend) const STORE_WAIT: Duration = Duration::from_secs(30);
 /// Ожидание возврата браузера у ядра ([`HOST_BROWSER_WAIT`]) плюс запас на обмен.
 const SSO_WAIT: Duration = Duration::from_secs(HOST_BROWSER_WAIT.as_secs() + 30);
 
@@ -219,14 +221,29 @@ pub trait AreaSession: Areas {
 /// вопросе, как у каналов; сессии в реестре плагина, кэша у процесса нет — команды задач ядро не посылает, а
 /// [`AreaCtx::cache`] нужен договору: держится памятью процесса, свои файлы он не пишет. Ответ — код выхода.
 pub fn serve_area(link: PluginLink, id: &'static str, make: impl FnOnce() -> Arc<dyn AreaServer>) -> i32 {
+    serve_mail_area(link, id, None, make)
+}
+
+/// Приветствие плагина областей или почтового пути: настройки применены, кто он — ответом.
+fn hello_reply(link: &Arc<PluginLink>, n: u64, id: &'static str, kind: Kind, h: &HostHello) {
+    apply(h.settings.clone());
+    answer(link, n, Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind, key: false }), &[]);
+}
+
+/// Обслужить хост почтовым путём и областями `id` (PLG-08): путь — вход синхронизации учётки ([`Ask::MailOpen`]),
+/// команды ([`Ask::MailCommand`], события — `FromPlugin::MailEvent`) и вид сервера (`Probe`); области — как
+/// [`serve_area`]. Услуги ядра путь зовёт сам по связи (хранилище учётки — `FromPlugin::Cache`, разбор письма —
+/// `FromPlugin::Worker`, S/MIME — `FromPlugin::Smime`); кэша у процесса нет — база открыта только у ядра. Ответ —
+/// код выхода.
+pub fn serve_mail_area(link: PluginLink, id: &'static str, mail: Option<Arc<dyn MailServer>>, make: impl FnOnce() -> Arc<dyn AreaServer>) -> i32 {
+    let kind = if mail.is_some() { Kind::Mail } else { Kind::Area };
     let link = Arc::new(link);
     let first = loop {
         match link.recv() {
             Incoming::Message(ToPlugin::Ask { id: n, ask }, bin) => {
                 let quick = match &ask {
                     Ask::Hello(h) => {
-                        apply(h.settings.clone());
-                        answer(&link, n, Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Area, key: false }), &[]);
+                        hello_reply(&link, n, id, kind, h);
                         true
                     }
                     Ask::Stats => {
@@ -271,13 +288,7 @@ pub fn serve_area(link: PluginLink, id: &'static str, make: impl FnOnce() -> Arc
                     Incoming::Message(ToPlugin::Ask { id: n, ask }, bin) => {
                         let quick = match &ask {
                             Ask::Hello(h) => {
-                                apply(h.settings.clone());
-                                answer(
-                                    &link,
-                                    n,
-                                    Reply::Hello(PluginHello { build: Build::current(), id: id.into(), kind: Kind::Area, key: false }),
-                                    &[],
-                                );
+                                hello_reply(&link, n, id, kind, h);
                                 true
                             }
                             Ask::Stats => {
@@ -307,7 +318,7 @@ pub fn serve_area(link: PluginLink, id: &'static str, make: impl FnOnce() -> Arc
         tracing::error!("plugin reader thread: {e}");
         return 1;
     }
-    let served = Rc::new(ServedAreas { link, server, cache, sessions: RefCell::new(HashMap::new()) });
+    let served = Rc::new(ServedAreas { link, server, mail, cache, sessions: RefCell::new(HashMap::new()), mails: RefCell::new(HashMap::new()) });
     tokio::task::LocalSet::new().block_on(&rt, served.run(rx));
     0
 }
@@ -338,14 +349,18 @@ impl Job {
     }
 }
 
-/// Область учётной записи в процессе плагина.
+/// Область учётной записи в процессе плагина (и почтовый путь, PLG-08).
 struct ServedAreas {
     link: Arc<PluginLink>,
     server: Arc<dyn AreaServer>,
+    /// Почтовый путь ([`MailServer`]), если процесс ведёт и синхронизации учёток; `None` — только области.
+    mail: Option<Arc<dyn MailServer>>,
     /// Кэш договору областей ([`AreaCtx::cache`]) нужен только для команд задач, которые ядро не посылает:
     /// память процесса, своих файлов он не пишет.
     cache: Cache,
     sessions: RefCell<HashMap<u64, Session>>,
+    /// Синхронизации учёток (PLG-08): номер сессии → команды в её поток ([`Ask::MailOpen`]).
+    mails: RefCell<HashMap<u64, UnboundedSender<SyncCommand>>>,
 }
 
 impl ServedAreas {
@@ -355,13 +370,15 @@ impl ServedAreas {
                 ToPlugin::Ask { id, ask } => self.ask(id, ask),
                 ToPlugin::Close { session } => {
                     self.sessions.borrow_mut().remove(&session);
+                    // Синхронизация учётки кончается сама, когда канал команд закрылся ([`Ask::MailOpen`]).
+                    self.mails.borrow_mut().remove(&session);
                 }
                 // Потоков вопросов у областей нет — закрывать нечего.
                 ToPlugin::CloseFlow { .. } => {}
                 ToPlugin::Settings(s) => apply(s),
-                // Области держат сессию учётки: `Leave` — только ответ на выход программы. `Stored`/`SsoReply` —
-                // ответы услуг ядра каналов, сюда сообщением не приходят.
-                ToPlugin::Leave | ToPlugin::Stored(_) | ToPlugin::SsoReply(_) => {}
+                // Области держат сессию учётки: `Leave` — только ответ на выход программы. `Cached`/`Worked`/
+                // `Sealed`/`Stored`/`SsoReply` — ответы услуг ядра, их забирает поток чтения связи.
+                ToPlugin::Leave | ToPlugin::Stored(_) | ToPlugin::SsoReply(_) | ToPlugin::Cached(_) | ToPlugin::Worked(_) | ToPlugin::Sealed(_) => {}
             }
         }
     }
@@ -382,6 +399,13 @@ impl ServedAreas {
             }
             Ask::Fetch { url, max, etag } => {
                 tokio::task::spawn_local(Rc::clone(self).fetch(id, url, max, etag));
+            }
+            Ask::MailOpen { session, url, profile, login } => {
+                tokio::task::spawn_local(Rc::clone(self).open_mail(id, session, url, profile, login));
+            }
+            Ask::MailCommand { session, cmd } => {
+                let sent = self.mails.borrow().get(&session).is_some_and(|tx| tx.send(*cmd).is_ok());
+                answer(&self.link, id, if sent { Reply::Unit(Ok(())) } else { Reply::Unit(Err(ChannelError::NotFound)) }, &[]);
             }
             // Вопросы описания (`Hello`, память) отвечает поток чтения; остальное — не про области.
             other => {
@@ -464,6 +488,34 @@ impl ServedAreas {
                 }
             }
         }
+    }
+
+    /// Запустить синхронизацию учётки ([`Ask::MailOpen`], PLG-08): услуги ядра — по связи, события —
+    /// `FromPlugin::MailEvent`, команды — в канал потока ([`ServedAreas::mails`]).
+    async fn open_mail(self: Rc<Self>, id: u64, session: u64, url: String, profile: Option<String>, login: MailLogin) {
+        let link = Arc::clone(&self.link);
+        let services = MailServices {
+            store: Box::new(RemoteCache::new(Arc::clone(&link), session)),
+            worker: Box::new(RemoteWorker::new(Arc::clone(&link))),
+            seal: Box::new(WireSeal::new(Arc::clone(&link))),
+        };
+        let notify: Arc<dyn Fn(SyncEvent) + Send + Sync> = {
+            let link = Arc::clone(&link);
+            Arc::new(move |event: SyncEvent| {
+                if let Err(e) = link.send(&FromPlugin::MailEvent { session, event }, &[]) {
+                    tracing::debug!("plugin mail event not sent: {e}");
+                }
+            })
+        };
+        let (tx, rx) = unbounded_channel();
+        let reply = match &self.mail {
+            Some(mail) => mail.open(url, profile, login, services, rx, notify).await,
+            None => Err("plugin does not serve mail".into()),
+        };
+        if reply.is_ok() {
+            self.mails.borrow_mut().insert(session, tx);
+        }
+        answer(&self.link, id, Reply::MailOpened(reply), &[]);
     }
 
     async fn probe(self: Rc<Self>, id: u64, url: String) {
@@ -628,9 +680,9 @@ impl Served {
                     self.flows.borrow_mut().remove(&flow);
                 }
                 ToPlugin::Settings(s) => apply(s),
-                // Каналы исходящего не держат: очередь отправки — у ядра. `SsoReply` — только ответ на вызов услуги,
-                // сюда сообщением не приходит.
-                ToPlugin::Leave | ToPlugin::Stored(_) | ToPlugin::SsoReply(_) => {}
+                // Каналы исходящего не держат: очередь отправки — у ядра. `Cached`/`Worked`/`Sealed`/`SsoReply` —
+                // ответы услуг ядра, сюда сообщением не приходят.
+                ToPlugin::Leave | ToPlugin::Stored(_) | ToPlugin::SsoReply(_) | ToPlugin::Cached(_) | ToPlugin::Worked(_) | ToPlugin::Sealed(_) => {}
             }
         }
     }

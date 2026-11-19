@@ -11,6 +11,7 @@
 //!
 //! Номер сессии и номер входа выдаёт хост: им же помечены события и вызовы хранилища, хост по ним находит учётку.
 
+use postman_cache::{AccountRow, BodyRow, EmailRow, FolderId, FolderRow, LetterId, LetterRow, MailboxRow, RemoteRef};
 use postman_calendar::{Invitation, Partstat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -22,14 +23,16 @@ use crate::channel::{
 use crate::invite::{Answer as InviteAnswer, Responded};
 use crate::model::{Error as ModelError, Features};
 use crate::smime::directory::DirectoryError;
-use crate::sync::{Command as SyncCommand, Event as SyncEvent};
+use crate::sync::{Command as SyncCommand, Event as SyncEvent, Sender};
 use crate::tasks::Delta;
 
 /// Версия договора обмена: меняется с любым несовместимым изменением сообщений. №2 — `PluginHello` сообщает наличие
 /// ключа приложения (PLG-05: ключ Telegram остался в плагине, интерфейс его больше не читает из сборки); №3 — запрос
 /// каталога (`Ask::Certificates`, PLG-06: LDAP — процессом набора); №4 — области учётки и публичные загрузки
-/// (`Ask::Area*`, `Ask::Fetch`, PLG-07: CalDAV и CardDAV — процессом, задачи поверх кэша — услугой ядра).
-pub const WIRE: u32 = 4;
+/// (`Ask::Area*`, `Ask::Fetch`, PLG-07: CalDAV и CardDAV — процессом, задачи поверх кэша — услугой ядра); №5 —
+/// почтовый путь и услуги ядра ([`Ask::MailOpen`], [`FromPlugin::MailEvent`], [`FromPlugin::Cache`], [`FromPlugin::Worker`],
+/// [`FromPlugin::Smime`], PLG-08: EWS — процессом, хранилище учётки, разбор письма и S/MIME — услугами).
+pub const WIRE: u32 = 5;
 
 /// `serde_json::Value` и `Map` в сообщениях обмена (задачи областей, PLG-07): кодек postcard — формат без
 /// самоописания, `Value` он не разбирает (`deserialize_any` не поддержан), поэтому значение едет байтами JSON — тем
@@ -159,6 +162,13 @@ pub enum ToPlugin {
     Stored(Result<Option<Vec<u8>>, ChannelError>),
     /// Ответ ядра на услугу SSO ([`FromPlugin::Sso`]).
     SsoReply(Result<SsoDone, ChannelError>),
+    /// Ответ хранилища учётки ([`FromPlugin::Cache`], PLG-08): чтение или приём записи, вызванной с ответом.
+    /// `Err` — база не прочиталась/не записалась и очередь записей кончилась ошибкой.
+    Cached(Result<CacheDone, String>),
+    /// Ответ воркера ([`FromPlugin::Worker`], PLG-08).
+    Worked(Result<WorkerDone, String>),
+    /// Ответ S/MIME ([`FromPlugin::Smime`], PLG-08): письмо собрано или отказ.
+    Sealed(Result<Vec<u8>, String>),
 }
 
 /// Вопрос хоста.
@@ -209,6 +219,13 @@ pub enum Ask {
     /// Скачать публичный ресурс без входа (картинка письма, подписка на календарь, занятость по ссылке, S8-42/S8-44;
     /// PLG-07): `etag` — условный запрос (`If-None-Match`). Ответ — [`Reply::Fetched`], тело — двоичной частью.
     Fetch { url: String, max: u32, etag: Option<String> },
+    /// Запустить синхронизацию учётной записи (`MailPlugin::spawn`, PLG-08): путь-процесс ведёт свой поток, события —
+    /// [`FromPlugin::MailEvent`], команды — [`Ask::MailCommand`]. База открыта только у ядра: хранилище учётки —
+    /// [`FromPlugin::Cache`]. Ответ — [`Reply::MailOpened`].
+    MailOpen { session: u64, url: String, profile: Option<String>, login: MailLogin },
+    /// Команда учётки (`sync::Command`) — в поток её синхронизации (PLG-08). Ответ — [`Reply::Unit`]: `Err` —
+    /// синхронизация кончилась (отказ входа), команд больше не принять.
+    MailCommand { session: u64, cmd: Box<SyncCommand> },
 }
 
 /// Как входить в каталог ([`DirectoryQuery`], PLG-06): то же, что «Настройки → Безопасность», но пароль простого
@@ -246,6 +263,142 @@ pub struct AreaLogin {
     pub user: String,
     pub password: Secret,
     pub email: String,
+}
+
+/// Вход почтового пути ([`Ask::MailOpen`], PLG-08): логин и пароль учётной записи; адрес ящика путь узнаёт у сервера.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailLogin {
+    pub user: String,
+    pub password: Secret,
+}
+
+/// Операция хранилища учётки ([`FromPlugin::Cache`], PLG-08): база открыта только у ядра, путь-процесс спрашивает
+/// операциями. Записи ([`FromPlugin::CacheWrite`]) идут подряд без ответа, ошибка — на ближайшем вызове с ответом,
+/// порядок сохраняется; чтения — вызовом с ответом ([`CacheDone`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CacheOp {
+    /// Папки учётки — заново ([`postman_cache::Cache::replace_mailboxes`]).
+    ReplaceMailboxes(Option<String>, Vec<MailboxRow>),
+    /// Учётки профиля ([`postman_cache::Cache::replace_accounts_of`]).
+    ReplaceAccountsOf(Option<String>, Vec<AccountRow>),
+    /// Строки писем ([`postman_cache::Cache::upsert_emails`]).
+    UpsertEmails(Vec<EmailRow>),
+    /// Удалить письма ([`postman_cache::Cache::delete_emails`]).
+    DeleteEmails(Vec<String>),
+    /// Состояние синхронизации ([`postman_cache::Cache::set_state`]).
+    SetState(String, String),
+    /// Разобранное тело ([`postman_cache::Cache::put_body`]).
+    PutBody(String, BodyRow),
+    /// Байты вложения ([`postman_cache::Cache::put_blob`]).
+    PutBlob(String, Vec<u8>),
+    /// Письмо целиком — содержимым ([`postman_cache::Cache::put_content`]), части — от воркера.
+    PutContent(LetterId, Vec<u8>, Vec<postman_cache::SplitPart>),
+    /// Связь письма с сервером ([`postman_cache::Cache::attach_remote`]).
+    AttachRemote(LetterId, RemoteRef),
+    /// Связи после своего переноса ([`postman_cache::Cache::upsert_remotes`]).
+    UpsertRemotes(String, Vec<(String, LetterRow)>),
+    /// Адреса «От» — в адреса бесед писем ([`crate::channel::mail::remember_senders`], ADR 0012).
+    RememberSenders(Vec<Sender>),
+    /// Состояние синхронизации ([`postman_cache::Cache::state`]) — ответ [`CacheDone::State`].
+    State(String),
+    /// Тело письма ([`postman_cache::Cache::body`]) — ответ [`CacheDone::Body`].
+    Body(String),
+    /// Строки писем по ключам ([`postman_cache::Cache::rows_by_ids`]) — ответ [`CacheDone::Rows`].
+    RowsByIds(Vec<String>),
+    /// Связи письма ([`postman_cache::Cache::remotes`]) — ответ [`CacheDone::Remotes`].
+    Remotes(LetterId),
+    /// Письмо целиком из хранилища ([`postman_cache::Cache::letter_content`]) — ответ [`CacheDone::Content`].
+    LetterContent(LetterId),
+    /// Сколько писем в папке ([`postman_cache::Cache::count`]) — ответ [`CacheDone::Count`].
+    Count(String),
+    /// Дерево папок ([`postman_cache::Cache::mailboxes`]) — ответ [`CacheDone::Mailboxes`].
+    Mailboxes,
+    /// Письмо по связи с сервером ([`postman_cache::Cache::letter_of`]) — ответ [`CacheDone::LetterOf`].
+    LetterOf(String, String),
+    /// Байты вложения ([`postman_cache::Cache::blob`]) — ответ [`CacheDone::Blob`].
+    Blob(String),
+    /// Папка ([`postman_cache::Cache::folder`]) — ответ [`CacheDone::Folder`].
+    Folder(FolderId),
+    /// Страница папки ([`postman_cache::Cache::page`]) — ответ [`CacheDone::Rows`].
+    Page(String, usize, usize),
+    /// Папка по связи с сервером ([`postman_cache::Cache::folder_of`]) — ответ [`CacheDone::FolderOf`].
+    FolderOf(String, String),
+    /// Строка письма ([`postman_cache::Cache::letter`]) — ответ [`CacheDone::Letter`].
+    Letter(LetterId),
+    /// Цепочка ([`postman_cache::Cache::thread`]) — ответ [`CacheDone::Rows`].
+    Thread(String),
+}
+
+/// Ответ хранилища учётки на вызов с ответом ([`ToPlugin::Cached`], PLG-08).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CacheDone {
+    /// Запись принята (вызовом, а не [`FromPlugin::CacheWrite`]).
+    Done,
+    State(Option<String>),
+    Body(Option<BodyRow>),
+    Rows(Vec<EmailRow>),
+    Remotes(Vec<RemoteRef>),
+    Content(Option<Vec<u8>>),
+    Count(usize),
+    Mailboxes(Vec<MailboxRow>),
+    LetterOf(Option<LetterId>),
+    Blob(Option<Vec<u8>>),
+    Folder(Option<FolderRow>),
+    FolderOf(Option<FolderId>),
+    Letter(Option<LetterRow>),
+}
+
+/// Разбор письма воркером-песочницей ([`FromPlugin::Worker`], PLG-08): чужие данные — только в воркере, и воркер
+/// запускает ядро, не плагин. Ответ — [`ToPlugin::Worked`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerOp {
+    /// Разобранное письмо (`postman_worker::Client::mime`) — ответ [`WorkerDone::Mime`].
+    Mime(Vec<u8>),
+    /// Часть письма по номеру (`mime_part`) — ответ [`WorkerDone::Bytes`].
+    Part { raw: Vec<u8>, index: u32 },
+    /// Раскладка частей (`mime_split`) — ответ [`WorkerDone::Split`].
+    Split(Vec<u8>),
+    /// Цепочки по заголовкам писем (`threads`) — ответ [`WorkerDone::Threads`].
+    Threads(Vec<Vec<u8>>),
+}
+
+/// Ответ воркера ([`ToPlugin::Worked`], PLG-08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerDone {
+    /// `postman_worker::mime::Mime` — байтами postcard (тот же кодек, что у всего обмена), тем же значением.
+    Mime(#[serde(with = "worker_bytes")] postman_worker::mime::Mime),
+    Bytes(Vec<u8>),
+    Split {
+        #[serde(with = "worker_bytes")]
+        split: postman_worker::mime::Split,
+        decoded: Vec<u8>,
+    },
+    Threads(#[serde(with = "worker_bytes")] Vec<postman_worker::mime::Thread>),
+}
+
+/// Типы воркера — байтами postcard: тот же кодек, что у всего обмена (PLG-08).
+mod worker_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &impl Serialize, s: S) -> Result<S::Ok, S::Error> {
+        let bytes = postcard::to_stdvec(v).map_err(serde::ser::Error::custom)?;
+        s.serialize_bytes(&bytes)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Result<T, D::Error> {
+        let bytes: Vec<u8> = Deserialize::deserialize(d)?;
+        postcard::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+/// S/MIME исходящего ([`FromPlugin::Smime`], PLG-08): шифрование и подпись — у ядра, ключи пользователя плагину
+/// недоступны. Ответ — [`ToPlugin::Sealed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SmimeOp {
+    /// [`crate::smime::seal_outgoing`]: письмо «Конфиденциально» адресатам `to`.
+    Seal { raw: Vec<u8>, to: Vec<postman_smime::seal::To> },
+    /// [`crate::smime::sign_outgoing`]: подпись письма от `from`; `hwnd` — окно выбора сертификата у ядра.
+    Sign { raw: Vec<u8>, from: String, hwnd: Option<isize>, now: i64 },
 }
 
 /// Операция хранилища задач плагина областей ([`Ask::AreaTask`], PLG-07): задачи поверх кэша — услуга ядра
@@ -328,6 +481,21 @@ pub enum FromPlugin {
     /// Событие области учётки во время команды ([`Ask::AreaCommand`], PLG-07): тот же договор `sync::Event`, что у
     /// почтового пути; заместитель отдаёт их потоку учётки по номеру сессии.
     AreaEvent { session: u64, event: SyncEvent },
+    /// Событие потока синхронизации учётки ([`Ask::MailOpen`], PLG-08): тот же договор `sync::Event`; заместитель
+    /// отдаёт их каналу учётки.
+    MailEvent { session: u64, event: SyncEvent },
+    /// Услуга хранилища учётки — вызовом связи (PLG-08): чтение с ответом — [`ToPlugin::Cached`]. База открыта
+    /// только у ядра (ADR 0006).
+    Cache { session: u64, op: CacheOp },
+    /// Запись хранилища учётки без ответа (PLG-08): идут подряд, ошибка — на ближайшем вызове с ответом
+    /// ([`FromPlugin::Cache`]), порядок сохраняется.
+    CacheWrite { session: u64, op: CacheOp },
+    /// Разбор письма воркером — услуга ядра вызовом связи (PLG-08): воркер запускает ядро, не плагин. Ответ —
+    /// [`ToPlugin::Worked`].
+    Worker { op: WorkerOp },
+    /// S/MIME исходящего — услуга ядра вызовом связи (PLG-08): ключи пользователя плагину недоступны. Ответ —
+    /// [`ToPlugin::Sealed`].
+    Smime { op: SmimeOp },
 }
 
 /// Вызов `PluginStore`.
@@ -387,6 +555,8 @@ pub enum Reply {
     /// Публичная загрузка ([`Ask::Fetch`], PLG-07): `Body` — тело двоичной частью кадра, `NotModified` — ресурс
     /// не менялся; ошибка — строкой, как её показал бы интерфейс.
     Fetched(Result<Fetched, String>),
+    /// Синхронизация учётки запущена ([`Ask::MailOpen`], PLG-08); `Err` — поток не завёлся (ошибка — текстом).
+    MailOpened(Result<(), String>),
 }
 
 #[cfg(test)]
@@ -713,6 +883,13 @@ mod tests {
             Ask::AreaTask { session: 3, op: task_op() },
             Ask::Probe("dav.example.test".into()),
             Ask::Fetch { url: "https://cal.example.test/f.ics".into(), max: 1024, etag: Some("\"1\"".into()) },
+            Ask::MailOpen {
+                session: 4,
+                url: "https://mail.example.test/EWS/Exchange.asmx".into(),
+                profile: Some("@2".into()),
+                login: MailLogin { user: "user".into(), password: Secret::new(b"pw".to_vec()) },
+            },
+            Ask::MailCommand { session: 4, cmd: Box::new(mail_command()) },
         ];
         let covered = |a: &Ask| match a {
             Ask::Hello(_) => 0,
@@ -733,6 +910,8 @@ mod tests {
             Ask::AreaTask { .. } => 15,
             Ask::Probe(_) => 16,
             Ask::Fetch { .. } => 17,
+            Ask::MailOpen { .. } => 18,
+            Ask::MailCommand { .. } => 19,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all
@@ -768,6 +947,8 @@ mod tests {
             Reply::Fetched(Ok(Fetched::Body { etag: Some("\"2\"".into()) })),
             Reply::Fetched(Ok(Fetched::NotModified)),
             Reply::Fetched(Err("bad public address".into())),
+            Reply::MailOpened(Ok(())),
+            Reply::MailOpened(Err("runtime: no threads".into())),
         ];
         let covered = |r: &Reply| match r {
             Reply::Hello(_) => 0,
@@ -792,6 +973,7 @@ mod tests {
             Reply::Fetched(Ok(Fetched::Body { .. })) => 19,
             Reply::Fetched(Ok(Fetched::NotModified)) => 20,
             Reply::Fetched(Err(_)) => 21,
+            Reply::MailOpened(_) => 22,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all
@@ -871,6 +1053,12 @@ mod tests {
             ToPlugin::SsoReply(Ok(SsoDone::Port(7))),
             ToPlugin::SsoReply(Ok(SsoDone::Token("login-token".into()))),
             ToPlugin::SsoReply(Err(ChannelError::Denied(crate::channel::matrix::BROWSER_TIMEOUT.into()))),
+            ToPlugin::Cached(Ok(cache_done())),
+            ToPlugin::Cached(Err("cache is not writable".into())),
+            ToPlugin::Worked(Ok(WorkerDone::Bytes(b"part".to_vec()))),
+            ToPlugin::Worked(Err("worker did not answer".into())),
+            ToPlugin::Sealed(Ok(b"sealed".to_vec())),
+            ToPlugin::Sealed(Err("no certificate for the recipient".into())),
         ];
         to.iter().for_each(round);
         let covered = |m: &ToPlugin| match m {
@@ -883,6 +1071,9 @@ mod tests {
             ToPlugin::SsoReply(Ok(SsoDone::Port(_))) => 6,
             ToPlugin::SsoReply(Ok(SsoDone::Token(_))) => 7,
             ToPlugin::SsoReply(Err(_)) => 8,
+            ToPlugin::Cached(_) => 9,
+            ToPlugin::Worked(_) => 10,
+            ToPlugin::Sealed(_) => 11,
         };
         assert_eq!(to.iter().map(covered).collect::<Vec<_>>(), (1..=to.len()).collect::<Vec<_>>());
         let from = [
@@ -893,6 +1084,11 @@ mod tests {
             FromPlugin::Sso { flow: 2, op: SsoOp::Listen },
             FromPlugin::Sso { flow: 2, op: SsoOp::Wait },
             FromPlugin::AreaEvent { session: 3, event: area_event() },
+            FromPlugin::MailEvent { session: 4, event: mail_event() },
+            FromPlugin::Cache { session: 4, op: cache_op() },
+            FromPlugin::CacheWrite { session: 4, op: CacheOp::UpsertEmails(Vec::new()) },
+            FromPlugin::Worker { op: WorkerOp::Part { raw: b"raw".to_vec(), index: 2 } },
+            FromPlugin::Smime { op: SmimeOp::Seal { raw: b"raw".to_vec(), to: Vec::new() } },
         ];
         from.iter().for_each(round);
         let covered = |m: &FromPlugin| match m {
@@ -901,8 +1097,51 @@ mod tests {
             FromPlugin::Store { .. } => 2,
             FromPlugin::Sso { .. } => 3,
             FromPlugin::AreaEvent { .. } => 4,
+            FromPlugin::MailEvent { .. } => 5,
+            FromPlugin::Cache { .. } => 6,
+            FromPlugin::CacheWrite { .. } => 7,
+            FromPlugin::Worker { .. } => 8,
+            FromPlugin::Smime { .. } => 9,
         };
         assert!(from.iter().map(covered).all(|i| i > 0), "ответы — выше");
+    }
+
+    /// Команда почтового пути для примера: тело письма.
+    fn mail_command() -> SyncCommand {
+        SyncCommand::Body("key".into())
+    }
+
+    /// Событие почтового пути для примера: список папок изменился.
+    fn mail_event() -> SyncEvent {
+        SyncEvent::MailboxesChanged
+    }
+
+    /// Операция хранилища учётки для примера: чтение состояния синхронизации.
+    fn cache_op() -> CacheOp {
+        CacheOp::State("ews.f1".into())
+    }
+
+    /// Ответ хранилища для примера: состояния нет.
+    fn cache_done() -> CacheDone {
+        CacheDone::State(None)
+    }
+
+    /// Разбор воркером по обмену — то же значение (`Mime` воркера байтами postcard).
+    #[test]
+    fn worker_result_crosses_the_wire_as_bytes() {
+        use postman_worker::mime::{Addr, Mime};
+        let mime = Mime {
+            message_id: Some("<b@example.test>".into()),
+            references: Vec::new(),
+            to: vec![Addr { name: "Анна".into(), email: "anna@example.test".into() }],
+            ..Mime::default()
+        };
+        round(&ToPlugin::Worked(Ok(WorkerDone::Mime(mime.clone()))));
+        let bytes = postcard::to_stdvec(&ToPlugin::Worked(Ok(WorkerDone::Mime(mime)))).unwrap();
+        let back = postcard::from_bytes::<ToPlugin>(&bytes).unwrap();
+        let ToPlugin::Worked(Ok(WorkerDone::Mime(back))) = back else { panic!("не тот ответ") };
+        assert_eq!(back.message_id.as_deref(), Some("<b@example.test>"));
+        assert_eq!(back.to.len(), 1);
     }
 
     /// Секрет идёт по обмену байтами, но `Debug` по-прежнему без значения.

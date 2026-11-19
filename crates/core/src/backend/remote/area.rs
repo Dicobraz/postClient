@@ -22,8 +22,8 @@ use crate::model::{Error, ErrorKind, Features};
 use crate::tasks::{Delta, TaskStore};
 
 /// Вид сервера по адресу ждёт ответа плагина не дольше: проверка `/.well-known` у плагина ограничена, обмен — с
-/// запасом.
-const PROBE_WAIT: Duration = Duration::from_secs(10);
+/// запасом. Почтовому пути — тот же предел ([`crate::backend::mail::RemoteMail`]).
+pub(in crate::backend) const PROBE_WAIT: Duration = Duration::from_secs(10);
 /// Публичная загрузка ждёт ответа не дольше: сеть у плагина ограничена 5 с, обмен — с запасом.
 const FETCH_WAIT: Duration = Duration::from_secs(10);
 /// Пауза между опросами фазы процесса в блокирующем ожидании (поток интерфейса) — как у каталога.
@@ -35,7 +35,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Работающий процесс: поднять и дождаться (фоновый поток плагина, рантайм уже есть). «Проблема» — одна
 /// повторная попытка, как у каналов; [`Phase::Idle`] после простоя — поднять ([`want`]).
-async fn ready_async(host: &Arc<Inner>, plugin: &Arc<Plugin>) -> Result<Arc<Conn>, Error> {
+pub(in crate::backend) async fn ready_async(host: &Arc<Inner>, plugin: &Arc<Plugin>) -> Result<Arc<Conn>, Error> {
     want(host, plugin);
     let mut rx = plugin.phase.subscribe();
     let mut retried = false;
