@@ -84,8 +84,8 @@ jobs:
             echo "Карточка #$N добавлена в проект"
           fi
 
+          # singleSelectOptionId в value — String! по схеме GitHub, не ID!
           gh api graphql \
-            # singleSelectOptionId в value — String! по схеме GitHub, не ID!
             -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){clientMutationId}}' \
             -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD_ID" -f o="$OPT" >/dev/null
           echo "Статус #$N → $OPT"
