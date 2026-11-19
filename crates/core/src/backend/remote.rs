@@ -121,7 +121,9 @@ impl Row {
         match self.claim {
             Claim::Channel => url.starts_with(&format!("{}{}/", crate::channel::SCHEME, self.id)),
             Claim::Scheme(s) => url.starts_with(&s.to_ascii_lowercase()),
-            Claim::Path(p) => url.split(['?', '#']).next().is_some_and(|u| u.contains(&p.to_ascii_lowercase())),
+            // Путь в конце адреса (до запроса и фрагмента), как у `is_ews_url` пути EWS (PLG-08) — иначе путь
+            // совпал бы и в середине чужого адреса.
+            Claim::Path(p) => url.split(['?', '#']).next().is_some_and(|u| u.trim_end_matches('/').ends_with(&p.to_ascii_lowercase())),
             Claim::Area(key) => url.split_once('?').is_some_and(|(_, q)| q.split('&').any(|kv| kv.split_once('=').is_some_and(|(k, _)| k == key))),
             Claim::None => false,
         }

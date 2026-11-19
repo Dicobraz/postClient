@@ -922,11 +922,15 @@ async fn session(host: &Arc<super::remote::Inner>, plugin: &Arc<super::remote::P
         }
         // Письма прошлой сессии (срок вышел, процесс падал) — в путь сейчас.
         release(&conn, session, &queue, false).await;
-        // Команды интерфейса и срок очереди; конец канала — очередь дослать, затем сессии конец.
+        // Команды интерфейса и срок очереди; конец канала — очередь дослать, затем сессии конец. Новое письмо в
+        // очереди и выход ([`mail_leave`]) будят ([`MAIL_WAKE`]): срок пересчитать, окно «Отменить» — уходит сейчас.
         loop {
             let now = jiff::Timestamp::now().as_second();
             let due = queue.next_due().map_or(i64::MAX, |d| d.max(now));
             let wait = tokio::time::Instant::now() + Duration::from_secs(u64::try_from(due - now).unwrap_or(0));
+            let wake = MAIL_WAKE.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
             tokio::select! {
                 cmd = rx.recv() => {
                     let Some(cmd) = cmd else {
@@ -939,6 +943,7 @@ async fn session(host: &Arc<super::remote::Inner>, plugin: &Arc<super::remote::P
                     }
                 }
                 _ = tokio::time::sleep_until(wait) => release(&conn, session, &queue, false).await,
+                () = &mut wake => release(&conn, session, &queue, false).await,
             }
         }
         lock(&conn.mails).remove(&session);
@@ -1026,5 +1031,292 @@ async fn release(conn: &Arc<super::remote::Conn>, session: u64, queue: &Arc<Mail
             queue.postpone(again);
             return;
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use std::io::pipe;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::backend::Login;
+    use crate::backend::remote::{AreaServer, AreaSession, FetchedBody, Host, Launcher, Started, serve_mail_area};
+    use crate::backend::wire::{Kind, Settings};
+    use crate::model::{Auth, Error as ModelError};
+    use crate::sync::{Account, Command, Event};
+    use postman_proc::link::Link;
+
+    /// Выход ([`MAIL_LEAVING`]) и счётчик держащих — на всю программу: тесты очереди — по одному.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    const ROW: super::super::remote::Row = super::super::remote::Row {
+        id: "ews",
+        kind: Kind::Mail,
+        claim: crate::backend::remote::Claim::Path("/ews/exchange.asmx"),
+        set: "postman-plugins",
+        profile: crate::backend::remote::Profile::Network { enterprise_auth: true },
+    };
+
+    /// Общее состояние подменного пути: команды собирает в поток своей «синхронизации».
+    struct MockState {
+        opens: AtomicUsize,
+        sent: Mutex<Vec<Command>>,
+    }
+
+    /// Подменный путь: команды молча собирает, отправку подтверждает («отправлено» с тем же билетом).
+    struct MockMail(Arc<MockState>);
+
+    impl MockMail {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(Arc::new(MockState { opens: AtomicUsize::new(0), sent: Mutex::new(Vec::new()) })))
+        }
+
+        fn state(&self) -> Arc<MockState> {
+            Arc::clone(&self.0)
+        }
+
+        fn sent(&self) -> Vec<Command> {
+            lock(&self.0.sent).clone()
+        }
+
+        /// Ждать команду отправки у пути (сессия могла ещё подниматься).
+        fn wait_sent(&self, n: usize) {
+            let until = Instant::now() + Duration::from_secs(10);
+            while self.sent().len() < n && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    impl MailServer for MockMail {
+        fn probe<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async { None })
+        }
+
+        fn open(
+            &self,
+            _url: String,
+            _profile: Option<String>,
+            _login: MailLogin,
+            _services: MailServices,
+            mut commands: UnboundedReceiver<Command>,
+            notify: Arc<dyn Fn(Event) + Send + Sync>,
+        ) -> BoxFuture<'_, Result<(), String>> {
+            let state = self.state();
+            state.opens.fetch_add(1, Ordering::Relaxed);
+            let spawned = std::thread::Builder::new().name("mock-mail-sync".into()).spawn(move || {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+                rt.block_on(async move {
+                    while let Some(cmd) = commands.recv().await {
+                        lock(&state.sent).push(cmd.clone());
+                        if let Command::Send { ticket, .. } = cmd {
+                            notify(Event::Sent { ticket, scheduled: None });
+                        }
+                    }
+                });
+            });
+            Box::pin(async move {
+                spawned.map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        }
+    }
+
+    /// Области подменного пути: «не моя» на всё.
+    struct MockAreas;
+
+    impl AreaServer for MockAreas {
+        fn probe<'a>(&'a self, _host: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async { None })
+        }
+
+        fn connect<'a>(
+            &'a self,
+            _url: &'a str,
+            _login: &'a Login,
+            _profile: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Box<dyn AreaSession>, ModelError>> {
+            Box::pin(async { Err(ModelError::Protocol("mock: no areas".into())) })
+        }
+
+        fn fetch<'a>(&'a self, _url: &'a str, _max: u32, _etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>> {
+            Box::pin(async { Err("mock: no fetch".into()) })
+        }
+    }
+
+    /// Сторона процесса — поток теста с точкой входа набора ([`serve_mail_area`]).
+    struct InThread(Arc<MockMail>);
+
+    impl Launcher for InThread {
+        fn launch(&self, _row: &crate::backend::remote::Row) -> std::io::Result<Started> {
+            let (from_plugin, plugin_out) = pipe()?;
+            let (plugin_in, to_plugin) = pipe()?;
+            let mock = Arc::clone(&self.0);
+            std::thread::spawn(move || {
+                let link = Link::new(plugin_in, plugin_out, crate::backend::remote::MAX_BIN).unwrap();
+                serve_mail_area(link, "ews", Some(mock), || Arc::new(MockAreas));
+            });
+            Ok(Started {
+                link: Link::new(from_plugin, to_plugin, crate::backend::remote::MAX_BIN)?,
+                kill: Box::new(|| {}),
+                exit_code: Box::new(|| None),
+                background: Box::new(|_| Ok(())),
+            })
+        }
+    }
+
+    fn draft() -> postman_compose::Draft {
+        postman_compose::Draft {
+            from: postman_compose::Address::new("Я", "me@example.test"),
+            to: vec![postman_compose::Address::new("Анна", "anna@example.test")],
+            subject: "Отчёт".into(),
+            ..postman_compose::Draft::default()
+        }
+    }
+
+    fn account() -> Account {
+        Account { url: "https://mail.example.test/EWS/Exchange.asmx".into(), auth: Auth::Basic { user: "user".into(), password: "pw".into() } }
+    }
+
+    fn spawn_at(host: &Host, cache: postman_cache::Cache) -> (UnboundedSender<Command>, std::sync::mpsc::Receiver<Event>) {
+        let (events, rx) = std::sync::mpsc::channel();
+        let commands = host.mail(ROW).spawn(Spawn { account: account(), profile: None, cache, index: None, events, repaint: Box::new(|| {}) });
+        (commands, rx)
+    }
+
+    /// Письмо в очереди — в базе профиля, ключ `send.queue/<id отправки>` (учётка основная — префикс пустой).
+    fn queue_key(submission: &str) -> String {
+        format!("{QUEUE_PREFIX}/{submission}")
+    }
+
+    /// Падение пути-процесса (или самой программы) при письме в окне «Отменить» письмо не теряет: очередь в базе
+    /// профиля, следующий вход сессии — письмо в путь, ядро дожидается подтверждения.
+    #[test]
+    fn a_letter_from_a_crashed_run_leaves_at_the_next_sign_in() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let mock = MockMail::new();
+        let host = Host::new(Arc::new(InThread(Arc::clone(&mock))), Settings::default());
+        host.first_frame();
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        // Письмо, оставшееся от не дошедшей отправки (срок вышел: процесс упал в окне «Отменить»).
+        let send =
+            MailSend { submission: "hold.9".into(), draft: draft(), replace: Some("old".into()), due: jiff::Timestamp::now().as_second() - 60 };
+        let put = postman_cache::LocalPut { key: queue_key(&send.submission), value: serde_json::to_vec(&send).unwrap(), parts: Vec::new() };
+        cache.put_local(&put).unwrap();
+        // Сессия открылась: письмо из базы — в путь, без «Отменить» (срок прошёл).
+        let (_commands, rx) = spawn_at(&host, cache.clone());
+        mock.wait_sent(1);
+        let sent = mock.sent();
+        assert_eq!(sent.len(), 1, "письмо прошлого запуска ушло при входе: {sent:?}");
+        assert!(matches!(&sent[0], Command::Send { release: crate::model::Release::Now, replace: Some(r), .. } if r == "old"));
+        let until = Instant::now() + Duration::from_secs(10);
+        while mail_holding() > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(mail_holding(), 0, "подтверждение пути разметило очередь");
+        assert!(cache.local_prefix(&queue_key("")).unwrap().is_empty(), "письмо из базы ушло");
+        let _ = rx.recv_timeout(Duration::from_millis(200));
+    }
+
+    /// Очередь сама по себе: запись — перезагрузка — выдача (без пути и процесса); счётчик держащих — сходится.
+    #[test]
+    fn queue_round_trip() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        let q = MailQueue::new(cache.clone(), "");
+        let scheduled = q.hold(draft(), Some("old".into()), 60);
+        assert_eq!(q.pending(), 1);
+        assert_eq!(cache.local_prefix("send.queue/").unwrap().len(), 1);
+        // Срок не вышел: перезагрузка из базы письмо держит.
+        let q2 = MailQueue::new(cache.clone(), "");
+        assert_eq!(q2.pending(), 1, "перезагрузка из базы");
+        assert_eq!(q2.release_due(false).len(), 0, "срок ещё не вышел");
+        // Срок прошёл (процесс упал в окне): выдача — письмо из базы убрано.
+        let past = MailSend {
+            submission: scheduled.submission.clone(),
+            draft: draft(),
+            replace: Some("old".into()),
+            due: jiff::Timestamp::now().as_second() - 1,
+        };
+        cache
+            .put_local(&postman_cache::LocalPut {
+                key: queue_key(&scheduled.submission),
+                value: serde_json::to_vec(&past).unwrap(),
+                parts: Vec::new(),
+            })
+            .unwrap();
+        let q3 = MailQueue::new(cache.clone(), "");
+        let due = q3.release_due(false);
+        assert_eq!(due.len(), 1, "срок вышел — выдача");
+        assert_eq!(due[0].1.replace.as_deref(), Some("old"));
+        assert!(cache.local_prefix("send.queue/").unwrap().is_empty(), "выданное из базы убрано");
+        // Выданные копии (своя, перезагрузок) — тоже отпустить: счётчик держащих сходится в ноль.
+        q.release_due(true);
+        q2.release_due(true);
+        assert_eq!(mail_holding(), 0, "счётчик держащих сходится");
+    }
+
+    /// Отмена из окна: письмо в очереди — убрано, путь его не получает.
+    #[test]
+    fn unsend_cancels_a_queued_letter() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let mock = MockMail::new();
+        let host = Host::new(Arc::new(InThread(Arc::clone(&mock))), Settings::default());
+        host.first_frame();
+        let (commands, rx) = spawn_at(&host, postman_cache::Cache::open_in_memory().unwrap());
+        commands.send(Command::Send { draft: Box::new(draft()), replace: None, ticket: 1, release: crate::model::Release::After(60) }).unwrap();
+        let scheduled = loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Sent { ticket: 1, scheduled }) => {
+                    assert!(scheduled.is_some(), "окно «Отменить» предложено");
+                    break scheduled.unwrap();
+                }
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на отправку: {e}"),
+            }
+        };
+        assert_eq!(mail_holding(), 1, "письмо держит очередь ядра");
+        assert!(mock.sent().is_empty(), "путь письма ещё не получил");
+        commands.send(Command::Unsend { scheduled, ticket: 2 }).unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Unsent { ticket: 2, .. }) => break,
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на отмену: {e}"),
+            }
+        }
+        assert_eq!(mail_holding(), 0, "письмо убрано из очереди");
+        assert!(mock.sent().is_empty(), "путь письмо не получал");
+    }
+
+    /// Выход при письме в окне «Отменить»: уходит сейчас ([`mail_leave`]), выход дожидается подтверждения пути.
+    #[test]
+    fn leave_flushes_the_undo_window_and_waits_for_the_path() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let mock = MockMail::new();
+        let host = Host::new(Arc::new(InThread(Arc::clone(&mock))), Settings::default());
+        host.first_frame();
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        let (commands, _rx) = spawn_at(&host, cache.clone());
+        commands.send(Command::Send { draft: Box::new(draft()), replace: None, ticket: 1, release: crate::model::Release::After(60) }).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while mail_holding() < 1 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(mail_holding(), 1);
+        mail_leave();
+        mock.wait_sent(1);
+        assert_eq!(mock.sent().len(), 1, "письмо ушло при выходе, не по сроку");
+        let until = Instant::now() + Duration::from_secs(10);
+        while mail_holding() > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(mail_holding(), 0, "выход дождался подтверждения");
+        assert!(cache.local_prefix(&queue_key("")).unwrap().is_empty(), "письмо из базы ушло");
     }
 }

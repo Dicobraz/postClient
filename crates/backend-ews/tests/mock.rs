@@ -911,8 +911,7 @@ fn wrong_password_is_one_attempt_per_login() {
             Err(e) => panic!("нет ошибки входа ({e})"),
         }
     };
-    assert_eq!(err.kind, postman_core::model::ErrorKind::Auth);
-    assert!(err.detail.contains(postman_ews::CREDENTIALS_REJECTED), "{}", err.detail);
+    assert_eq!(err.kind, postman_core::model::ErrorKind::CredentialsRejected, "{}", err.detail);
     let log = log.lock().unwrap();
     let rejected: Vec<_> = log.iter().filter(|b| b.starts_with("NTLM REJECTED")).cloned().collect();
     assert_eq!(rejected, ["NTLM REJECTED anna@corp.example", r"NTLM REJECTED EXAMPLE\anna"]);
