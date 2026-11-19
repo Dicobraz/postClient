@@ -189,7 +189,12 @@ impl AreaPlugin for EwsAreaPlugin {
         postman_ews::set_tls13_only(on);
     }
 
-    fn connect<'a>(&'a self, url: &'a str, login: &'a Login) -> BoxFuture<'a, postman_core::model::Result<Box<dyn Areas>>> {
+    fn connect<'a>(
+        &'a self,
+        url: &'a str,
+        login: &'a Login,
+        _profile: Option<&'a str>,
+    ) -> BoxFuture<'a, postman_core::model::Result<Box<dyn Areas>>> {
         Box::pin(async move {
             match EwsAreas::connect(url, &login.user, &login.password, &login.email).await {
                 Ok(a) => Ok(Box::new(a) as Box<dyn Areas>),

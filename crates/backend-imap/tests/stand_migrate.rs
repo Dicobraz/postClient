@@ -166,7 +166,7 @@ fn twenty_letters_jmap_to_imap_and_back() {
     let url = format!("imaps://{}?smtp={}", env("POSTMAN_STAND_IMAP"), env("POSTMAN_STAND_SMTP"));
     let account = ImapAccount::from_url(&url, &env("POSTMAN_STAND_USER2"), &env("POSTMAN_STAND_PASSWORD2")).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let imap = Live::ready(imap::spawn(account, Some("@2".into()), cache.clone(), None, tx, || {}, Vec::new()), rx);
+    let imap = Live::ready(imap::spawn(account, Some("@2".into()), cache.clone(), None, tx, || {}), rx);
 
     // Части и `Message-ID` — кодом воркера в процессе теста.
     let mut engine = Engine::open(CacheStore::new(

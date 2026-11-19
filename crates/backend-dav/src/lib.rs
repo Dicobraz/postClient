@@ -19,9 +19,11 @@
 //! - **Изменения** — опрос по таймеру синхронизации: ctag и sync-token календарей → `CalendarChanged`.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use postman_core::backend::remote::{AreaServer, AreaSession, FetchedBody, PluginLink, serve_area};
+use postman_core::backend::wire::{TaskDone, TaskOp};
 use postman_core::backend::{AreaCtx, AreaPlugin, Areas, BoxFuture, Login};
 use postman_core::model::ErrorKind;
 use postman_core::sync::{Access, Command, Event as SyncEvent, owned_by};
@@ -788,13 +790,17 @@ impl TaskStore for DavTasks<'_> {
 // ---------------------------------------------------------------------------------------------------------------
 // Плагин областей (ADR 0004).
 
+/// Идентификатор плагина областей в наборе (`postman-plugins`, PLG-07); тот же в строке композиционного корня
+/// (`app-gpui/src/plugins.rs`) — совпадение сверяет тест корня.
+pub const ID: &str = "dav";
+
 /// Плагин CalDAV и CardDAV для реестра (`postman_core::backend::Registry`): ключ адреса — `dav`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DavPlugin;
 
 impl AreaPlugin for DavPlugin {
     fn key(&self) -> &'static str {
-        "dav"
+        ID
     }
 
     /// CalDAV на узле учётной записи: отвечает `https://<узел>/.well-known/caldav` (RFC 6764).
@@ -809,7 +815,7 @@ impl AreaPlugin for DavPlugin {
         postman_dav::set_tls13_only(on);
     }
 
-    fn connect<'a>(&'a self, url: &'a str, login: &'a Login) -> BoxFuture<'a, CoreResult<Box<dyn Areas>>> {
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, CoreResult<Box<dyn Areas>>> {
         Box::pin(async move {
             match Dav::connect(url, &login.user, &login.password, &login.email).await {
                 Ok(d) => Ok(Box::new(d) as Box<dyn Areas>),
@@ -817,6 +823,63 @@ impl AreaPlugin for DavPlugin {
             }
         })
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Путь областей отдельным процессом (PLG-07, ADR 0013): `postman-plugins --plugin=dav`.
+
+/// Путь областей на стороне процесса: вид сервера, вход ([`Dav::connect`]) и публичные загрузки
+/// ([`postman_dav::fetch_public_if`]). Политику TLS процесс берёт из настроек ядра (`Hello` и смены).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DavServer;
+
+impl AreaServer for DavServer {
+    fn probe<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Option<String>> {
+        DavPlugin.probe(host)
+    }
+
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, CoreResult<Box<dyn AreaSession>>> {
+        DavPlugin.set_tls13_only(postman_core::backend::remote::settings().tls13_only);
+        Box::pin(async move {
+            match Dav::connect(url, &login.user, &login.password, &login.email).await {
+                Ok(d) => Ok(Box::new(d) as Box<dyn AreaSession>),
+                Err(e) => Err(shown(e)),
+            }
+        })
+    }
+
+    /// Публичный ресурс без входа (S8-42/S8-44): занятость по ссылке, подписка, картинка письма. Адрес проверяет
+    /// [`postman_dav::public_url`]; `None` — не менялся с `etag` (`If-None-Match`).
+    fn fetch<'a>(&'a self, url: &'a str, max: u32, etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>> {
+        Box::pin(async move {
+            let got = postman_dav::fetch_public_if(url, usize::try_from(max).unwrap_or(usize::MAX), etag).await.map_err(|e| e.to_string())?;
+            Ok(got.map(|f| FetchedBody { body: f.body, etag: f.etag }))
+        })
+    }
+}
+
+/// Операции хранилища задач ([`postman_core::backend::remote::AreaSession`]): то же, что у [`DavTasks`], но по
+/// обмену — задачи поверх кэша ведёт ядро.
+impl AreaSession for Dav {
+    fn task_op<'a>(&'a mut self, op: TaskOp) -> BoxFuture<'a, CoreResult<TaskDone>> {
+        Box::pin(async move {
+            let store = Dav::tasks(self);
+            match op {
+                TaskOp::Load => store.load().await.map(|(tasks, state)| TaskDone::Loaded { tasks, state }),
+                TaskOp::Changes(since) => store.changes(&since).await.map(TaskDone::Delta),
+                TaskOp::Get(ids) => store.get(&ids).await.map(TaskDone::Got),
+                TaskOp::Create(task) => store.create(&task).await.map(TaskDone::Created),
+                TaskOp::Update { id, patch } => store.update(&id, &patch).await.map(|()| TaskDone::Done),
+                TaskOp::Destroy(id) => store.destroy(&id).await.map(|()| TaskDone::Done),
+                TaskOp::DefaultCalendar => store.default_calendar().await.map(TaskDone::Calendar),
+            }
+        })
+    }
+}
+
+/// Точка входа процесса: `postman-plugins --plugin=dav` (PLG-07). Ответ — код выхода.
+pub fn serve(link: PluginLink) -> i32 {
+    serve_area(link, ID, || Arc::new(DavServer))
 }
 
 impl Areas for Dav {

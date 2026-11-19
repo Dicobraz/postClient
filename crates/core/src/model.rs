@@ -237,8 +237,8 @@ pub enum ErrorKind {
 }
 
 /// Ошибка пути к серверу для общего кода `core` (задачи, договор плагинов — ADR 0004). Плагин переводит в неё
-/// ошибки своего протокола, сохраняя род ([`ErrorKind`]) и текст.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// ошибки своего протокола, сохраняя род ([`ErrorKind`]) и текст. Сериализуется — по обмену областями (PLG-07).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum Error {
     /// Сервер отказал методу с кодом (у JMAP — `type` ошибки: `cannotCalculateChanges`, `notFound`,
     /// `stateMismatch`, `forbidden`…; другие пути переводят свои отказы в те же коды). Род — [`ErrorKind::Server`].

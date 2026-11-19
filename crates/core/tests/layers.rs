@@ -84,8 +84,9 @@ const SETS: &[&str] = &["postman-plugins", "postman-plugins-matrix", "postman-pl
 const UI: &str = "postman-gpui";
 
 /// Плагины, которые интерфейс пока линкует сам (ADR 0013, переходный период): вынесенный в набор плагин уходит отсюда,
-/// к PLG-11 список пуст. Matrix — PLG-04 и Telegram — PLG-05 (каждый своим файлом набора), каталог — PLG-06 (общий).
-const LINKED_FOR_NOW: &[&str] = &["postman-backend-jmap", "postman-backend-imap", "postman-backend-dav", "postman-backend-ews"];
+/// к PLG-11 список пуст. Matrix — PLG-04 и Telegram — PLG-05 (каждый своим файлом набора), каталог — PLG-06 (общий),
+/// CalDAV и CardDAV — PLG-07 (общий).
+const LINKED_FOR_NOW: &[&str] = &["postman-backend-jmap", "postman-backend-imap", "postman-backend-ews"];
 /// Выгрузка в файлы (S8): из байтов письма и свойств MAPI. От неё зависят `core` и `worker` (свойства MAPI заполняет
 /// воркер, S8-29), сама — ни от них, ни от протоколов.
 const EXPORT: &str = "postman-export";

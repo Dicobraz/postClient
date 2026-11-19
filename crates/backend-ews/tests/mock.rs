@@ -175,7 +175,6 @@ fn start_as(url: &str, user: &str, password: &str) -> Live {
         index: None,
         events: tx,
         repaint: Box::new(|| {}),
-        areas: Vec::new(),
     });
     Live { commands, events, cache }
 }

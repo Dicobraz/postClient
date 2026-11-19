@@ -46,8 +46,8 @@ impl Answer {
     }
 }
 
-/// Что сделала область с ответом (`Areas::respond`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Что сделала область с ответом (`Areas::respond`). Сериализуется — по обмену областями (PLG-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Responded {
     /// Моей копии встречи на сервере нет — отвечать письмом.
     NoCopy,

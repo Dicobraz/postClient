@@ -33,6 +33,15 @@ pub const PLUGINS: &[SetEntry] = &[
         claim: Claim::None,
         serve: postman_backend_ldap::serve,
     },
+    // CalDAV и CardDAV (PLG-07): области учётки «стандарты» (почта — IMAP) и публичные загрузки — один сетевой
+    // стек. Процесс держат открытые сессии областей; простой 5 минут — до следующего запроса (ADR 0013).
+    SetEntry {
+        id: postman_backend_dav::ID,
+        kind: Kind::Area,
+        profile: Profile::Network { enterprise_auth: false },
+        claim: Claim::Area(postman_backend_dav::ID),
+        serve: postman_backend_dav::serve,
+    },
 ];
 
 /// Плагин набора по id.

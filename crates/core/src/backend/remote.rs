@@ -20,10 +20,12 @@
 //!
 //! Сторона плагина — [`serve_channel`].
 
+mod area;
 mod serve;
 mod sso;
 
-pub use serve::{SetEntry, on_log, on_stats, serve_channel, serve_directory, set_main, settings};
+pub use area::RemoteAreas;
+pub use serve::{AreaServer, AreaSession, FetchedBody, SetEntry, on_log, on_stats, serve_area, serve_channel, serve_directory, set_main, settings};
 pub(crate) use sso::BROWSER_WAIT;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -339,6 +341,7 @@ impl Inner {
                 retried: Condvar::new(),
                 idle: Mutex::new(None),
                 last_use: Mutex::new(None),
+                areas_open: AtomicUsize::new(0),
             })
         }))
     }
@@ -421,6 +424,8 @@ struct Plugin {
     idle: Mutex<Option<Duration>>,
     /// Последний запрос каталога — простоя считает сторож ([`Conn::watch`]).
     last_use: Mutex<Option<Instant>>,
+    /// Открытые сессии областей учёток (PLG-07): пока есть — процесс держится, простоя нет.
+    areas_open: AtomicUsize,
 }
 
 impl Plugin {
@@ -562,6 +567,7 @@ fn hello(host: &Inner, plugin: &Arc<Plugin>, s: Started, started: Instant) -> Re
         sessions: Mutex::new(HashMap::new()),
         scopes: Mutex::new(HashMap::new()),
         sso: Mutex::new(HashMap::new()),
+        areas_events: Mutex::new(HashMap::new()),
         kill: Mutex::new(kill),
         exit_code: Mutex::new(exit_code),
         background: Mutex::new(background),
@@ -628,6 +634,9 @@ struct Conn {
     scopes: Mutex<HashMap<u64, UnboundedSender<(CallId, StoreOp)>>>,
     /// Вход → слушатель возврата SSO из браузера (ADR 0013: слушает ядро, не плагин).
     sso: Mutex<HashMap<u64, Arc<std::net::TcpListener>>>,
+    /// Сессия области учётки (PLG-07) → события её команды (`FromPlugin::AreaEvent`): ждущий ответ задачи
+    /// заберёт их после ответа ([`Conn::drain_area_events`]).
+    areas_events: Mutex<HashMap<u64, VecDeque<crate::sync::Event>>>,
     kill: Mutex<Box<dyn FnMut() + Send>>,
     exit_code: Mutex<Box<dyn FnMut() -> Option<u32> + Send>>,
     background: Mutex<Box<dyn FnMut(bool) -> io::Result<()> + Send>>,
@@ -678,6 +687,17 @@ impl Conn {
         reply
     }
 
+    /// [`Conn::ask_sync`] с двоичной частью ответа (публичная загрузка, PLG-07).
+    fn ask_sync_full(&self, ask: Ask, wait: Duration) -> Option<Answered> {
+        let (tx, rx) = mpsc::channel();
+        let id = self.post(ask, &[], Waiter::Sync(tx)).ok()?;
+        let answered = rx.recv_timeout(wait).ok();
+        if answered.is_none() {
+            lock(&self.pending).remove(&id);
+        }
+        answered
+    }
+
     /// Обмен до конца связи (поток плагина): ответы — ждущим, события — сессиям, вызовы хранилища — владельцам.
     /// Ответ — чем кончился обмен ([`Ended`]).
     fn serve(self: &Arc<Self>, plugin: &Plugin) -> Ended {
@@ -704,6 +724,10 @@ impl Conn {
                         let _ = tx.send(event);
                     }
                 }
+                // События команды области (PLG-07) ждёт заместитель в потоке учётки — до ответа.
+                Incoming::Message(FromPlugin::AreaEvent { session, event }, _) => {
+                    lock(&self.areas_events).entry(session).or_default().push_back(event);
+                }
                 Incoming::Call(call, FromPlugin::Store { scope, op }, _) => {
                     let sent = lock(&self.scopes).get(&scope).is_some_and(|tx| tx.send((call, op)).is_ok());
                     if !sent {
@@ -725,6 +749,7 @@ impl Conn {
         if self.idle_exit.load(Ordering::SeqCst) {
             plugin.set(Phase::Idle);
             lock(&self.pending).clear();
+            lock(&self.areas_events).clear();
             return Ended::Idle;
         }
         // Сначала — что процесса нет (повторное подключение не возьмёт мёртвую связь), затем — ждущим и сессиям.
@@ -732,6 +757,7 @@ impl Conn {
         lock(&self.pending).clear();
         lock(&self.scopes).clear();
         lock(&self.sso).clear();
+        lock(&self.areas_events).clear();
         for (_, tx) in lock(&self.sessions).drain() {
             let _ = tx.send(ChannelEvent::State(ChannelState::Offline { retry_in: 0 }));
         }

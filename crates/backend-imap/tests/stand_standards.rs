@@ -14,7 +14,6 @@
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use postman_backend_imap::{self as imap, ImapAccount};
 use postman_cache::Cache;
 use postman_calendar::{Invitation, Partstat, Task};
 use postman_core::model::{ContactCard, Feature, Features};
@@ -82,10 +81,15 @@ impl Live {
         worker_next_to_tests();
         let me = env(&format!("POSTMAN_STAND_USER{n}"));
         let url = format!("imaps://{}?smtp={}&dav={}", env("POSTMAN_STAND_IMAP"), env("POSTMAN_STAND_SMTP"), env("POSTMAN_STAND_DAV"));
-        let account = ImapAccount::from_url(&url, &me, &env(&format!("POSTMAN_STAND_PASSWORD{n}"))).unwrap();
+        let account = postman_core::sync::Account {
+            url,
+            auth: postman_core::model::Auth::Basic { user: me.clone(), password: env(&format!("POSTMAN_STAND_PASSWORD{n}")) },
+        };
         let (tx, events) = std::sync::mpsc::channel();
-        let commands =
-            imap::spawn(account, None, Cache::open_in_memory().unwrap(), None, tx, || {}, vec![std::sync::Arc::new(postman_backend_dav::DavPlugin)]);
+        // Области учётки разводит ядро (PLG-07): CalDAV и CardDAV — плагин реестра, как в приложении.
+        let registry =
+            postman_core::backend::Registry::default().with_mail(postman_backend_imap::ImapPlugin).with_area(postman_backend_dav::DavPlugin);
+        let commands = registry.spawn(account, None, Cache::open_in_memory().unwrap(), None, tx, || {});
         let mut live = Live { commands, events, me, features: Features::NONE };
         let f = live.wait("Features", |e| matches!(e, Event::Features(_)));
         let Event::Features(f) = f else { unreachable!() };
