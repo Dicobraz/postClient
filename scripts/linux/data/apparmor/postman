@@ -28,3 +28,9 @@ profile postman-plugins-telegram /usr/bin/postman-plugins-telegram flags=(unconf
 
   include if exists <local/postman-plugins-telegram>
 }
+
+profile postman-plugins-matrix /usr/bin/postman-plugins-matrix flags=(unconfined) {
+  userns,
+
+  include if exists <local/postman-plugins-matrix>
+}
