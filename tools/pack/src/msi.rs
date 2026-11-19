@@ -5,6 +5,10 @@
 //! «Postman» журнала «Приложение» (как `install.ps1 -RegisterEventSource`).
 //! Новая версия снимает старую (большое обновление по `UPGRADE_CODE`), старую поверх новой не ставит.
 //! Права для песочниц не нужны: `Program Files` уже читаем для ALL APPLICATION PACKAGES.
+//! Каналы Telegram и Matrix ставятся по умолчанию вместе со всем (PLG-13, решение 2026-11-19): обычному
+//! пользователю выбирать ничего не надо — неиспользуемый канал не запускается (ADR 0013, плагины по запросу).
+//! Состав каналов для сетевой раскатки задаёт свойство `CHANNELS` (`Telegram,Matrix`; `none` или пустое — без
+//! каналов; не задано — все), выбор переживает обновления (маркеры в реестре), `REMOVE=имя` снимает канал.
 //! Данные пользователя (`%LOCALAPPDATA%\Postman`) и сохранённый вход удаление не трогает; профили песочницы
 //! (AppContainer `Postman.MailWorker` и сетевой `Postman.Plugins`) снимает (PAR-05, ADR 0011, ADR 0013).
 
@@ -36,6 +40,15 @@ const FILE_VITAL: i32 = 512;
 const CA_EXE_IGNORE: i32 = 18 + 64;
 /// Только полное удаление; при обновлении (старую версию снимает новая) профиль нужен дальше.
 const ON_REMOVE: &str = "REMOVE~=\"ALL\" AND NOT UPGRADINGPRODUCTCODE";
+/// Ключ-маркер состава каналов (PLG-13): значение с именем фичи — канал установлен; нет значения — канал не
+/// ставили или сняли. Его читает `AppSearch` (`PREV<КАНАЛ>`), чтобы состав пережил большое обновление в обе
+/// стороны: что было выключено — остаётся выключенным, что было — ставится.
+const CHANNELS_KEY: &str = r"SOFTWARE\Pets\Postman\Channels";
+/// Каналы-опции (PLG-13): имя фичи MSI и файл набора из `ITEMS`. Ставятся по умолчанию (уровень 1),
+/// ограничивает состав свойство `CHANNELS`.
+const CHANNELS: [(&str, &str); 2] = [("Telegram", "plugins_telegram.exe"), ("Matrix", "plugins_matrix.exe")];
+/// 4 — ключевой путь компонента — запись реестра (`msidbComponentAttributesRegistryKeyPath`).
+const REGISTRY_KEYPATH: i32 = 4;
 
 /// Файл комплекта: ключ в таблицах (идентификатор MSI), имя в комплекте и на диске (`короткое|длинное`).
 struct Item {
@@ -146,6 +159,11 @@ fn i(v: i32) -> Value {
 }
 const NULL: Value = Value::Null;
 
+/// Компонент маркера канала в реестре: ключевой путь — сама запись (без файла).
+fn reg_component(feature: &str) -> String {
+    format!("{}_reg", feature.to_lowercase())
+}
+
 fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>, version: &str, msi_ver: &str, files: &Files) -> Result<()> {
     let product_code = product_code(version);
     let main = "postman.exe";
@@ -164,7 +182,8 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
         ("ARPURLINFOABOUT", "https://github.com/Dicobraz421/Postman"),
         ("ARPHELPLINK", "https://github.com/Dicobraz421/Postman/blob/main/docs/USER-GUIDE.md"),
         ("ARPCOMMENTS", "Mail, calendar and contacts"),
-        ("SecureCustomProperties", "INSTALLDIR;NEWERFOUND;OLDERFOUND"),
+        // CHANNELS — с командной строки; PREV* — из `AppSearch` (попадают на повышенную часть установки).
+        ("SecureCustomProperties", "INSTALLDIR;NEWERFOUND;OLDERFOUND;CHANNELS;PREVTELEGRAM;PREVMATRIX"),
     ];
     p.insert_rows(Insert::into("Property").rows(props.iter().map(|(k, v)| vec![s(k), s(v)]).collect()))?;
 
@@ -194,14 +213,16 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
             Column::build("KeyPath").nullable().id_string(72),
         ],
     )?;
-    p.insert_rows(
-        Insert::into("Component").rows(
-            files
-                .iter()
-                .map(|(item, _, _)| vec![s(item.key), s(&component_code(item.name)), s("INSTALLDIR"), i(COMPONENT_64BIT), NULL, s(item.key)])
-                .collect(),
-        ),
-    )?;
+    let mut component_rows: Vec<Vec<Value>> = files
+        .iter()
+        .map(|(item, _, _)| vec![s(item.key), s(&component_code(item.name)), s("INSTALLDIR"), i(COMPONENT_64BIT), NULL, s(item.key)])
+        .collect();
+    // Маркер канала в реестре — ключевой путь своего компонента (без файла): сняли канал — исчезло значение.
+    for (name, _) in &CHANNELS {
+        let r = reg_component(name);
+        component_rows.push(vec![s(&r), s(&component_code(&r)), s("INSTALLDIR"), i(COMPONENT_64BIT | REGISTRY_KEYPATH), NULL, s(&r)]);
+    }
+    p.insert_rows(Insert::into("Component").rows(component_rows))?;
 
     p.create_table(
         "Feature",
@@ -216,13 +237,29 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
             Column::build("Attributes").int16(),
         ],
     )?;
-    p.insert_rows(Insert::into("Feature").row(vec![s("Main"), NULL, s(PRODUCT), NULL, i(1), i(1), s("INSTALLDIR"), i(0)]))?;
+    // Уровень 1 у всех: по умолчанию ставится всё, включая каналы (решение 2026-11-19); состав ограничивает
+    // CHANNELS (не входит в уровень — входит в REMOVE у своих действий).
+    let mut feature_rows = vec![vec![s("Main"), NULL, s(PRODUCT), NULL, i(1), i(1), s("INSTALLDIR"), i(0)]];
+    for (n, (name, _)) in CHANNELS.iter().enumerate() {
+        feature_rows.push(vec![s(name), NULL, s(name), NULL, i(n as i32 + 2), i(1), s("INSTALLDIR"), i(0)]);
+    }
+    p.insert_rows(Insert::into("Feature").rows(feature_rows))?;
 
     p.create_table(
         "FeatureComponents",
         vec![Column::build("Feature_").primary_key().id_string(38), Column::build("Component_").primary_key().id_string(72)],
     )?;
-    p.insert_rows(Insert::into("FeatureComponents").rows(files.iter().map(|(item, _, _)| vec![s("Main"), s(item.key)]).collect()))?;
+    let mut feature_components: Vec<Vec<Value>> = files
+        .iter()
+        .map(|(item, _, _)| {
+            let feature = CHANNELS.iter().find(|(_, key)| *key == item.key).map_or("Main", |(name, _)| name);
+            vec![s(feature), s(item.key)]
+        })
+        .collect();
+    for (name, _) in &CHANNELS {
+        feature_components.push(vec![s(name), s(&reg_component(name))]);
+    }
+    p.insert_rows(Insert::into("FeatureComponents").rows(feature_components))?;
 
     p.create_table(
         "File",
@@ -302,11 +339,19 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
             Column::build("Component_").id_string(72),
         ],
     )?;
-    // Root 2 — HKEY_LOCAL_MACHINE; имя «-» без значения — при удалении снять ключ целиком.
-    p.insert_rows(Insert::into("Registry").rows(vec![
+    // Root 2 — HKEY_LOCAL_MACHINE; имя «-» без значения — при удалении снять ключ целиком (маркеры каналов —
+    // при полном удалении; при снятии одного канала ключ живёт, уходят только его значения).
+    let mut registry_rows = vec![
         vec![s("EventSource"), i(2), s(EVENT_KEY), s("EventMessageFile"), s(EVENT_MESSAGES), s(main)],
         vec![s("EventSourceKey"), i(2), s(EVENT_KEY), s("-"), NULL, s(main)],
-    ]))?;
+        vec![s("ChannelsKey"), i(2), s(CHANNELS_KEY), s("-"), NULL, s(main)],
+    ];
+    // Маркер канала: значение с именем фичи устанавливает компонент маркера, при снятии канала исчезает.
+    for (name, _) in &CHANNELS {
+        let r = reg_component(name);
+        registry_rows.push(vec![s(&r), i(2), s(CHANNELS_KEY), s(name), s(name), s(&r)]);
+    }
+    p.insert_rows(Insert::into("Registry").rows(registry_rows))?;
 
     p.create_table("Icon", vec![Column::build("Name").primary_key().id_string(72), Column::build("Data").binary()])?;
     p.insert_rows(Insert::into("Icon").row(vec![s(ICON), Value::Binary]))?;
@@ -329,6 +374,32 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
         vec![s(UPGRADE_CODE), s(msi_ver), NULL, NULL, i(2), NULL, s("NEWERFOUND")],
     ]))?;
 
+    // Состав каналов прошлого установки (PLG-13): маркер есть — канал стоял; после FindRelatedProducts,
+    // до расчёта стоимости.
+    p.create_table(
+        "RegLocator",
+        vec![
+            Column::build("Signature_").primary_key().id_string(72),
+            Column::build("Root").int16(),
+            Column::build("Key").localizable().category(Category::RegPath).string(255),
+            Column::build("Name").nullable().id_string(72),
+            Column::build("Type").int16(),
+        ],
+    )?;
+    // Root 2 — HKEY_LOCAL_MACHINE; тип 2 — сырое значение: свойство задаёт само наличие значения.
+    p.insert_rows(
+        Insert::into("RegLocator")
+            .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("{name}PrevLoc")), i(2), s(CHANNELS_KEY), s(name), i(2)]).collect()),
+    )?;
+    p.create_table(
+        "AppSearch",
+        vec![Column::build("Property_").primary_key().id_string(72), Column::build("Signature_").primary_key().id_string(72)],
+    )?;
+    p.insert_rows(
+        Insert::into("AppSearch")
+            .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("PREV{}", name.to_uppercase())), s(&format!("{name}PrevLoc"))]).collect()),
+    )?;
+
     p.create_table(
         "CustomAction",
         vec![
@@ -338,23 +409,44 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
             Column::build("Target").nullable().formatted_string(255),
         ],
     )?;
-    // 19 — ошибка с текстом и отказ; 51 — задать свойство (путь установки для «Приложений» и winget).
-    p.insert_rows(Insert::into("CustomAction").rows(vec![
+    // 19 — ошибка с текстом и отказ; 51 — задать свойство (путь установки для «Приложений» и winget; состав
+    // каналов: имя фичи — в REMOVE, если CHANNELS его не назвал или канал стоял выключенным).
+    let mut action_rows = vec![
         vec![s("PreventDowngrade"), i(19), NULL, s("A newer version of Postman is already installed.")],
         vec![s("SetInstallLocation"), i(51), s("ARPINSTALLLOCATION"), s("[INSTALLDIR]")],
         vec![s("RemoveAppContainer"), i(CA_EXE_IGNORE), s("worker.exe"), s("--remove-appcontainer")],
-    ]))?;
+    ];
+    for (name, _) in &CHANNELS {
+        action_rows.push(vec![s(&format!("No{name}")), i(51), s("REMOVE"), s(&format!("[REMOVE][~]{name}"))]);
+        action_rows.push(vec![s(&format!("KeepNo{name}")), i(51), s("REMOVE"), s(&format!("[REMOVE][~]{name}"))]);
+    }
+    p.insert_rows(Insert::into("CustomAction").rows(action_rows))?;
 
-    let ui = [
+    // Условия состава каналов (PLG-13): CHANNELS задаёт точный состав (не назван — в REMOVE); при обновлении без
+    // CHANNELS маркеры держат прошлый состав (не было — остаётся без). Явный REMOVE важнее всего.
+    let mut channel_actions = Vec::new();
+    for (n, (name, _)) in CHANNELS.iter().enumerate() {
+        let prev = format!("PREV{}", name.to_uppercase());
+        channel_actions.push((format!("No{name}"), format!("CHANNELS AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")"), 940 + 2 * n as i32));
+        channel_actions.push((
+            format!("KeepNo{name}"),
+            format!("OLDERFOUND AND NOT CHANNELS AND NOT {prev} AND NOT (REMOVE >< \"{name}\")"),
+            941 + 2 * n as i32,
+        ));
+    }
+    let mut ui = vec![
         ("FindRelatedProducts", None, 25),
+        ("AppSearch", None, 100),
         ("PreventDowngrade", Some("NEWERFOUND"), 30),
         ("CostInitialize", None, 800),
         ("FileCost", None, 900),
         ("CostFinalize", None, 1000),
         ("ExecuteAction", None, 1300),
     ];
-    let execute = [
+    ui.extend(channel_actions.iter().map(|(a, c, n)| (a.as_str(), Some(c.as_str()), *n)));
+    let mut execute = vec![
         ("FindRelatedProducts", None, 25),
+        ("AppSearch", None, 100),
         ("PreventDowngrade", Some("NEWERFOUND"), 30),
         ("CostInitialize", None, 800),
         ("FileCost", None, 900),
@@ -379,6 +471,7 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
         ("PublishProduct", None, 6400),
         ("InstallFinalize", None, 6600),
     ];
+    execute.extend(channel_actions.iter().map(|(a, c, n)| (a.as_str(), Some(c.as_str()), *n)));
     let admin_ui = [("CostInitialize", None, 800), ("FileCost", None, 900), ("CostFinalize", None, 1000), ("ExecuteAction", None, 1300)];
     let admin = [
         ("CostInitialize", None, 800),
@@ -465,6 +558,43 @@ mod tests {
         assert!(names.contains(&"POSTMA~3.EXE|postman-plugins.exe".to_owned()), "{names:?}");
         assert!(p.has_stream(CABINET));
         assert!(p.has_stream(&format!("Icon.{ICON}")));
+
+        // PLG-13: каналы — фичи уровня 1 (по умолчанию ставятся со всем), у каждого свой компонент-маркер.
+        let features: Vec<(String, i32)> =
+            p.select_rows(Select::table("Feature")).unwrap().map(|r| (r[0].as_str().unwrap().to_owned(), r[5].as_int().unwrap())).collect();
+        assert_eq!(features, vec![("Main".into(), 1), ("Telegram".into(), 1), ("Matrix".into(), 1)], "{features:?}");
+        let fc: Vec<(String, String)> = p
+            .select_rows(Select::table("FeatureComponents"))
+            .unwrap()
+            .map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned()))
+            .collect();
+        for pair in
+            [("Main", "postman.exe"), ("Main", "worker.exe"), ("Telegram", "plugins_telegram.exe"), ("Matrix", "plugins_matrix.exe"), ("Telegram", "telegram_reg"), ("Matrix", "matrix_reg")]
+        {
+            assert!(fc.contains(&(pair.0.into(), pair.1.into())), "{pair:?} not in {fc:?}");
+        }
+        assert_eq!(fc.len(), 9);
+        let registry: Vec<String> =
+            p.select_rows(Select::table("Registry")).unwrap().map(|r| r[2].as_str().unwrap().to_owned()).collect();
+        assert!(registry.iter().all(|key| key == EVENT_KEY || key == CHANNELS_KEY), "{registry:?}");
+        // `AppSearch` читает маркеры в PREV* до расчёта стоимости; действия пишут имя фичи в REMOVE.
+        let search: Vec<(String, String)> =
+            p.select_rows(Select::table("AppSearch")).unwrap().map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned())).collect();
+        assert_eq!(search, vec![("PREVTELEGRAM".into(), "TelegramPrevLoc".into()), ("PREVMATRIX".into(), "MatrixPrevLoc".into())]);
+        let secure = property(&mut p, "SecureCustomProperties");
+        assert!(secure.contains("CHANNELS") && secure.contains("PREVTELEGRAM") && secure.contains("PREVMATRIX"), "{secure}");
+        for name in ["Telegram", "Matrix"] {
+            let no = format!("No{name}");
+            let target = format!("[REMOVE][~]{name}");
+            let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some(no.as_str())).unwrap();
+            assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("REMOVE"), Some(target.as_str())), "{name}");
+            let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(no.as_str())).unwrap();
+            let cond = seq[1].as_str().unwrap();
+            assert!(cond.contains(&format!("NOT (CHANNELS >< \"{name}\")")) && cond.contains("NOT (REMOVE ><"), "{cond}");
+            assert!(seq[2].as_int().unwrap() < 1000, "after CostFinalize: {cond}");
+        }
+        let keep = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("KeepNoTelegram")).unwrap();
+        assert!(keep[1].as_str().unwrap().starts_with("OLDERFOUND AND NOT CHANNELS AND NOT PREVTELEGRAM"), "{:?}" , keep[1].as_str());
 
         // Встроенный CAB читается и содержит файлы под ключами таблицы File.
         let mut cab_bytes = Vec::new();
