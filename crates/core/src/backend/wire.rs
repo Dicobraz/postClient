@@ -973,7 +973,8 @@ mod tests {
             Reply::Fetched(Ok(Fetched::Body { .. })) => 19,
             Reply::Fetched(Ok(Fetched::NotModified)) => 20,
             Reply::Fetched(Err(_)) => 21,
-            Reply::MailOpened(_) => 22,
+            Reply::MailOpened(Ok(())) => 22,
+            Reply::MailOpened(Err(_)) => 23,
         };
         assert_eq!(all.iter().map(covered).collect::<Vec<_>>(), (0..all.len()).collect::<Vec<_>>());
         all
@@ -1054,10 +1055,10 @@ mod tests {
             ToPlugin::SsoReply(Ok(SsoDone::Token("login-token".into()))),
             ToPlugin::SsoReply(Err(ChannelError::Denied(crate::channel::matrix::BROWSER_TIMEOUT.into()))),
             ToPlugin::Cached(Ok(cache_done())),
-            ToPlugin::Cached(Err("cache is not writable".into())),
             ToPlugin::Worked(Ok(WorkerDone::Bytes(b"part".to_vec()))),
-            ToPlugin::Worked(Err("worker did not answer".into())),
             ToPlugin::Sealed(Ok(b"sealed".to_vec())),
+            ToPlugin::Cached(Err("cache is not writable".into())),
+            ToPlugin::Worked(Err("worker did not answer".into())),
             ToPlugin::Sealed(Err("no certificate for the recipient".into())),
         ];
         to.iter().for_each(round);
@@ -1071,9 +1072,12 @@ mod tests {
             ToPlugin::SsoReply(Ok(SsoDone::Port(_))) => 6,
             ToPlugin::SsoReply(Ok(SsoDone::Token(_))) => 7,
             ToPlugin::SsoReply(Err(_)) => 8,
-            ToPlugin::Cached(_) => 9,
-            ToPlugin::Worked(_) => 10,
-            ToPlugin::Sealed(_) => 11,
+            ToPlugin::Cached(Ok(_)) => 9,
+            ToPlugin::Worked(Ok(_)) => 10,
+            ToPlugin::Sealed(Ok(_)) => 11,
+            ToPlugin::Cached(Err(_)) => 12,
+            ToPlugin::Worked(Err(_)) => 13,
+            ToPlugin::Sealed(Err(_)) => 14,
         };
         assert_eq!(to.iter().map(covered).collect::<Vec<_>>(), (1..=to.len()).collect::<Vec<_>>());
         let from = [
