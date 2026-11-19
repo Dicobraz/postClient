@@ -44,6 +44,7 @@ IMAP + SMTP — процессом общего набора (`postman-plugins -
 - Окно «Отменить» у писем шага поручения (`Command::Delegate` с `Release::After`) — ушло вместе с `held` пути:
   очередь у ядра держит окно только у `Send`; шаги уходят сразу (`Delegated` с пустым `scheduled`). Вернуть —
   отдельной задачей поверх очереди ядра (держать `Delegate` тоже).
-- Последовательностный флейк app-тестов на Windows (`invite_card::tests::day_lane_marks_overlap_with_the_invite`
-  падает в полной прогонке `cargo test`, проходит один и у nextest; воспроизводится и на main до волны) —
-  не в этой волне: чинить отдельно (состояние между тестами, не процесс).
+- Последовательностные флейки `cargo test` на Windows (в полной прогонке падают, по одному и у nextest;
+  воспроизводятся и на main до волны) — не в этой волне, чинить отдельно: состояние между тестами
+  (`invite_card::tests::day_lane_marks_overlap_with_the_invite`) и тайминг мок-сервера
+  (`backend-ews/tests/mock.rs::wrong_password_is_one_attempt_per_login`).
