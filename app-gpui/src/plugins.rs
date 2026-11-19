@@ -64,8 +64,20 @@ const LDAP: Row =
 const DAV: Row =
     Row { id: "dav", kind: Kind::Area, claim: Claim::Area("dav"), set: "postman-plugins", profile: Profile::Network { enterprise_auth: false } };
 
+/// EWS Exchange (PLG-08) — общим набором `postman-plugins`: почта и свои области (у IMAP-учётки на Exchange,
+/// `?ews=…`) — один процесс. Адрес — путь в адресе учётки ([`Claim::Path`]: `…/EWS/Exchange.asmx`, «строкой
+/// описания плагина»); хранилище учётки, воркер и S/MIME — услуги ядра по обмену; окно «Отменить» и очередь
+/// отправки — у ядра. Профиль с корпоративной проверкой подлинности: вход учётной записью Windows (Kerberos, SSPI).
+const EWS: Row = Row {
+    id: "ews",
+    kind: Kind::Mail,
+    claim: Claim::Path("/ews/exchange.asmx"),
+    set: "postman-plugins",
+    profile: Profile::Network { enterprise_auth: true },
+};
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS];
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -105,6 +117,12 @@ pub(crate) fn remote_directory(query: DirectoryQuery) -> Arc<dyn Directory> {
 /// плагина, для ядра разницы нет ([`postman_core::backend::areas`]).
 pub(crate) fn remote_area() -> postman_core::backend::remote::RemoteAreas {
     host().area(DAV)
+}
+
+/// Адрес — пути EWS ([`EWS`], строкой описания плагина, PLG-08): «Exchange (EWS)» на строке входа, поле логина и
+/// вход учётной записью Windows. Интерфейс плагин пути не линкует — мнение набора о адресе здесь.
+pub(crate) fn is_ews_url(url: &str) -> bool {
+    ROWS.iter().any(|r| r.id == "ews" && r.claims(url))
 }
 
 /// Публичный ресурс без входа — процессом DAV ([`Host::fetch`](postman_core::backend::remote::Host::fetch),
@@ -154,12 +172,14 @@ pub(crate) fn registry() -> &'static Registry {
     REGISTRY.get_or_init(|| {
         let r = Registry::default()
             .with_mail(postman_backend_jmap::JmapPlugin)
-            .with_mail(postman_backend_ews::EwsPlugin)
+            // EWS — процессом общего набора (PLG-08, ADR 0013): почта и свои области одним процессом, хранилище
+            // учётки, воркер и S/MIME — услуги ядра по обмену.
+            .with_mail(host().mail(EWS))
             .with_mail(postman_backend_imap::ImapPlugin)
-            // CalDAV и CardDAV — процессом общего набора (PLG-07, ADR 0013); EWS у IMAP-учётки на Exchange —
-            // внутри postman.exe до своей волны (PLG-08).
+            // CalDAV и CardDAV — процессом общего набора (PLG-07, ADR 0013); области EWS у IMAP-учётки на
+            // Exchange — тем же процессом набора ([`EWS`]).
             .with_area(remote_area())
-            .with_area(postman_backend_ews::EwsAreaPlugin);
+            .with_area(host().area(EWS));
         // Каналы бесед (ADR 0012 п. 12) — заместителями своих наборов (ADR 0013): процесс — у хоста, после первого
         // кадра и по запросу; включает настройка и политика (`account_telegram`, `account_matrix`).
         r.with_channel(host().channel(MATRIX)).with_channel(host().channel(TELEGRAM))
@@ -172,20 +192,21 @@ pub(crate) fn autoreply_limited(error: &str) -> bool {
     error == postman_backend_jmap::settings::ONE_TEXT_ONLY
 }
 
-/// Выход: письма в окне «Отменить» держат потоки IMAP и Exchange, сообщения каналов — очереди отправки потоков
-/// каналов (ADR 0012 п. 11): они уходят сейчас, процесс их дожидается. Окна уже нет: не дольше [`LEAVE_LIMIT`], сервер
-/// без ответа не держит процесс вечно.
+/// Выход: письма в окне «Отменить» держат поток IMAP и очередь отправки ядра (PLG-08), сообщения каналов — очереди
+/// отправки потоков каналов (ADR 0012 п. 11): они уходят сейчас, выход их дожидается. Окна уже нет: не дольше
+/// [`LEAVE_LIMIT`], сервер без ответа не держит программу вечно.
 pub(crate) fn finish_sends() {
+    use postman_core::backend::mail::{mail_holding, mail_leave};
     use postman_core::channel::outbox;
     if let Some(host) = HOST.get() {
         host.leave();
     }
-    let left = || postman_backend_imap::holding() + postman_backend_ews::sync::holding() + outbox::holding();
+    let left = || postman_backend_imap::holding() + outbox::holding() + mail_holding();
     if left() == 0 {
         return;
     }
     postman_backend_imap::leave();
-    postman_backend_ews::sync::leave();
+    mail_leave();
     outbox::leave();
     let start = Instant::now();
     while left() > 0 && start.elapsed() < LEAVE_LIMIT {
@@ -219,6 +240,7 @@ mod tests {
                 "postman://telegram/1/c",
                 "imaps://mail.example.test",
                 "https://mail.example.test/",
+                "https://mail.example.test/EWS/Exchange.asmx",
                 "ldap://dc.corp.example",
             ] {
                 assert_eq!(row.claims(url), entry.claims(url), "{} {url}", row.id);

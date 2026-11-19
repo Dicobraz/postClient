@@ -42,6 +42,17 @@ pub const PLUGINS: &[SetEntry] = &[
         claim: Claim::Area(postman_backend_dav::ID),
         serve: postman_backend_dav::serve,
     },
+    // EWS Exchange (PLG-08): почта и свои области (у IMAP-учётки на Exchange, `?ews=…`) — один процесс и один
+    // сетевой стек. Хранилище учётки открыто только у ядра (услуга по обмену), как и воркер разбора писем и S/MIME;
+    // окно «Отменить» и очередь отправки — у ядра. Вход учётной записью Windows (Kerberos, SSPI) — право
+    // корпоративной проверки подлинности. Адрес — путь в адресе учётки `…/EWS/Exchange.asmx` ([`Claim::Path`]).
+    SetEntry {
+        id: postman_backend_ews::ID,
+        kind: Kind::Mail,
+        profile: Profile::Network { enterprise_auth: true },
+        claim: Claim::Path("/ews/exchange.asmx"),
+        serve: postman_backend_ews::serve,
+    },
 ];
 
 /// Плагин набора по id.

@@ -12,10 +12,11 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::{Metric, Themes};
-use postman_core::model::Auth;
-use postman_core::sync::Account;
+use postman_core::model::{Auth, ErrorKind};
+use postman_core::sync::{Account, SyncError};
 
 use crate::account::Settings;
+use crate::live::error_text;
 use crate::settings_tab::{seg, seg_group};
 
 /// Шаг добавления.
@@ -58,7 +59,7 @@ pub(crate) struct Found {
 
 /// Вид сервера по адресу пути: «Exchange (EWS)», «IMAP/SMTP», «JMAP» — и чем нашли.
 pub(crate) fn kind_of(url: &str) -> (String, String) {
-    if postman_backend_ews::is_ews_url(url) {
+    if crate::plugins::is_ews_url(url) {
         (tr!("signin-kind-ews"), tr!("signin-how-autodiscover"))
     } else if url.starts_with("imaps://") || url.starts_with("imap://") {
         (tr!("signin-kind-imap"), tr!("signin-how-port"))
@@ -226,7 +227,7 @@ impl SignIn {
     /// Выбор входа Windows виден: адрес — EWS Exchange, машина в домене этой учётки.
     fn windows_offered(&self, cx: &App) -> bool {
         let url = normalize_url(&self.url.read(cx).value());
-        self.domain.as_deref().is_some_and(|d| same_domain(d, &url, &self.user.read(cx).value())) && postman_backend_ews::is_ews_url(&url)
+        self.domain.as_deref().is_some_and(|d| same_domain(d, &url, &self.user.read(cx).value())) && crate::plugins::is_ews_url(&url)
     }
 
     /// «Войти как пользователь Windows»: логин — UPN из Windows (в фоне; можно поправить).
@@ -299,7 +300,7 @@ impl SignIn {
             Ok(u) => u,
             Err(e) => return self.fail(e, cx),
         };
-        let ews = postman_backend_ews::is_ews_url(&normalize_url(&self.url.read(cx).value()));
+        let ews = crate::plugins::is_ews_url(&normalize_url(&self.url.read(cx).value()));
         let user = login_for(&self.user.read(cx).value(), &self.login.read(cx).value(), ews);
         let windows = self.windows && self.windows_offered(cx);
         // Вход Windows: пустой пароль — путь EWS входит учётными данными текущего входа (T1-02а).
@@ -332,21 +333,31 @@ impl SignIn {
         cx.notify();
     }
 
-    /// Вход не удался: показать причину, поля остаются для новой попытки. Вход Windows не удался (T1-02а) — строкой
-    /// и предложением войти с паролем: шаг «Пароль».
+    /// Вход не удался: показать причину, поля остаются для новой попытки. Отказ входа учётной записью Windows
+    /// (T1-02а, PLG-08: род ошибки — часть договора) — предложением войти с паролем: шаг «Пароль»; отклонённые
+    /// логин и пароль — с подсказкой про вид логина (чаще всего нужен `DOMAIN\user` вместо адреса почты).
+    pub(crate) fn sync_failed(&mut self, error: &SyncError, cx: &mut Context<Self>) {
+        self.busy = false;
+        self.step = Step::Server;
+        match error.kind {
+            ErrorKind::WindowsSignInUnavailable if self.windows => {
+                self.windows = false;
+                self.focus = true;
+                self.error = Some(tr!("signin-windows-failed"));
+            }
+            ErrorKind::CredentialsRejected if !self.windows => {
+                self.error = Some(format!("{}\n{}", tr!("signin-failed", error = error.detail.clone()), tr!("signin-rejected-hint")));
+            }
+            _ => self.error = Some(tr!("signin-failed", error = error_text(error))),
+        }
+        cx.notify();
+    }
+
+    /// Вход не удался без события синхронизации (ошибка открытия базы, сохранённой учётки): текст как есть.
     pub(crate) fn failed(&mut self, error: &str, cx: &mut Context<Self>) {
         self.busy = false;
         self.step = Step::Server;
-        if self.windows && error.contains(postman_backend_ews::WINDOWS_SIGN_IN_UNAVAILABLE) {
-            self.windows = false;
-            self.focus = true;
-            self.error = Some(tr!("signin-windows-failed"));
-        } else if !self.windows && error.contains(postman_backend_ews::CREDENTIALS_REJECTED) {
-            // Логин и пароль отклонены: чаще всего логин не того вида (адрес почты вместо `DOMAIN\user`).
-            self.error = Some(format!("{}\n{}", tr!("signin-failed", error = error.to_owned()), tr!("signin-rejected-hint")));
-        } else {
-            self.error = Some(tr!("signin-failed", error = error.to_owned()));
-        }
+        self.error = Some(tr!("signin-failed", error = error.to_owned()));
         cx.notify();
     }
 }
@@ -546,7 +557,7 @@ impl SignIn {
                 }
                 if !(self.windows && self.windows_offered(cx)) {
                     let (tls, ok) = security_line();
-                    if postman_backend_ews::is_ews_url(&normalize_url(&self.url.read(cx).value())) {
+                    if crate::plugins::is_ews_url(&normalize_url(&self.url.read(cx).value())) {
                         body = body.child(self.field(l, tr!("signin-login"), &self.login, Some(tr!("signin-login-hint"))));
                     }
                     body = body
