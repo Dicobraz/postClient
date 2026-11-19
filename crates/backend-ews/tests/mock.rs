@@ -851,7 +851,7 @@ fn windows_sign_in_without_password() {
     assert!(log.iter().any(|b| b.contains("<m:ResolveNames") && b.contains(">anna<")), "свой адрес — ResolveNames по имени учётной записи");
 }
 
-/// Сервер не принял текущего пользователя Windows: одна ошибка `Auth` с причиной, без повторов.
+/// Сервер не принял текущего пользователя Windows: одна ошибка `WindowsSignInUnavailable`, без повторов.
 #[test]
 fn windows_sign_in_refused() {
     let (url, log) = ntlm_server(|_| false);
