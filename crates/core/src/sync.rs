@@ -1369,7 +1369,7 @@ pub async fn retry_at(at: Option<tokio::time::Instant>) {
 /// Ошибку — в интерфейс; `true` — остановить синхронизацию: сервер отклонил вход — повторять запросы с тем же
 /// паролем бессмысленно (и сервер может заблокировать адрес за перебор). Интерфейс показывает строку входа.
 pub fn report(e: SyncError, notify: &impl Fn(Event)) -> bool {
-    let stop = e.kind == ErrorKind::Auth;
+    let stop = e.kind.is_auth();
     notify(Event::Error(e));
     stop
 }
@@ -2297,14 +2297,25 @@ mod tests {
             assert_eq!(stages.iter().map(covered).collect::<Vec<_>>(), (0..stages.len()).collect::<Vec<_>>());
             stages.iter().for_each(round);
 
-            let kinds = [ErrorKind::Auth, ErrorKind::Network, ErrorKind::Server, ErrorKind::Protocol, ErrorKind::Storage, ErrorKind::Internal];
+            let kinds = [
+                ErrorKind::Auth,
+                ErrorKind::WindowsSignInUnavailable,
+                ErrorKind::CredentialsRejected,
+                ErrorKind::Network,
+                ErrorKind::Server,
+                ErrorKind::Protocol,
+                ErrorKind::Storage,
+                ErrorKind::Internal,
+            ];
             let covered = |k: &ErrorKind| match k {
                 ErrorKind::Auth => 0,
-                ErrorKind::Network => 1,
-                ErrorKind::Server => 2,
-                ErrorKind::Protocol => 3,
-                ErrorKind::Storage => 4,
-                ErrorKind::Internal => 5,
+                ErrorKind::WindowsSignInUnavailable => 1,
+                ErrorKind::CredentialsRejected => 2,
+                ErrorKind::Network => 3,
+                ErrorKind::Server => 4,
+                ErrorKind::Protocol => 5,
+                ErrorKind::Storage => 6,
+                ErrorKind::Internal => 7,
             };
             assert_eq!(kinds.iter().map(covered).collect::<Vec<_>>(), (0..kinds.len()).collect::<Vec<_>>());
             kinds.iter().for_each(round);

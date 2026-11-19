@@ -27,6 +27,8 @@ use postman_core::invite::{Answer, Responded};
 use std::collections::HashMap;
 
 use postman_calendar::{Busy, Event, EventStatus, Invitation, Partstat, Span};
+use postman_core::backend::remote::AreaSession;
+use postman_core::backend::wire::{TaskDone, TaskOp};
 use postman_core::backend::{AreaCtx, Areas, BoxFuture};
 use postman_core::model::{ContactCard, Feature, Features, Principal};
 use postman_core::schedule::{Meeting, SEARCH_LIMIT};
@@ -730,6 +732,13 @@ impl EwsAreas {
             other => return Some(other),
         }
         None
+    }
+}
+
+impl AreaSession for EwsAreas {
+    /// Задач поверх кэша Exchange не ведёт (`Features` их не объявляет) — ядро команд задач не посылает.
+    fn task_op<'a>(&'a mut self, _op: TaskOp) -> BoxFuture<'a, postman_core::model::Result<TaskDone>> {
+        Box::pin(async { Err(postman_core::model::Error::Protocol("no tasks on the server".into())) })
     }
 }
 

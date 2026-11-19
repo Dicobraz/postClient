@@ -864,8 +864,7 @@ fn windows_sign_in_refused() {
             Err(e) => panic!("нет ошибки входа ({e})"),
         }
     };
-    assert_eq!(err.kind, postman_core::model::ErrorKind::Auth);
-    assert!(err.detail.starts_with(postman_backend_ews::WINDOWS_SIGN_IN_UNAVAILABLE), "{}", err.detail);
+    assert_eq!(err.kind, postman_core::model::ErrorKind::WindowsSignInUnavailable, "{}", err.detail);
     std::thread::sleep(Duration::from_millis(500));
     assert!(live.events.try_iter().all(|e| !matches!(e, Event::Error(_))), "одна ошибка, без повторов");
     assert!(log.lock().unwrap().iter().all(|b| b != "NTLM AUTHENTICATE"), "не вошли");

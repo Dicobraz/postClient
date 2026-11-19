@@ -422,16 +422,19 @@ async fn sign_in(url: &str, user: &str, password: &str) -> Result<(Client, Strin
     Err(last.unwrap_or(postman_ews::Error::Closed))
 }
 
-async fn run(
+/// Синхронизация учётной записи EWS (у ядра — поток, у пути-процесса — то же с услугами по обмену, PLG-08).
+pub(crate) async fn run(
     url: String,
     user: String,
     password: String,
     profile: Option<String>,
     services: MailServices,
     mut rx: UnboundedReceiver<Command>,
-    notify: &impl Fn(Event),
+    notify: &dyn Fn(Event),
 ) {
     let MailServices { store, worker, seal } = services;
+    // Конкретное замыкание вместо `&dyn` — дальше договор как был (`&impl Fn`).
+    let notify = &|e: Event| notify(e);
     notify(Event::Status(Status::Connecting { url: host_of(&url).unwrap_or_default() }));
     let (mut client, ews_url, roles) = match sign_in(&url, &user, &password).await {
         Ok(x) => x,
