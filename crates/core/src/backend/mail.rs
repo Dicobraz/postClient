@@ -47,6 +47,7 @@ pub trait MailCache: Send {
     fn put_content(&self, letter: LetterId, raw: &[u8], split: &[SplitPart]) -> CacheResult<Hash>;
     fn attach_remote(&self, letter: LetterId, link: RemoteRef) -> CacheResult<()>;
     fn upsert_remotes(&self, account: &str, rows: &[(String, LetterRow)]) -> CacheResult<Vec<LetterId>>;
+    fn upsert_folder(&self, row: &FolderRow) -> CacheResult<FolderId>;
     fn remember_senders(&self, senders: &[crate::sync::Sender]) -> CacheResult<()>;
     fn state(&self, kind: &str) -> CacheResult<Option<String>>;
     fn body(&self, id: &str) -> CacheResult<Option<BodyRow>>;
@@ -124,6 +125,10 @@ impl MailCache for LocalCache {
 
     fn upsert_remotes(&self, account: &str, rows: &[(String, LetterRow)]) -> CacheResult<Vec<LetterId>> {
         self.0.upsert_remotes(account, rows)
+    }
+
+    fn upsert_folder(&self, row: &FolderRow) -> CacheResult<FolderId> {
+        self.0.upsert_folder(row)
     }
 
     fn remember_senders(&self, senders: &[crate::sync::Sender]) -> CacheResult<()> {
@@ -251,6 +256,7 @@ pub fn run_cache(cache: &Cache, op: &CacheOp) -> CacheResult<CacheDone> {
         CacheOp::PutContent(letter, raw, split) => local.put_content(*letter, raw, split).map(|_| CacheDone::Done),
         CacheOp::AttachRemote(letter, link) => local.attach_remote(*letter, link.clone()).map(|_| CacheDone::Done),
         CacheOp::UpsertRemotes(account, rows) => local.upsert_remotes(account, rows).map(|_| CacheDone::Done),
+        CacheOp::UpsertFolder(row) => local.upsert_folder(row).map(CacheDone::FolderUpserted),
         CacheOp::RememberSenders(senders) => local.remember_senders(senders).map(|_| CacheDone::Done),
         CacheOp::State(kind) => local.state(kind).map(CacheDone::State),
         CacheOp::Body(id) => local.body(id).map(CacheDone::Body),
@@ -363,6 +369,14 @@ impl MailCache for RemoteCache {
         // Вернувшиеся связи путь не использует: запись как остальные — без ответа.
         self.write(CacheOp::UpsertRemotes(account.to_owned(), rows.to_vec()))?;
         Ok(Vec::new())
+    }
+
+    fn upsert_folder(&self, row: &FolderRow) -> CacheResult<FolderId> {
+        // Ключ папки нужен ответом (RENAME у IMAP перелицовывает ключи писем): вызов с ответом.
+        match self.read(CacheOp::UpsertFolder(row.clone()))? {
+            CacheDone::FolderUpserted(id) => Ok(id),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
     }
 
     fn remember_senders(&self, senders: &[crate::sync::Sender]) -> CacheResult<()> {

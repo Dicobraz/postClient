@@ -53,6 +53,17 @@ pub const PLUGINS: &[SetEntry] = &[
         claim: Claim::Path("/ews/exchange.asmx"),
         serve: postman_backend_ews::serve,
     },
+    // IMAP + SMTP (PLG-09): почта учётки «стандарты», IDLE и отправка SMTP — один сетевой стек с каталогом,
+    // областями и EWS. Хранилище учётки, воркер и S/MIME — услуги ядра по обмену; окно «Отменить» и очередь — у
+    // ядра. Областей у IMAP нет (календарь и контакты учётки ведёт процесс DAV, `?dav=…`). Адрес — своя схема
+    // ([`Claim::Scheme`]: `imaps://` и `imap://` — STARTTLS; префикс `imap` покрывает обе).
+    SetEntry {
+        id: postman_backend_imap::ID,
+        kind: Kind::Mail,
+        profile: Profile::Network { enterprise_auth: false },
+        claim: Claim::Scheme("imap"),
+        serve: postman_backend_imap::serve,
+    },
 ];
 
 /// Плагин набора по id.

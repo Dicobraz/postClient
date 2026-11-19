@@ -58,7 +58,7 @@ impl Live {
         let account = ImapAccount::from_url(&url, &me, &env("POSTMAN_STAND_PASSWORD1")).unwrap();
         let cache = Cache::open_in_memory().unwrap();
         let (tx, events) = std::sync::mpsc::channel();
-        let commands = imap::spawn(account, None, cache.clone(), None, tx, || {});
+        let commands = imap::spawn(account, None, cache.clone(), tx, || {});
         let live = Live { cache, commands, events, me };
         live.wait("Synced", |e| matches!(e, Event::Status(Status::Synced)));
         live
