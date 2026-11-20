@@ -64,7 +64,7 @@ CoreGraphics; в CI — все сцены, артефакт `screens-macos` пр
 
 ## Выпуск
 
-Пользователь скачивает только со страницы [Releases](https://github.com/Dicobraz421/Postman/releases); артефакты
+Пользователь скачивает только со страницы [Releases](https://github.com/Dicobraz/postClient/releases); артефакты
 Actions — для разработки. Схема общая для Pets (скилл pets-dev, `references/releases.md`):
 
 | Файл выпуска | Что это |

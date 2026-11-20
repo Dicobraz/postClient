@@ -13,7 +13,7 @@ use postman_core::prefs::{Channel, Prefs};
 /// Сколько хранить журнал.
 const KEEP: Duration = Duration::from_secs(7 * 86_400);
 /// Выпуски — страница Releases репозитория (схема — docs/DEV.md «Выпуск»).
-const REPO: &str = "https://github.com/Dicobraz421/Postman";
+const REPO: &str = "https://github.com/Dicobraz/postClient";
 
 /// «Все выпуски» в браузере (проверка и установка — `update.rs`): последний стабильный выпуск или все выпуски, с
 /// предварительными.
@@ -137,7 +137,7 @@ mod tests {
         let v = env!("CARGO_PKG_VERSION");
         assert_eq!(
             super::component_download("postman-worker.exe"),
-            format!("https://github.com/Dicobraz421/Postman/releases/download/v{v}/postman-worker.exe")
+            format!("https://github.com/Dicobraz/postClient/releases/download/v{v}/postman-worker.exe")
         );
         assert!(super::releases(super::Channel::Stable).ends_with("/releases/latest"));
         assert!(super::releases(super::Channel::Preview).ends_with("/releases"));

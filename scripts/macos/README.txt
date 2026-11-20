@@ -6,7 +6,7 @@ Postman — почта, календарь и контакты для macOS 13 �
                  и postman-plugins (набор плагинов протоколов, песочница)
   README.txt   — этот файл
 
-Новые версии: https://github.com/Dicobraz421/Postman/releases
+Новые версии: https://github.com/Dicobraz/postClient/releases
 Каналы Telegram и Matrix включаются в «Настройки» → «Каналы»; их файлов в комплекте нет —
 Postman сам предложит «Скачать» (из выпуска своей версии), без интернета — «Установить из файла…».
 

@@ -68,7 +68,7 @@ cargo test --workspace
 
 ## Поставка
 
-Выпуски — [Releases](https://github.com/Dicobraz421/Postman/releases): установщик `postman-<версия>-windows-x64.msi`
+Выпуски — [Releases](https://github.com/Dicobraz/postClient/releases): установщик `postman-<версия>-windows-x64.msi`
 (все пользователи, `Program Files`, нужны права администратора; он же — пакет winget `Pets.Postman`), архив
 `postman-<версия>-windows-x64.zip` (`postman.exe`, `postman-worker.exe`, `postman-viewer.exe`, `README.txt`,
 `install.ps1` — установка для себя без прав администратора), отдельные компоненты; для macOS — образ
