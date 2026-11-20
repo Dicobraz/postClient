@@ -427,7 +427,11 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
     let mut channel_actions = Vec::new();
     for (n, (name, _)) in CHANNELS.iter().enumerate() {
         let prev = format!("PREV{}", name.to_uppercase());
-        channel_actions.push((format!("No{name}"), format!("CHANNELS AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")"), 940 + 2 * n as i32));
+        channel_actions.push((
+            format!("No{name}"),
+            format!("CHANNELS AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")"),
+            940 + 2 * n as i32,
+        ));
         channel_actions.push((
             format!("KeepNo{name}"),
             format!("OLDERFOUND AND NOT CHANNELS AND NOT {prev} AND NOT (REMOVE >< \"{name}\")"),
@@ -568,18 +572,25 @@ mod tests {
             .unwrap()
             .map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned()))
             .collect();
-        for pair in
-            [("Main", "postman.exe"), ("Main", "worker.exe"), ("Telegram", "plugins_telegram.exe"), ("Matrix", "plugins_matrix.exe"), ("Telegram", "telegram_reg"), ("Matrix", "matrix_reg")]
-        {
+        for pair in [
+            ("Main", "postman.exe"),
+            ("Main", "worker.exe"),
+            ("Telegram", "plugins_telegram.exe"),
+            ("Matrix", "plugins_matrix.exe"),
+            ("Telegram", "telegram_reg"),
+            ("Matrix", "matrix_reg"),
+        ] {
             assert!(fc.contains(&(pair.0.into(), pair.1.into())), "{pair:?} not in {fc:?}");
         }
         assert_eq!(fc.len(), 9);
-        let registry: Vec<String> =
-            p.select_rows(Select::table("Registry")).unwrap().map(|r| r[2].as_str().unwrap().to_owned()).collect();
+        let registry: Vec<String> = p.select_rows(Select::table("Registry")).unwrap().map(|r| r[2].as_str().unwrap().to_owned()).collect();
         assert!(registry.iter().all(|key| key == EVENT_KEY || key == CHANNELS_KEY), "{registry:?}");
         // `AppSearch` читает маркеры в PREV* до расчёта стоимости; действия пишут имя фичи в REMOVE.
-        let search: Vec<(String, String)> =
-            p.select_rows(Select::table("AppSearch")).unwrap().map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned())).collect();
+        let search: Vec<(String, String)> = p
+            .select_rows(Select::table("AppSearch"))
+            .unwrap()
+            .map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned()))
+            .collect();
         assert_eq!(search, vec![("PREVTELEGRAM".into(), "TelegramPrevLoc".into()), ("PREVMATRIX".into(), "MatrixPrevLoc".into())]);
         let secure = property(&mut p, "SecureCustomProperties");
         assert!(secure.contains("CHANNELS") && secure.contains("PREVTELEGRAM") && secure.contains("PREVMATRIX"), "{secure}");
@@ -594,7 +605,7 @@ mod tests {
             assert!(seq[2].as_int().unwrap() < 1000, "after CostFinalize: {cond}");
         }
         let keep = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("KeepNoTelegram")).unwrap();
-        assert!(keep[1].as_str().unwrap().starts_with("OLDERFOUND AND NOT CHANNELS AND NOT PREVTELEGRAM"), "{:?}" , keep[1].as_str());
+        assert!(keep[1].as_str().unwrap().starts_with("OLDERFOUND AND NOT CHANNELS AND NOT PREVTELEGRAM"), "{:?}", keep[1].as_str());
 
         // Встроенный CAB читается и содержит файлы под ключами таблицы File.
         let mut cab_bytes = Vec::new();
