@@ -63,9 +63,7 @@ pub(crate) fn state(set: &'static str, cx: &App) -> State {
             Marker::Current => State::Present,
             Marker::Stale => State::Stale,
         },
-        Which::Missing => {
-            cx.try_global::<Model>().and_then(|m| m.states.get(set).cloned()).unwrap_or(State::Offered)
-        }
+        Which::Missing => cx.try_global::<Model>().and_then(|m| m.states.get(set).cloned()).unwrap_or(State::Offered),
     }
 }
 
@@ -135,10 +133,9 @@ pub(crate) fn install_from_file(set: &'static str, path: PathBuf, cx: &mut App) 
     });
     let (tx, rx) = futures::channel::oneshot::channel();
     let local = path.clone();
-    let spawned =
-        std::thread::Builder::new().name(format!("component {set}")).spawn(move || {
-            let _ = tx.send(install_local(set, &local));
-        });
+    let spawned = std::thread::Builder::new().name(format!("component {set}")).spawn(move || {
+        let _ = tx.send(install_local(set, &local));
+    });
     if let Err(e) = spawned {
         tracing::error!(component = set, "component thread not started: {e}");
         edit(cx, |m| {
@@ -205,10 +202,7 @@ pub(crate) fn download(set: &'static str, cx: &mut App) {
     let received = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
     edit(cx, |m| {
-        m.states.insert(
-            set.to_owned(),
-            State::Busy { received: Arc::clone(&received), total: Arc::clone(&total), cancel: cancel.clone() },
-        );
+        m.states.insert(set.to_owned(), State::Busy { received: Arc::clone(&received), total: Arc::clone(&total), cancel: cancel.clone() });
     });
     let (tx, rx) = futures::channel::oneshot::channel();
     let spawned = std::thread::Builder::new().name(format!("component {set}")).spawn(move || {
@@ -228,19 +222,19 @@ pub(crate) fn download(set: &'static str, cx: &mut App) {
     })
     .detach();
     // Полоса хода перерисовывается, пока идёт скачивание (как у обновления).
-    cx.spawn(async move |cx| loop {
-        cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-        let going = cx.update(|cx| {
-            let going = cx
-                .try_global::<Model>()
-                .is_some_and(|m| m.states.values().any(|s| matches!(s, State::Busy { .. })));
-            if going {
-                edit(cx, |_| {});
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+            let going = cx.update(|cx| {
+                let going = cx.try_global::<Model>().is_some_and(|m| m.states.values().any(|s| matches!(s, State::Busy { .. })));
+                if going {
+                    edit(cx, |_| {});
+                }
+                going
+            });
+            if !going {
+                return;
             }
-            going
-        });
-        if !going {
-            return;
         }
     })
     .detach();
@@ -358,13 +352,7 @@ fn pick(releases: &serde_json::Value, name: &str) -> Option<(String, u64)> {
 }
 
 /// Поток в файл с отменой и точным размером (как `fetch` крейта обновления).
-fn write_stream(
-    mut body: Box<dyn std::io::Read>,
-    mut out: std::fs::File,
-    total: u64,
-    cancel: &Cancel,
-    received: &AtomicU64,
-) -> Result<(), String> {
+fn write_stream(mut body: Box<dyn std::io::Read>, mut out: std::fs::File, total: u64, cancel: &Cancel, received: &AtomicU64) -> Result<(), String> {
     use std::io::Write as _;
     let mut buf = vec![0u8; 64 * 1024];
     let mut got = 0u64;
@@ -467,7 +455,7 @@ fn marker_at(base: &Path, set: &str) -> Marker {
 mod tests {
     // Без `use super::*`: глоб-импорты поверх двойных глобов gpui_kit уводят раскрутку компилятора в глубину
     // (recursion limit даже на тривиальном тесте) — только явные имена.
-    use super::{asset_name, extract, install_at, marker_at, pick, Marker};
+    use super::{Marker, asset_name, extract, install_at, marker_at, pick};
     use pets_update::{ARCH, OS};
     use serde_json::Value;
     use std::path::Path;
@@ -500,10 +488,7 @@ mod tests {
             release("v0.0.1".into(), vec![asset("old.zip".into(), "https://x/old.zip".into(), 1)]),
             release(
                 format!("v{v}"),
-                vec![
-                    asset(name.clone(), "https://x/t.zip".into(), 10),
-                    asset(format!("{name}.minisig"), "https://x/t.zip.minisig".into(), 1),
-                ],
+                vec![asset(name.clone(), "https://x/t.zip".into(), 10), asset(format!("{name}.minisig"), "https://x/t.zip.minisig".into(), 1)],
             ),
         ]);
         let (url, size) = pick(&json, &name).unwrap();
@@ -566,10 +551,7 @@ mod tests {
         w.finish().unwrap();
         let base = tempfile::tempdir().unwrap();
         assert_eq!(install_at(base.path(), &zip).unwrap(), set);
-        assert_eq!(
-            std::fs::read(base.path().join(exe)).unwrap(),
-            b"MZ component".as_slice()
-        );
+        assert_eq!(std::fs::read(base.path().join(exe)).unwrap(), b"MZ component".as_slice());
         assert_eq!(marker_at(base.path(), set), Marker::Current);
         let other = tmp.path().join("other.zip");
         let file = std::fs::File::create(&other).unwrap();
