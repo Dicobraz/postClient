@@ -651,4 +651,60 @@ mod tests {
         assert_eq!(got, (Fetched::Body { etag: Some("\"8\"".into()) }, vec![0xAB; 4]));
         assert_eq!(*lock(&plugin.idle), Some(IDLE_EXIT), "сессий нет — простой возвращён");
     }
+
+    /// Запуск с заранее собранным `Started` (каналы пайпов нельзя клонировать — один `launch`).
+    struct LaunchOnce(std::sync::Mutex<Option<super::super::Started>>);
+
+    impl super::super::Launcher for LaunchOnce {
+        fn launch(&self, _row: &Row) -> std::io::Result<super::super::Started> {
+            self.0.lock().unwrap().take().ok_or_else(|| std::io::Error::other("launched once"))
+        }
+    }
+
+    /// Сервер областей, чья задача паникует (PLG-12, хвост PLG-07): заместитель получает отказ, а не вечное
+    /// ожидание (`Conn::ask` — oneshot без таймаута).
+    struct PanicServer;
+    impl AreaServer for PanicServer {
+        fn probe<'a>(&'a self, _host: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async move { None })
+        }
+
+        fn connect<'a>(&'a self, _url: &'a str, _login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn AreaSession>, Error>> {
+            Box::pin(async move {
+                // Паника внутри задачи `spawn_local`, не синхронно: её ловит граница `spawn_quiet`.
+                tokio::task::yield_now().await;
+                panic!("mock: the area task panics mid-connect")
+            })
+        }
+
+        fn fetch<'a>(&'a self, _url: &'a str, _max: u32, _etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>> {
+            Box::pin(async { Err("mock: nothing to fetch".to_owned()) })
+        }
+    }
+
+    #[test]
+    fn a_panicking_task_answers_a_refusal() {
+        let (from_plugin, plugin_out) = pipe().unwrap();
+        let (plugin_in, to_plugin) = pipe().unwrap();
+        std::thread::spawn(move || {
+            let link = Link::new(plugin_in, plugin_out, super::super::MAX_BIN).unwrap();
+            serve_area(link, "dav", || Arc::new(PanicServer))
+        });
+        let started = super::super::Started {
+            link: Link::new(from_plugin, to_plugin, super::super::MAX_BIN).unwrap(),
+            kill: Box::new(|| {}),
+            exit_code: Box::new(|| None),
+            background: Box::new(|_| Ok(())),
+        };
+        let host = super::super::Host::new(Arc::new(LaunchOnce(std::sync::Mutex::new(Some(started)))), super::super::Settings::default());
+        host.first_frame();
+        let area = host.area(ROW);
+        let waited = std::time::Duration::from_secs(30);
+        let outcome = rt().block_on(async { tokio::time::timeout(waited, area.connect("https://dav.example.test", &login(), None)).await });
+        match outcome {
+            Ok(Err(_)) => {} // паника задачи — отказ по обмену, заместитель не висит
+            Ok(Ok(_)) => panic!("паника задачи дошла как успех"),
+            Err(_) => panic!("паника задачи подвесила заместителя — защиты нет"),
+        }
+    }
 }
