@@ -1219,7 +1219,7 @@ async fn handle(
         Command::Settings(request) => settings::handle(client, request, &|r| notify(Event::Settings(r))).await,
         Command::Categories(request) => {
             let notify = |r| notify(Event::Categories(r));
-            categories::handle(client, &accounts.own.id, Some(&*cache), request, &notify).await;
+            categories::handle(client, &accounts.own.id, Some(cache), request, &notify).await;
         }
         Command::Tasks(request) => {
             tasks::handle(&JmapStore::new(client), &MailTasks(cache), request, &|r| notify(Event::Tasks(r))).await?;

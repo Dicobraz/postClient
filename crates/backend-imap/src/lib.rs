@@ -38,7 +38,7 @@ use postman_imap::state::{FolderState, Plan};
 use postman_imap::{AppendError, Config, Header, Role, Security, Session, flags, smtp, uid_set};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use postman_core::backend::mail::{MailCache, MailSeal, MailServer, MailServices, MailWorker, NopIndex};
+use postman_core::backend::mail::{MailCache, MailSeal, MailServer, MailServices, MailWorker};
 use postman_core::backend::remote::{AreaServer, AreaSession, FetchedBody, PluginLink, serve_mail_area};
 use postman_core::backend::wire::MailLogin;
 use postman_core::backend::{BoxFuture, Login, MailPlugin, Spawn};
