@@ -2,6 +2,8 @@
 # (ADR 0010, seccomp + Landlock + namespaces). Ubuntu 23.10+ allows it only to binaries with a profile that says
 # "userns". The profiles do not confine anything else (unconfined): the sandbox itself is the process's. Installed by
 # the deb and rpm (scripts/linux/data/apparmor.sh) only where AppArmor 4 is present.
+# The channel components (PLG-17, owner decision 2026-11-19) do not live in /usr/bin: the app downloads them into
+# the components folder of the profile (PLG-15), so their profile attaches to that folder by pattern.
 abi <abi/4.0>,
 include <tunables/global>
 
@@ -23,14 +25,8 @@ profile postman-plugins /usr/bin/postman-plugins flags=(unconfined) {
   include if exists <local/postman-plugins>
 }
 
-profile postman-plugins-telegram /usr/bin/postman-plugins-telegram flags=(unconfined) {
+profile postman-components /home/*/.local/share/Postman/Components/** flags=(unconfined) {
   userns,
 
-  include if exists <local/postman-plugins-telegram>
-}
-
-profile postman-plugins-matrix /usr/bin/postman-plugins-matrix flags=(unconfined) {
-  userns,
-
-  include if exists <local/postman-plugins-matrix>
+  include if exists <local/postman-components>
 }

@@ -66,9 +66,10 @@ Actions — для разработки. Схема общая для Pets (ск
 
 | Файл выпуска | Что это |
 |---|---|
-| `postman-<версия>-windows-x64.msi` | Установщик для всех пользователей (`tools/pack`, решение 2026-11-07); его же ставит winget `Pets.Postman` |
-| `postman-<версия>-windows-x64.zip` | Комплект целиком с `install.ps1` (для себя, без прав администратора) |
+| `postman-<версия>-windows-x64.msi` | Установщик для всех пользователей (`tools/pack`, решение 2026-11-07); его же ставит winget `Pets.Postman`. Каналы Telegram и Matrix — внутри, по умолчанию ставятся (PLG-13); состав сетевой раскатки — `CHANNELS` |
+| `postman-<версия>-windows-x64.zip` | Комплект целиком с `install.ps1` (для себя, без прав администратора); без файлов каналов — их докачивает приложение (PLG-17, решение 2026-11-19) |
 | `postman-worker.exe`, `postman-viewer.exe` | Компоненты Windows под своими именами — скачать один файл вместо всего («Нет компонента», S8-38) |
+| `postman-plugins-telegram-<ОС>-<арх>.zip`, `postman-plugins-matrix-…zip` (+ `.minisig`) | Компоненты каналов (PLG-17, решение 2026-11-19 «components»): докачивает приложение (PLG-15) или ставит `postman --install-component <файл>` офлайн (PLG-16) |
 | `postman-<версия>-macos-arm64.dmg` | macOS 13+, Apple Silicon (MAC-06): образ диска — `Postman.app`, `README.txt` и ярлык `Applications`, куда перетащить приложение |
 | `postman-<версия>-macos-arm64.zip` | То же `Postman.app` и `README.txt` архивом (`ditto`); из него самообновление заменяет бандл целиком |
 | `postman-<версия>-linux-x64.AppImage` | Linux x86_64 (LIN-06): один файл для любого дистрибутива (`chmod +x` и запуск) |
