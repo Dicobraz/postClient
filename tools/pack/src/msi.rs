@@ -35,9 +35,11 @@ const EVENT_MESSAGES: &str = r"#%%SystemRoot%\Microsoft.NET\Framework64\v4.0.303
 /// Компонент 64-битный: реестр и папки — без перенаправления WOW64.
 const COMPONENT_64BIT: i32 = 256;
 const FILE_VITAL: i32 = 512;
-/// 18 — exe из установленного файла (`Source` — ключ `File`), +64 — код возврата не важен: отказ не ломает удаление.
-/// Без флагов отложенного — immediate, от имени пользователя: профиль AppContainer в его HKCU, SYSTEM его не видит.
-const CA_EXE_IGNORE: i32 = 18 + 64;
+/// 34 — exe из пути (формат-строка в `Target`, `Source` — рабочая папка), +32 — код возврата не важен: отказ
+/// не ломает удаление. Без флагов отложенного — immediate, от имени пользователя: профиль AppContainer в его
+/// HKCU, SYSTEM его не видит. Не Type 18: в сессии удаления старой версии (RemoveExistingProducts) exe из
+/// таблицы File «не помечен к установке» — фатальный 2753; формат-путь резолвится в установленный файл всегда.
+const CA_EXE_IGNORE: i32 = 34 + 32;
 /// Только полное удаление; при обновлении (старую версию снимает новая) профиль нужен дальше.
 const ON_REMOVE: &str = "REMOVE~=\"ALL\" AND NOT UPGRADINGPRODUCTCODE";
 /// Ключ-маркер состава каналов (PLG-13): значение с именем фичи — канал установлен; нет значения — канал не
@@ -433,7 +435,7 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
     let mut action_rows = vec![
         vec![s("PreventDowngrade"), i(19), NULL, s("A newer version of Postman is already installed.")],
         vec![s("SetInstallLocation"), i(51), s("ARPINSTALLLOCATION"), s("[INSTALLDIR]")],
-        vec![s("RemoveAppContainer"), i(CA_EXE_IGNORE), s("worker.exe"), s("--remove-appcontainer")],
+        vec![s("RemoveAppContainer"), i(CA_EXE_IGNORE), s("INSTALLDIR"), s("\"[#worker.exe]\" --remove-appcontainer")],
     ];
     // Условия состава каналов (PLG-13): CHANNELS задаёт точный состав (не назван — в REMOVE); при обновлении без
     // CHANNELS маркеры держат прошлый состав (не было — остаётся без). Явный REMOVE важнее всего.
@@ -652,7 +654,10 @@ mod tests {
 
         // PAR-05: при полном удалении воркер снимает профиль AppContainer; отказ не ломает удаление.
         let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some("RemoveAppContainer")).unwrap();
-        assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(82), Some("worker.exe"), Some("--remove-appcontainer")));
+        assert_eq!(
+            (ca[1].as_int(), ca[2].as_str(), ca[3].as_str()),
+            (Some(CA_EXE_IGNORE), Some("INSTALLDIR"), Some("\"[#worker.exe]\" --remove-appcontainer"))
+        );
         let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("RemoveAppContainer")).unwrap();
         assert_eq!((seq[1].as_str(), seq[2].as_int()), (Some(ON_REMOVE), Some(1450)));
     }
