@@ -5,13 +5,16 @@
   postman-worker.exe  — изолированный разбор писем (песочница); всегда рядом с postman.exe
   postman-viewer.exe  — просмотр вложений модулями (песочница); рядом с postman.exe
   postman-plugins.exe — набор плагинов протоколов (песочница); рядом с postman.exe
+  postman-plugins-telegram.exe — канал Telegram (песочница); ставится MSI по умолчанию
+  postman-plugins-matrix.exe — канал Matrix (песочница); ставится MSI по умолчанию
   install.ps1         — (только в архиве) установка для текущего пользователя, без прав администратора
   postman.portable    — (только в архиве) метка: эта копия обновляется из архива, а не из MSI
   README.txt          — этот файл
 
 Новые версии и отдельные файлы: https://github.com/Dicobraz421/Postman/releases
 Пропал postman-worker.exe или postman-viewer.exe — скачайте только его из выпуска своей версии
-и положите рядом с postman.exe; переустанавливать не нужно.
+и положите рядом с postman.exe; переустанавливать не нужно. Компонент канала (Telegram, Matrix)
+Postman предложит скачать сам: «Настройки» → «Каналы» → «Скачать», без интернета — «Установить из файла…».
 
 УСТАНОВКА
 
@@ -22,6 +25,10 @@
   Тихая установка, например для MDM или групповой политики:
     msiexec /i postman-<версия>-windows-x64.msi /qn
   Другая папка:  msiexec /i postman-<версия>-windows-x64.msi INSTALLDIR="D:\Apps\Postman"
+  Каналы (Telegram, Matrix) ставятся сразу все. Для раскатки можно выбрать состав — свойство CHANNELS:
+    msiexec /i postman-<версия>-windows-x64.msi /qn CHANNELS=none          только почта и каталог
+    msiexec /i postman-<версия>-windows-x64.msi /qn CHANNELS=Telegram,Matrix
+  Выбор переживает обновления; снять канал:  msiexec /i postman-<версия>-windows-x64.msi REMOVE=Telegram
   Обновление — новый MSI поверх (перед ним выйдите из Postman: «Выход» в меню значка в трее); старую версию поверх новой MSI не ставит.
   Удаление — «Параметры» → «Приложения» → Postman → «Удалить» или  msiexec /x <файл .msi> /qn
   В «Приложениях» у бета-версий свой номер: 0.1.0-beta.2 показывается как 0.1.302.

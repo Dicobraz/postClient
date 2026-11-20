@@ -3,7 +3,9 @@ Postman — почта, календарь и контакты для macOS 13 �
 Файлы:
   Postman.app  — приложение; внутри (Contents/MacOS) — postman, postman-worker (изолированный разбор писем,
                  песочница Seatbelt), postman-viewer (просмотр вложений модулями, песочница)
-                 и postman-plugins (набор плагинов протоколов, песочница)
+                 и postman-plugins (набор плагинов протоколов, песочница);
+                 там же postman-plugins-telegram и postman-plugins-matrix — каналы Telegram
+                 и Matrix (песочница), включаются в «Настройки» → «Каналы»
   README.txt   — этот файл
 
 Новые версии: https://github.com/Dicobraz421/Postman/releases

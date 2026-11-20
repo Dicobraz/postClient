@@ -7513,7 +7513,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-dav"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "percent-encoding",
@@ -7531,7 +7531,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-ews"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "postman-cache",
@@ -7547,7 +7547,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-imap"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "postman-backend-dav",
@@ -7566,7 +7566,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-jmap"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "postman-cache",
@@ -7589,7 +7589,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-ldap"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "ldap3",
  "postman-backend-ldap",
@@ -7607,7 +7607,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-matrix"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7633,7 +7633,7 @@ dependencies = [
 
 [[package]]
 name = "postman-backend-telegram"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "grammers-crypto",
  "grammers-mtsender",
@@ -7653,7 +7653,7 @@ dependencies = [
 
 [[package]]
 name = "postman-cache"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "redb",
@@ -7665,7 +7665,7 @@ dependencies = [
 
 [[package]]
 name = "postman-calendar"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "postman-worker",
@@ -7675,7 +7675,7 @@ dependencies = [
 
 [[package]]
 name = "postman-compose"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "mail-builder",
  "mail-parser",
@@ -7687,7 +7687,7 @@ dependencies = [
 
 [[package]]
 name = "postman-core"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "core-foundation 0.10.1",
  "cpu-time",
@@ -7722,7 +7722,7 @@ dependencies = [
 
 [[package]]
 name = "postman-dav"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "percent-encoding",
@@ -7738,7 +7738,7 @@ dependencies = [
 
 [[package]]
 name = "postman-demo"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "png 0.17.16",
@@ -7753,7 +7753,7 @@ dependencies = [
 
 [[package]]
 name = "postman-ews"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -7783,7 +7783,7 @@ dependencies = [
 
 [[package]]
 name = "postman-export"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "cfb",
  "msg_parser",
@@ -7792,7 +7792,7 @@ dependencies = [
 
 [[package]]
 name = "postman-gpui"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "ashpd",
  "embed-resource",
@@ -7836,7 +7836,7 @@ dependencies = [
 
 [[package]]
 name = "postman-imap"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "async-imap",
  "encoding_rs",
@@ -7851,7 +7851,7 @@ dependencies = [
 
 [[package]]
 name = "postman-ir"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "html5ever 0.40.1",
  "markup5ever_rcdom 0.40.1+unofficial",
@@ -7863,7 +7863,7 @@ dependencies = [
 
 [[package]]
 name = "postman-jmap"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -7876,7 +7876,7 @@ dependencies = [
 
 [[package]]
 name = "postman-pack"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cab",
@@ -7888,7 +7888,7 @@ dependencies = [
 
 [[package]]
 name = "postman-plugins"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "postman-backend-dav",
@@ -7907,7 +7907,7 @@ dependencies = [
 
 [[package]]
 name = "postman-plugins-matrix"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "postman-backend-matrix",
@@ -7921,7 +7921,7 @@ dependencies = [
 
 [[package]]
 name = "postman-plugins-telegram"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "postman-backend-telegram",
@@ -7935,7 +7935,7 @@ dependencies = [
 
 [[package]]
 name = "postman-proc"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "landlock",
  "libc",
@@ -7948,7 +7948,7 @@ dependencies = [
 
 [[package]]
 name = "postman-search"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "tantivy",
  "tempfile",
@@ -7956,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "postman-smime"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "aes 0.9.4",
  "aes-gcm",
@@ -7989,7 +7989,7 @@ dependencies = [
 
 [[package]]
 name = "postman-worker"
-version = "0.1.0-beta.7"
+version = "0.2.0"
 dependencies = [
  "calcard",
  "cfb",
