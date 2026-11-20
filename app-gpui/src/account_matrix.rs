@@ -468,6 +468,11 @@ impl Render for Panel {
                 );
             out = out.child(crate::settings_channels::account_row(line.state.as_ref(), name, state, actions, &l));
         }
+        // Компонент канала (PLG-15): файла набора нет или он после обновления — скачать из выпуска.
+        let component = crate::components::state(crate::plugins::MATRIX_SET, cx);
+        if let Some(comp) = crate::components::row(crate::plugins::MATRIX_SET, &component, &l) {
+            out = out.child(comp);
+        }
         if self.flow.is_some() {
             out = out.child(div().pt_3().child(self.flow_card(&l, cx)));
         }

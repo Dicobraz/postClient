@@ -329,6 +329,14 @@ impl Host {
         self.0.opened.notify_all();
     }
 
+    /// Компонент `id` установлен (PLG-15): разбудить «проблему» («Повторить» без пользователя) — поток запуска
+    /// поднимет процесс, как только плагин понадобится. Не поднятый плагин просто начнёт запуск по запросу.
+    pub fn retry(&self, id: &'static str) {
+        if let Some(p) = lock(&self.0.plugins).get(id) {
+            p.retry();
+        }
+    }
+
     /// Новые настройки — запущенным процессам сейчас, остальным — в `Hello`.
     pub fn set_settings(&self, settings: Settings) {
         *lock(&self.0.settings) = settings.clone();

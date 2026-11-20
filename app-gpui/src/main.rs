@@ -26,6 +26,7 @@ mod chat_extra;
 mod chat_list;
 mod chat_pane;
 mod chat_tree;
+mod components;
 mod chats;
 mod chrome;
 mod comfort;
