@@ -38,7 +38,7 @@ use postman_imap::state::{FolderState, Plan};
 use postman_imap::{AppendError, Config, Header, Role, Security, Session, flags, smtp, uid_set};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use postman_core::backend::mail::{MailCache, MailSeal, MailServer, MailServices, MailWorker};
+use postman_core::backend::mail::{MailCache, MailSeal, MailServer, MailServices, MailWorker, NopIndex};
 use postman_core::backend::remote::{AreaServer, AreaSession, FetchedBody, PluginLink, serve_mail_area};
 use postman_core::backend::wire::MailLogin;
 use postman_core::backend::{BoxFuture, Login, MailPlugin, Spawn};
@@ -480,6 +480,7 @@ pub fn spawn(
                 postman_core::backend::mail::WORKER_TIMEOUT,
             )),
             seal: Box::new(postman_core::backend::mail::LocalSeal),
+            index: Box::new(postman_core::backend::mail::NopIndex),
         };
         run(account, profile, services, rx, &|e| notify.send(e)).await;
     });
@@ -501,7 +502,7 @@ struct Imap {
 }
 
 async fn run(account: ImapAccount, profile: Option<String>, services: MailServices, mut rx: UnboundedReceiver<Command>, notify: &dyn Fn(Event)) {
-    let MailServices { store, worker, seal } = services;
+    let MailServices { store, worker, seal, .. } = services;
     notify(Event::Status(Status::Connecting { url: format!("{}:{}", account.imap.host, account.imap.port) }));
     let session = match Session::connect(&account.imap).await {
         Ok(s) => s,

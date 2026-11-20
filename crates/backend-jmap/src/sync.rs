@@ -18,6 +18,7 @@ use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, M
 use postman_calendar::{Invitation, Partstat};
 use postman_compose::{Address, Attachment, Draft};
 use postman_core::backend::BoxFuture;
+use postman_core::backend::mail::{MailCache, MailIndex, MailSeal, MailTasks, MailWorker};
 use postman_core::invite::Delivery;
 use postman_core::lifecycle;
 use postman_core::link::{Connection, Link};
@@ -65,6 +66,8 @@ const PEOPLE_FROM: usize = 3;
 /// Тела писем беседы: части больше — усекаются сервером (как у открытого письма — до 4 МБ, здесь писем много).
 const THREAD_BODY_BYTES: u64 = 1024 * 1024;
 
+/// Синхронизация учётной записи внутри `postman.exe` — для тестов и стенда; в наборе путь — [`JmapServer`]
+/// (PLG-10). Услуги ядра — настоящими ([`postman_core::backend::mail::LocalCache`], [`LocalIndex`]).
 pub fn spawn(
     account: Account,
     cache: Cache,
@@ -89,18 +92,33 @@ pub fn spawn_as(
 ) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     postman_core::sync::spawn_thread("sync", events, Box::new(repaint), move |notify| async move {
-        let mut session = Jmap { account, profile, cache, index };
+        let store = Box::new(postman_core::backend::mail::LocalCache(cache.clone()));
+        let index = Box::new(postman_core::backend::mail::LocalIndex::new(index, cache));
+        let mut session = Jmap {
+            account,
+            profile,
+            store,
+            index,
+            worker: Box::new(postman_core::backend::mail::LocalWorker::new(
+                postman_worker::Client::default_exe(),
+                postman_core::backend::mail::WORKER_TIMEOUT,
+            )),
+            seal: Box::new(postman_core::backend::mail::LocalSeal),
+        };
         supervise(&mut session, rx, &|e| notify.send(e)).await;
     });
     tx
 }
 
-/// Сессия JMAP для общего цикла: каждая попытка входа — с начала (`run`).
-struct Jmap {
-    account: Account,
-    profile: Option<String>,
-    cache: Cache,
-    index: Index,
+/// Сессия JMAP для общего цикла: каждая попытка входа — с начала (`run`). Хранилище и индекс живут между
+/// попытками (услуги ядра [`MailServices`] на стороне процесса; внутри `postman.exe` — настоящие).
+pub struct Jmap {
+    pub account: Account,
+    pub profile: Option<String>,
+    pub store: Box<dyn MailCache>,
+    pub index: Box<dyn MailIndex>,
+    pub worker: Box<dyn MailWorker>,
+    pub seal: Box<dyn MailSeal>,
 }
 
 impl Session for Jmap {
@@ -110,7 +128,8 @@ impl Session for Jmap {
         link: &'a mut Link<Command>,
         notify: &'a dyn Fn(Event),
     ) -> BoxFuture<'a, Result<(), SyncError>> {
-        let (account, profile, cache, index) = (self.account.clone(), self.profile.clone(), self.cache.clone(), self.index.clone());
+        let (account, profile) = (self.account.clone(), self.profile.clone());
+        let (cache, index): (&dyn MailCache, &dyn MailIndex) = (&*self.store, &*self.index);
         Box::pin(async move { run(account, profile, cache, index, rx, link, &notify).await })
     }
 }
@@ -282,13 +301,15 @@ fn account_row(a: &SharedAccount) -> AccountRow {
 async fn run(
     account: Account,
     profile: Option<String>,
-    mut cache: Cache,
-    index: Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     rx: &mut UnboundedReceiver<Command>,
     link: &mut Link<Command>,
     notify: &impl Fn(Event),
 ) -> Result<(), SyncError> {
     notify(Event::Status(Status::Connecting { url: account.url.clone() }));
+    // Политику TLS процесс берёт из настроек ядра (`Hello` и смены), как у областей в наборе (PLG-07).
+    postman_jmap::set_tls13_only(postman_core::backend::remote::settings().tls13_only);
     let client = Client::connect(&account.url, account.auth.to_jmap()).await.map_err(|e| sync_error(Stage::Connect, &e))?;
     notify(Event::Status(Status::SignedIn { user: client.session().username.clone() }));
     let own_id = client.mail_account().map_err(|e| sync_error(Stage::Connect, &e))?.to_string();
@@ -334,7 +355,7 @@ async fn run(
         })
         .collect();
     // Адреса ящиков — в адреса бесед писем (ADR 0012, поиск `беседа:`).
-    postman_core::channel::mail::remember_senders(&cache, &senders);
+    let _ = cache.remember_senders(&senders);
     notify(Event::Senders(senders));
     // Контакты, справочник, правила, автоответ, категории и задачи — у основной учётной записи (S7-03б).
     if main {
@@ -345,7 +366,7 @@ async fn run(
         let shared_ids: Vec<String> = shared.iter().map(|a| a.id.clone()).collect();
         categories::load_all(&client, &own_id, &shared_ids, &|r| notify(Event::Categories(r))).await;
         // Задачи — из кэша сразу, с сервера — дельта; сбой не мешает почте (повтор — по push календаря).
-        if let Err(e) = tasks::handle(&JmapStore::new(&client), &cache, tasks::Request::Load, &|r| notify(Event::Tasks(r))).await {
+        if let Err(e) = tasks::handle(&JmapStore::new(&client), &MailTasks(cache), tasks::Request::Load, &|r| notify(Event::Tasks(r))).await {
             tracing::warn!("jmap: tasks load failed, retry later: {e}");
         }
     }
@@ -357,10 +378,10 @@ async fn run(
         profile: profile.clone(),
         me: me.filter(|_| !main),
     };
-    accounts.own.state = Some(start_state(&accounts.own, &mut cache, &index, notify).await.map_err(|e| sync_error(Stage::Load, &e))?);
+    accounts.own.state = Some(start_state(&accounts.own, cache, index, notify).await.map_err(|e| sync_error(Stage::Load, &e))?);
     let mut opened = Vec::with_capacity(accounts.shared.len());
     for mut acc in std::mem::take(&mut accounts.shared) {
-        match start_state(&acc, &mut cache, &index, notify).await {
+        match start_state(&acc, cache, index, notify).await {
             Ok(s) => acc.state = Some(s),
             // Открыт только календарь (`read` на него у Stalwart даёт аккаунт в сессии, а почта — `forbidden`): почты здесь нет,
             // это не ошибка, и сверять такой аккаунт незачем. Календарь идёт своим путём (`schedule.rs`).
@@ -381,7 +402,7 @@ async fn run(
     }
     accounts.shared = opened;
     notify(Event::Status(Status::Synced));
-    notify_scheduled(&accounts, &cache, &send_as, notify).await;
+    notify_scheduled(&accounts, cache, &send_as, notify).await;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
     let (push_tx, mut push_rx) = unbounded_channel::<Changed>();
@@ -399,7 +420,7 @@ async fn run(
     if let Some(queued) = link.ok() {
         notify(Event::Connection(Connection::Online));
         let ctx = Ctx { accounts: &accounts, identities: &identities, send_as: &send_as };
-        match replay(&ctx, &mut cache, &index, link, queued, notify).await {
+        match replay(&ctx, cache, index, link, queued, notify).await {
             Replayed::Stop => return Ok(()),
             Replayed::Down(at) => retry = Some(at),
             Replayed::Done => {}
@@ -441,12 +462,12 @@ async fn run(
                 let more = matches!(cmd, Command::LoadMore { .. });
                 let again = cmd.replayable();
                 let ctx = Ctx { accounts: &accounts, identities: &identities, send_as: &send_as };
-                match handle(ctx.accounts, &mut cache, &index, ctx.identities, ctx.send_as, cmd, notify).await {
+                match handle(ctx.accounts, cache, index, ctx.identities, ctx.send_as, cmd, notify).await {
                     Ok(()) => {
                         if let Some(queued) = link.ok() {
                             notify(Event::Connection(Connection::Online));
                             retry = None;
-                            match replay(&ctx, &mut cache, &index, link, queued, notify).await {
+                            match replay(&ctx, cache, index, link, queued, notify).await {
                                 Replayed::Stop => return Ok(()),
                                 Replayed::Down(at) => retry = Some(at),
                                 Replayed::Done => {}
@@ -475,12 +496,12 @@ async fn run(
                 retry = None;
                 let mut outcome = Refreshed::Done;
                 for acc in accounts.all_mut() {
-                    outcome = outcome.max(apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await);
+                    outcome = outcome.max(apply_refresh(acc, cache, index, &mut prefetch, notify).await);
                     if outcome != Refreshed::Done {
                         break;
                     }
                 }
-                let next = after_refresh(outcome, true, &accounts, &identities, &send_as, &mut cache, &index, link, notify).await;
+                let next = after_refresh(outcome, true, &accounts, &identities, &send_as, cache, index, link, notify).await;
                 if std::mem::take(&mut send_receive) {
                     // Очередь без связи ушла в `after_refresh`; связь пропала посреди — ошибка (её род — `Event::Error`).
                     let error = (outcome != Refreshed::Done || matches!(next, Next::Retry(Some(_)))).then(|| "no connection".to_owned());
@@ -508,12 +529,12 @@ async fn run(
                 }
                 let mut outcome = Refreshed::Done;
                 for acc in accounts.all_mut().filter(|a| changed.mail.touches(&a.id)) {
-                    outcome = outcome.max(apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await);
+                    outcome = outcome.max(apply_refresh(acc, cache, index, &mut prefetch, notify).await);
                     if outcome == Refreshed::Stop {
                         return Ok(());
                     }
                 }
-                match after_refresh(outcome, false, &accounts, &identities, &send_as, &mut cache, &index, link, notify).await {
+                match after_refresh(outcome, false, &accounts, &identities, &send_as, cache, index, link, notify).await {
                     Next::Stop => return Ok(()),
                     Next::Retry(at) => retry = at,
                     Next::Keep => {}
@@ -524,7 +545,7 @@ async fn run(
                     // Задачи — те же записи календаря (`CalendarEvent`): сверить и их (задачи — у основной учётной записи).
                     let store = JmapStore::new(&accounts.own.client);
                     if accounts.profile.is_none()
-                        && let Err(e) = tasks::handle(&store, &cache, tasks::Request::Refresh, &|r| notify(Event::Tasks(r))).await
+                        && let Err(e) = tasks::handle(&store, &MailTasks(cache), tasks::Request::Refresh, &|r| notify(Event::Tasks(r))).await
                     {
                         tracing::warn!("jmap: tasks refresh failed, retry later: {e}");
                     }
@@ -534,12 +555,12 @@ async fn run(
             _ = poll.tick() => {
                 let mut outcome = Refreshed::Done;
                 for acc in accounts.all_mut() {
-                    outcome = outcome.max(apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await);
+                    outcome = outcome.max(apply_refresh(acc, cache, index, &mut prefetch, notify).await);
                     if outcome == Refreshed::Stop {
                         return Ok(());
                     }
                 }
-                match after_refresh(outcome, false, &accounts, &identities, &send_as, &mut cache, &index, link, notify).await {
+                match after_refresh(outcome, false, &accounts, &identities, &send_as, cache, index, link, notify).await {
                     Next::Stop => return Ok(()),
                     Next::Retry(at) => retry = at,
                     Next::Keep => {}
@@ -554,7 +575,7 @@ async fn run(
             _ = std::future::ready(()), if !prefetch.is_empty() && !link.is_down() => {
                 let n = prefetch.len().min(PREFETCH_BATCH);
                 let keys: Vec<String> = prefetch.drain(..n).collect();
-                match prefetch_bodies(&accounts, &cache, &keys).await {
+                match prefetch_bodies(&accounts, cache, &keys).await {
                     Ok(stored) => notify(Event::BodiesStored(stored)),
                     Err(e) => {
                         // Не долбим сервер: остаток подберёт следующий опрос.
@@ -590,8 +611,8 @@ enum Replayed {
 /// Связь вернулась: правки из очереди — на сервер по порядку. Сеть пропала посреди — остаток снова в очередь.
 async fn replay(
     ctx: &Ctx<'_>,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     link: &mut Link<Command>,
     queued: Vec<Command>,
     notify: &impl Fn(Event),
@@ -633,8 +654,8 @@ async fn after_refresh(
     accounts: &Accounts,
     identities: &[Identity],
     send_as: &[SendAs],
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     link: &mut Link<Command>,
     notify: &impl Fn(Event),
 ) -> Next {
@@ -646,7 +667,7 @@ async fn after_refresh(
             // Почта сверена: задачи со ссылкой на письмо — по письмам (срок снят — выполнена, S6-03).
             let store = JmapStore::new(&accounts.own.client);
             if accounts.profile.is_none()
-                && let Err(e) = tasks::handle(&store, cache, tasks::Request::Reconcile, &|r| notify(Event::Tasks(r))).await
+                && let Err(e) = tasks::handle(&store, &MailTasks(cache), tasks::Request::Reconcile, &|r| notify(Event::Tasks(r))).await
             {
                 tracing::warn!("jmap: mail tasks reconcile failed, retry later: {e}");
             }
@@ -663,7 +684,7 @@ async fn after_refresh(
 }
 
 /// Тела писем по ключам кэша — запросом на аккаунт; ключи аккаунтов, которых больше нет, пропускаются.
-async fn prefetch_bodies(accounts: &Accounts, cache: &Cache, keys: &[String]) -> postman_jmap::Result<Vec<String>> {
+async fn prefetch_bodies(accounts: &Accounts, cache: &dyn MailCache, keys: &[String]) -> postman_jmap::Result<Vec<String>> {
     let mut by_account: BTreeMap<Option<&str>, Vec<String>> = BTreeMap::new();
     for key in keys {
         let (scope, id) = unscoped(key);
@@ -707,8 +728,8 @@ fn refresh_failed(e: postman_jmap::Error, notify: &impl Fn(Event)) -> Refreshed 
 /// Сверка аккаунта с сервером.
 async fn apply_refresh(
     acc: &mut MailAccount,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     prefetch: &mut VecDeque<String>,
     notify: &impl Fn(Event),
 ) -> Refreshed {
@@ -782,7 +803,7 @@ async fn push_loop(client: Client, wake: UnboundedSender<Changed>) {
 }
 
 /// Папки аккаунта — в кэш (ключи с префиксом аккаунта).
-async fn load_mailboxes(acc: &MailAccount, cache: &Cache) -> postman_jmap::Result<Vec<Mailbox>> {
+async fn load_mailboxes(acc: &MailAccount, cache: &dyn MailCache) -> postman_jmap::Result<Vec<Mailbox>> {
     let (mailboxes, _) = acc.client.mailboxes().await?;
     let rows: Vec<MailboxRow> = mailboxes.iter().map(|m| mailbox_row(m, acc.scope())).collect();
     cache.replace_mailboxes(acc.scope(), &rows).map_err(db_err)?;
@@ -791,7 +812,7 @@ async fn load_mailboxes(acc: &MailAccount, cache: &Cache) -> postman_jmap::Resul
 
 /// Состояние почты аккаунта при запуске. Кэш уже синхронизирован (есть состояние `Email`) — папки и дельта с
 /// прошлого раза; сервер дельту не считает (`cannotCalculateChanges`) или кэш пуст — первые страницы папок.
-async fn start_state(acc: &MailAccount, cache: &mut Cache, index: &Index, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
+async fn start_state(acc: &MailAccount, cache: &dyn MailCache, index: &dyn MailIndex, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
     if let Some(since) = cache.state(&acc.state_key()).map_err(db_err)? {
         load_mailboxes(acc, cache).await?;
         notify(Event::MailboxesChanged);
@@ -808,7 +829,7 @@ async fn start_state(acc: &MailAccount, cache: &mut Cache, index: &Index, notify
     initial_load(acc, cache, index, notify).await
 }
 
-async fn initial_load(acc: &MailAccount, cache: &mut Cache, index: &Index, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
+async fn initial_load(acc: &MailAccount, cache: &dyn MailCache, index: &dyn MailIndex, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
     let mailboxes = load_mailboxes(acc, cache).await?;
     notify(Event::MailboxesChanged);
 
@@ -834,8 +855,8 @@ async fn initial_load(acc: &MailAccount, cache: &mut Cache, index: &Index, notif
 /// Дельта через `Email/changes`: `Some((новое состояние, ключи новых писем))`, если что-то изменилось.
 async fn refresh(
     acc: &MailAccount,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     since: &str,
     notify: &impl Fn(Event),
 ) -> postman_jmap::Result<Option<(String, Vec<String>)>> {
@@ -866,8 +887,8 @@ async fn refresh(
 
 async fn handle(
     accounts: &Accounts,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     identities: &[Identity],
     send_as: &[SendAs],
     cmd: Command,
@@ -1201,7 +1222,7 @@ async fn handle(
             categories::handle(client, &accounts.own.id, Some(&*cache), request, &notify).await;
         }
         Command::Tasks(request) => {
-            tasks::handle(&JmapStore::new(client), cache, request, &|r| notify(Event::Tasks(r))).await?;
+            tasks::handle(&JmapStore::new(client), &MailTasks(cache), request, &|r| notify(Event::Tasks(r))).await?;
         }
         Command::Contacts => load_people(client, notify).await,
         Command::FindPeople { text, offset } => find_people(client, text, offset, notify).await,
@@ -1252,7 +1273,9 @@ async fn handle(
         }
         Command::Delegate { uid, drafts, ticket, release } => {
             let mut r: Result<(), Error> =
-                tasks::handle(&JmapStore::new(client), cache, tasks::Request::Flush, &|r| notify(Event::Tasks(r))).await.map_err(Error::from);
+                tasks::handle(&JmapStore::new(client), &MailTasks(cache), tasks::Request::Flush, &|r| notify(Event::Tasks(r)))
+                    .await
+                    .map_err(Error::from);
             let mut scheduled = Vec::new();
             if r.is_ok() {
                 for d in &drafts {
@@ -1337,13 +1360,13 @@ impl Accounts {
 
 /// Связь письма с сервером в одном из аккаунтов этой учётной записи — и `detached` (письмо задания переноса у
 /// источника): аккаунт и id письма на сервере.
-fn remote_in<'a>(accounts: &'a Accounts, cache: &Cache, letter: LetterId) -> postman_jmap::Result<Option<(&'a MailAccount, String)>> {
+fn remote_in<'a>(accounts: &'a Accounts, cache: &dyn MailCache, letter: LetterId) -> postman_jmap::Result<Option<(&'a MailAccount, String)>> {
     let refs = cache.remotes(postman_cache::LetterId(letter.0)).map_err(db_err)?;
     Ok(refs.into_iter().find_map(|r| Some((accounts.by_account(&r.account)?, r.id))))
 }
 
 /// Папка хранилища → аккаунт этой учётной записи, его учётка связей и id папки на сервере.
-fn folder_in<'a>(accounts: &'a Accounts, cache: &Cache, folder: FolderId) -> Option<(&'a MailAccount, String, String)> {
+fn folder_in<'a>(accounts: &'a Accounts, cache: &dyn MailCache, folder: FolderId) -> Option<(&'a MailAccount, String, String)> {
     let row = cache.folder(postman_cache::FolderId(folder.0)).ok()??;
     let postman_cache::Owner::Account(account) = row.owner else { return None };
     Some((accounts.by_account(&account)?, account, row.remote?))
@@ -1368,7 +1391,7 @@ fn import_error(e: postman_jmap::Error) -> ImportError {
 }
 
 /// `Command::FetchRaw`: письмо целиком — блоб `Email.blobId` его аккаунта.
-async fn fetch_raw(accounts: &Accounts, cache: &Cache, letter: LetterId) -> Event {
+async fn fetch_raw(accounts: &Accounts, cache: &dyn MailCache, letter: LetterId) -> Event {
     let data = async {
         let (acc, id) =
             remote_in(accounts, cache, letter)?.ok_or_else(|| postman_jmap::Error::Protocol("the letter has no link with this account".into()))?;
@@ -1384,7 +1407,7 @@ async fn fetch_raw(accounts: &Accounts, cache: &Cache, letter: LetterId) -> Even
 /// получения — как у письма). Повтор без дубля — `alreadyExists` сервера. Ответ — связь нового письма с сервером.
 async fn import(
     accounts: &Accounts,
-    cache: &Cache,
+    cache: &dyn MailCache,
     letter: LetterId,
     folder: FolderId,
     keywords: &[String],
@@ -1421,7 +1444,7 @@ async fn import(
 /// `Command::ServerCopy`: письма аккаунтов этой сессии — в папку другого аккаунта сервером (`Email/copy` с удалением
 /// источника), по аккаунту источника. Источник остался (сервер не удалил) — удалить отдельно: задание считает его
 /// удалённым сервером.
-async fn server_copy(accounts: &Accounts, cache: &Cache, job: JobId, letters: &[LetterId], to: FolderId) -> Vec<Event> {
+async fn server_copy(accounts: &Accounts, cache: &dyn MailCache, job: JobId, letters: &[LetterId], to: FolderId) -> Vec<Event> {
     let failed = |letter: LetterId, error: ImportError| Event::ImportFailed { job, letter, error };
     let Some((target, account, mailbox)) = folder_in(accounts, cache, to) else {
         return letters.iter().map(|l| failed(*l, ImportError::Rejected("no such folder".into()))).collect();
@@ -1467,7 +1490,7 @@ async fn server_copy(accounts: &Accounts, cache: &Cache, job: JobId, letters: &[
 
 /// `Command::DestroyLetters`: письма задания — насовсем (`Email/set` `destroy`) по `detached`-связям учётки
 /// `account`; ответ по письму. Письма уже нет на сервере (`notFound`, связи больше нет) — удалено.
-async fn destroy_letters(accounts: &Accounts, cache: &Cache, job: JobId, account: &str, letters: &[LetterId]) -> Vec<Event> {
+async fn destroy_letters(accounts: &Accounts, cache: &dyn MailCache, job: JobId, account: &str, letters: &[LetterId]) -> Vec<Event> {
     let Some(acc) = accounts.by_account(account) else {
         return letters.iter().map(|l| Event::DestroyFailed { job, letter: *l, error: format!("no account {account}") }).collect();
     };
@@ -1495,7 +1518,7 @@ async fn destroy_letters(accounts: &Accounts, cache: &Cache, job: JobId, account
 
 /// Создать, переименовать или перенести папку (T1-04в): `Mailbox/set` в аккаунте папки, затем папки заново и
 /// `MailboxesChanged`; отказ — `FolderFailed` с ответом сервера.
-async fn folder_command(accounts: &Accounts, cache: &Cache, cmd: Command, notify: &impl Fn(Event)) {
+async fn folder_command(accounts: &Accounts, cache: &dyn MailCache, cmd: Command, notify: &impl Fn(Event)) {
     let server = |key: &str| unscoped(key).1.to_owned();
     let (mailbox, scope, result) = match cmd {
         Command::CreateFolder { account, parent, name } => {
@@ -1548,7 +1571,7 @@ fn eml_name(subject: Option<&str>) -> String {
 /// письмом на `to` от своего адреса, сразу (без окна «Отменить»).
 async fn report_phishing(
     accounts: &Accounts,
-    cache: &Cache,
+    cache: &dyn MailCache,
     send_as: &[SendAs],
     keys: &[String],
     to: Address,
@@ -1583,7 +1606,7 @@ async fn report_phishing(
 
 /// «Архив» аккаунта (id на сервере): из кэша папок; нет — создать папку с ролью `archive` (у Stalwart по умолчанию
 /// её нет, `docs/STALWART.md`) и перечитать папки.
-async fn ensure_archive(acc: &MailAccount, cache: &Cache, name: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
+async fn ensure_archive(acc: &MailAccount, cache: &dyn MailCache, name: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
     let known = cache
         .mailboxes()
         .map_err(db_err)?
@@ -1616,8 +1639,8 @@ fn server_patch(p: &lifecycle::Patch, archive: Option<&str>) -> (String, postman
 /// `Command::Patch`: по аккаунтам, одним `Email/set` (по 500); не принятые — с сервера заново.
 async fn patch(
     accounts: &Accounts,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     patches: Vec<lifecycle::Patch>,
     archive_name: &str,
     notify: &impl Fn(Event),
@@ -1669,7 +1692,13 @@ async fn patch(
 
 /// `Command::Newsletters`: письма «Входящих» с `List-Id` или `List-Unsubscribe` (сырые заголовки — у сервера) →
 /// [`lifecycle::newsletter_sweep`] → в «Архив». Ответ — сколько перенесено.
-async fn newsletters(acc: &MailAccount, cache: &mut Cache, cutoff: i64, archive_name: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<usize> {
+async fn newsletters(
+    acc: &MailAccount,
+    cache: &dyn MailCache,
+    cutoff: i64,
+    archive_name: &str,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<usize> {
     let mailboxes = cache.mailboxes().map_err(db_err)?;
     let roles = lifecycle::Roles::of(&mailboxes, acc.scope());
     let Some(inbox_key) = roles.inbox else { return Ok(0) };
@@ -1746,8 +1775,8 @@ async fn list_letters(accounts: &Accounts, s: &Selector, position: u64, limit: u
 /// Строки писем выборки — в кэш; ответ — ключи писем, которых на сервере уже нет.
 async fn store_letters(
     accounts: &Accounts,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     mailbox: &str,
     keys: &[String],
     notify: &impl Fn(Event),
@@ -1768,8 +1797,8 @@ async fn store_letters(
 /// обычной дельтой `Email/changes` (в краткой записи есть `threadId`), `Thread/changes` не нужен.
 async fn load_thread(
     acc: &MailAccount,
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     thread: &str,
     notify: &impl Fn(Event),
 ) -> postman_jmap::Result<Vec<String>> {
@@ -1799,7 +1828,13 @@ async fn load_thread(
 }
 
 /// Следующая страница папки (ключ `mailbox`) после самого старого письма в кэше; сколько писем пришло.
-async fn load_more(acc: &MailAccount, cache: &mut Cache, index: &Index, mailbox: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<usize> {
+async fn load_more(
+    acc: &MailAccount,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
+    mailbox: &str,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<usize> {
     let mb = unscoped(mailbox).1;
     let page = match cache.oldest(mailbox).map_err(db_err)? {
         Some(anchor) => acc.client.email_page_after(mb, unscoped(&anchor).1, PAGE).await,
@@ -1879,7 +1914,7 @@ async fn load_cards(client: &Client, notify: &impl Fn(Event)) {
 }
 
 /// Сервер не выполнил перенос или удаление: письмо — в кэш таким, какое оно на сервере (UI уже поменял кэш сам).
-async fn restore(accounts: &Accounts, cache: &mut Cache, index: &Index, key: &str, notify: &impl Fn(Event)) {
+async fn restore(accounts: &Accounts, cache: &dyn MailCache, index: &dyn MailIndex, key: &str, notify: &impl Fn(Event)) {
     let restored = match accounts.locate(key) {
         Ok((acc, id)) => match acc.client.email_get(&[id.to_owned()]).await {
             Ok((emails, _)) => save_summaries(cache, index, &emails, acc.scope(), notify),
@@ -1896,7 +1931,7 @@ async fn restore(accounts: &Accounts, cache: &mut Cache, index: &Index, key: &st
 }
 
 /// id сервера папки с ролью `role` в аккаунте `scope`.
-fn mailbox_by_role(cache: &Cache, scope: Option<&str>, role: &str) -> postman_jmap::Result<String> {
+fn mailbox_by_role(cache: &dyn MailCache, scope: Option<&str>, role: &str) -> postman_jmap::Result<String> {
     cache
         .mailboxes()
         .map_err(db_err)?
@@ -1948,7 +1983,7 @@ fn raw_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
 /// Догрузить вложения, у которых есть только blob_id (пересылка, вложения беседы новым участникам; ключ кэша:
 /// оригинал мог быть в общем ящике, а уходит письмо из своего). Не скачалось или пришло пустым — ошибка с кодом
 /// `attachment-missing:<имя>`: письмо без вложения не уходит.
-async fn fill_attachments(accounts: &Accounts, cache: &Cache, list: &mut [Attachment]) -> postman_jmap::Result<()> {
+async fn fill_attachments(accounts: &Accounts, cache: &dyn MailCache, list: &mut [Attachment]) -> postman_jmap::Result<()> {
     for a in list.iter_mut().filter(|a| a.data.is_empty()) {
         let Some(blob) = a.blob_id.clone() else { continue };
         let got = match cache.blob(&blob).map_err(db_err)? {
@@ -1975,7 +2010,7 @@ async fn fill_attachments(accounts: &Accounts, cache: &Cache, list: &mut [Attach
 
 /// Вложения черновика и — если в ответе есть новые участники — вложения беседы для них: все байты до отправки
 /// первой копии (не скачалось — не уходит ни одна).
-async fn fill_draft(accounts: &Accounts, cache: &Cache, draft: &mut Draft) -> postman_jmap::Result<()> {
+async fn fill_draft(accounts: &Accounts, cache: &dyn MailCache, draft: &mut Draft) -> postman_jmap::Result<()> {
     fill_attachments(accounts, cache, &mut draft.attachments).await?;
     let newcomers = !draft.newcomers().is_empty();
     if let Some(share) = draft.share.as_mut().filter(|_| newcomers) {
@@ -2025,7 +2060,7 @@ fn envelopes(draft: &Draft, mail_from: &str) -> Vec<(Draft, Envelope, bool)> {
 /// её отправка отменяется вместе с основной ([`COMPANIONS`]).
 async fn send(
     accounts: &Accounts,
-    cache: &Cache,
+    cache: &dyn MailCache,
     send_as: &[SendAs],
     draft: &Draft,
     replace: Option<&str>,
@@ -2099,11 +2134,11 @@ async fn send(
 /// «Отправить позже» переживает перезапуск.
 const COMPANIONS: &str = "jmap.companions";
 
-fn read_companions(cache: &Cache) -> BTreeMap<String, Vec<String>> {
+fn read_companions(cache: &dyn MailCache) -> BTreeMap<String, Vec<String>> {
     cache.state(COMPANIONS).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
-fn write_companions(cache: &Cache, all: &BTreeMap<String, Vec<String>>) {
+fn write_companions(cache: &dyn MailCache, all: &BTreeMap<String, Vec<String>>) {
     let r = if all.is_empty() {
         cache.remove_state(COMPANIONS)
     } else {
@@ -2118,7 +2153,7 @@ fn write_companions(cache: &Cache, all: &BTreeMap<String, Vec<String>>) {
 }
 
 /// Отменить копии новым участникам вместе с основной отправкой `submission`.
-async fn cancel_companions(accounts: &Accounts, cache: &Cache, submission: &str) {
+async fn cancel_companions(accounts: &Accounts, cache: &dyn MailCache, submission: &str) {
     let mut all = read_companions(cache);
     let Some(list) = all.remove(submission) else { return };
     for c in &list {
@@ -2134,7 +2169,7 @@ async fn cancel_companions(accounts: &Accounts, cache: &Cache, submission: &str)
 }
 
 /// Не отправлять письмо шага поручения, которое держит сервер, и удалить его (в «Черновики» оно не нужно).
-async fn withhold(accounts: &Accounts, cache: &Cache, s: &Scheduled) -> Result<(), UnsendError> {
+async fn withhold(accounts: &Accounts, cache: &dyn MailCache, s: &Scheduled) -> Result<(), UnsendError> {
     let (acc, submission) = accounts.locate(&s.submission)?;
     acc.client.cancel_submission(submission).await?;
     cancel_companions(accounts, cache, &s.submission).await;
@@ -2145,7 +2180,7 @@ async fn withhold(accounts: &Accounts, cache: &Cache, s: &Scheduled) -> Result<(
 
 /// Отменить отправку, которую держит сервер: письмо — обратно в «Черновики» аккаунта отправителя; копии новым
 /// участникам — отменить.
-async fn unsend(accounts: &Accounts, cache: &Cache, s: &Scheduled) -> Result<(), UnsendError> {
+async fn unsend(accounts: &Accounts, cache: &dyn MailCache, s: &Scheduled) -> Result<(), UnsendError> {
     let (acc, submission) = accounts.locate(&s.submission)?;
     let email = unscoped(&s.email).1;
     let (drafts, sent) = (mailbox_by_role(cache, acc.scope(), "drafts")?, mailbox_by_role(cache, acc.scope(), "sent")?);
@@ -2156,7 +2191,7 @@ async fn unsend(accounts: &Accounts, cache: &Cache, s: &Scheduled) -> Result<(),
 
 /// Отложенные отправки своего аккаунта и общих ящиков, от которых можно отправлять → `Event::Scheduled`. Копии
 /// новым участникам — не отдельными строками: они отменяются вместе с основной.
-async fn notify_scheduled(accounts: &Accounts, cache: &Cache, send_as: &[SendAs], notify: &impl Fn(Event)) {
+async fn notify_scheduled(accounts: &Accounts, cache: &dyn MailCache, send_as: &[SendAs], notify: &impl Fn(Event)) {
     let mut list = Vec::new();
     let mut complete = true;
     let sending = std::iter::once(&accounts.own).chain(accounts.shared.iter().filter(|a| send_as.iter().any(|f| f.scope.as_deref() == a.scope())));
@@ -2189,7 +2224,7 @@ async fn notify_scheduled(accounts: &Accounts, cache: &Cache, send_as: &[SendAs]
 
 async fn respond_invite(
     accounts: &Accounts,
-    cache: &Cache,
+    cache: &dyn MailCache,
     identities: &[Identity],
     send_as: &[SendAs],
     inv: &Invitation,
@@ -2232,7 +2267,13 @@ async fn respond_invite(
 }
 
 /// Черновик — в «Черновики» аккаунта отправителя; id — ключ кэша.
-async fn save_draft(accounts: &Accounts, cache: &Cache, send_as: &[SendAs], draft: &Draft, replace: Option<&str>) -> postman_jmap::Result<String> {
+async fn save_draft(
+    accounts: &Accounts,
+    cache: &dyn MailCache,
+    send_as: &[SendAs],
+    draft: &Draft,
+    replace: Option<&str>,
+) -> postman_jmap::Result<String> {
     let mut draft = draft.clone();
     fill_attachments(accounts, cache, &mut draft.attachments).await?;
     let draft = &draft;
@@ -2257,22 +2298,21 @@ async fn save_draft(accounts: &Accounts, cache: &Cache, send_as: &[SendAs], draf
 
 /// Записать письма в кэш и в поисковый индекс. У писем с уже загруженным телом краткая
 /// запись затёрла бы текст — их индексирует заново извлечение (событие `BodiesStored`).
-fn save(cache: &mut Cache, index: &Index, rows: Vec<EmailRow>, notify: &impl Fn(Event)) -> postman_jmap::Result<()> {
+fn save(cache: &dyn MailCache, index: &dyn MailIndex, rows: Vec<EmailRow>, notify: &impl Fn(Event)) -> postman_jmap::Result<()> {
     cache.upsert_emails(&rows).map_err(db_err)?;
-    if let Some(i) = index {
-        let (full, brief): (Vec<EmailRow>, Vec<EmailRow>) = rows.into_iter().partition(|r| cache.body(&r.id).ok().flatten().is_some());
-        postman_core::indexer::rows(i, cache, &brief);
-        if !full.is_empty() {
-            notify(Event::BodiesStored(full.into_iter().map(|r| r.id).collect()));
-        }
+    let (full, brief): (Vec<EmailRow>, Vec<EmailRow>) = rows.into_iter().partition(|r| cache.body(&r.id).ok().flatten().is_some());
+    // Строки — в индекс ядра услугой (PLG-10): текст и сам индекс у ядра; без индекса ядро ответ молча опустит.
+    index.rows(&brief);
+    if !full.is_empty() {
+        notify(Event::BodiesStored(full.into_iter().map(|r| r.id).collect()));
     }
     Ok(())
 }
 
 /// Краткие записи писем с сервера — в кэш: строки и получатели (S5-03, быстрый фильтр «Мне»).
 fn save_summaries(
-    cache: &mut Cache,
-    index: &Index,
+    cache: &dyn MailCache,
+    index: &dyn MailIndex,
     emails: &[EmailSummary],
     scope: Option<&str>,
     notify: &impl Fn(Event),
@@ -2436,11 +2476,12 @@ mod tests {
         assert_eq!(env[0].1.rcpt_to, ["ivan@x.example", "petr@x.example"]);
 
         let cache = Cache::open_in_memory().unwrap();
-        assert!(read_companions(&cache).is_empty());
+        let cache = &postman_core::backend::mail::LocalCache(cache) as &dyn MailCache;
+        assert!(read_companions(cache).is_empty());
         let all = BTreeMap::from([("s1".to_owned(), vec!["s2".to_owned()])]);
-        write_companions(&cache, &all);
-        assert_eq!(read_companions(&cache), all);
-        write_companions(&cache, &BTreeMap::new());
+        write_companions(cache, &all);
+        assert_eq!(read_companions(cache), all);
+        write_companions(cache, &BTreeMap::new());
         assert!(cache.state(COMPANIONS).unwrap().is_none());
     }
 

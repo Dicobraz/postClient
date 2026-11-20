@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use postman_cache::{Cache, ConvKey};
+use postman_cache::{Cache, ConvKey, TaskCache};
 
 use super::{Address, Applied, ChanAccount, ChannelError, ChannelPlugin, ChannelStore, Entry, Message, MessageId, Participant};
 use crate::model::LetterId;
@@ -245,7 +245,7 @@ pub fn message_targets(links: &Links, m: &Message) -> Vec<String> {
 }
 
 /// Ссылки источника — ровно эти цели (прежние уходят).
-pub fn index(cache: &Cache, source: &Source, targets: &[String]) -> Result<()> {
+pub fn index(cache: &impl TaskCache, source: &Source, targets: &[String]) -> Result<()> {
     Ok(cache.xref_set(&source.key(), targets)?)
 }
 
@@ -255,7 +255,7 @@ pub fn index_letter(cache: &Cache, links: &Links, letter: LetterId, text: &str) 
 }
 
 /// Задача `uid` с описанием `text`.
-pub fn index_task(cache: &Cache, links: &Links, uid: &str, text: &str) -> Result<()> {
+pub fn index_task(cache: &impl TaskCache, links: &Links, uid: &str, text: &str) -> Result<()> {
     index(cache, &Source::Task(uid.to_owned()), &targets(links, text, []))
 }
 
