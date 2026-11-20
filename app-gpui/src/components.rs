@@ -98,11 +98,99 @@ pub(crate) fn row(set: &'static str, st: &State, l: &Look) -> Option<AnyElement>
     let mut out = div().flex_none().pt_2().text_size(px(12.)).text_color(l.text2()).child(text);
     if let Some(label) = action {
         let id = format!("{}-{set}", if busy { "comp-cancel" } else { "comp-download" });
-        out = out.child(
-            link(id, label, l).on_click(move |_, _, cx| if busy { cancel(set, cx) } else { download(set, cx) }),
-        );
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(link(id, label, l).on_click(move |_, _, cx| if busy { cancel(set, cx) } else { download(set, cx) }))
+            // Офлайн-раскатка (PLG-16): файл выпуска принесён администратором — установить без сети.
+            .when(!busy, |d| {
+                d.child(link(format!("comp-from-file-{set}"), tr!("comp-from-file"), l).on_click(move |_, _, cx| {
+                    let pick = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+                    cx.spawn(async move |cx| {
+                        if let Ok(Ok(Some(paths))) = pick.await
+                            && let Some(p) = paths.first()
+                        {
+                            cx.update(|cx| install_from_file(set, p.clone(), cx));
+                        }
+                    })
+                    .detach();
+                }))
+            });
+        out = out.child(actions);
     }
     Some(out.into_any_element())
+}
+
+/// «Установить из файла» (PLG-16, офлайн-раскатка): zip выпуска, принесённый администратором (страница
+/// Releases). Подпись файла не проверить — приносит сам пользователь; чужую сборку не пропустит сверка сборки
+/// в `Hello`, канал с ней поднимется «проблемой».
+pub(crate) fn install_from_file(set: &'static str, path: PathBuf, cx: &mut App) {
+    let busy = cx.try_global::<Model>().is_some_and(|m| matches!(m.states.get(set), Some(State::Busy { .. })));
+    if busy {
+        return;
+    }
+    edit(cx, |m| {
+        m.states.insert(set.to_owned(), busy_state());
+    });
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let local = path.clone();
+    let spawned =
+        std::thread::Builder::new().name(format!("component {set}")).spawn(move || {
+            let _ = tx.send(install_local(set, &local));
+        });
+    if let Err(e) = spawned {
+        tracing::error!(component = set, "component thread not started: {e}");
+        edit(cx, |m| {
+            m.states.insert(set.to_owned(), State::Failed(format!("thread: {e}")));
+        });
+        return;
+    }
+    tracing::info!(component = set, file = %path.display(), "component install from file started");
+    cx.spawn(async move |cx| {
+        if let Ok(result) = rx.await {
+            cx.update(|cx| done(set, result, cx));
+        }
+    })
+    .detach();
+}
+
+/// Установить компонент из файла без окна и сети (`--install-component`, PLG-16): файл набора ищем в архиве
+/// среди канальных наборов. Возвращает имя установленного набора.
+pub fn install_file_headless(path: &Path) -> Result<&'static str, String> {
+    install_at(&dir(), path)
+}
+
+fn install_at(base: &Path, path: &Path) -> Result<&'static str, String> {
+    std::fs::create_dir_all(base).map_err(|e| format!("create components folder: {e}"))?;
+    grant(base);
+    for set in [crate::plugins::TELEGRAM_SET, crate::plugins::MATRIX_SET] {
+        if let Ok(exe) = extract(path, set) {
+            let staged = base.join(format!("{set}.part"));
+            std::fs::write(&staged, exe).map_err(|e| format!("write component: {e}"))?;
+            let target = base.join(format!("{set}{}", std::env::consts::EXE_SUFFIX));
+            std::fs::rename(&staged, &target).map_err(|e| format!("rename component: {e}"))?;
+            std::fs::write(base.join(format!("{set}.txt")), env!("CARGO_PKG_VERSION")).map_err(|e| format!("write marker: {e}"))?;
+            tracing::info!(component = set, file = %path.display(), "component installed from file");
+            return Ok(set);
+        }
+    }
+    Err("no channel component found in the archive".into())
+}
+
+/// Установка из локального файла: тот же путь, что у докачки, без сети. В архиве должен лежать файл именно
+/// этого набора.
+fn install_local(set: &'static str, path: &Path) -> Result<(), String> {
+    match install_at(&dir(), path) {
+        Ok(found) if found == set => Ok(()),
+        Ok(_) => Err("the archive holds another channel component".into()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Состояние «работает» для установки без хода (файл локальный — мгновенно): строка «Скачивается…».
+fn busy_state() -> State {
+    State::Busy { received: Arc::new(AtomicU64::new(0)), total: Arc::new(AtomicU64::new(0)), cancel: Cancel::new() }
 }
 
 /// «Скачать компонент»: перечень выпуска своей версии, файл и подпись, проверка, распаковка — в фоне; итог —
@@ -379,7 +467,7 @@ fn marker_at(base: &Path, set: &str) -> Marker {
 mod tests {
     // Без `use super::*`: глоб-импорты поверх двойных глобов gpui_kit уводят раскрутку компилятора в глубину
     // (recursion limit даже на тривиальном тесте) — только явные имена.
-    use super::{asset_name, extract, marker_at, pick, Marker};
+    use super::{asset_name, extract, install_at, marker_at, pick, Marker};
     use pets_update::{ARCH, OS};
     use serde_json::Value;
     use std::path::Path;
@@ -460,5 +548,35 @@ mod tests {
         assert_eq!(marker_at(tmp.path(), "postman-plugins-telegram"), Marker::Current);
         std::fs::write(&m, "0.0.1").unwrap();
         assert_eq!(marker_at(tmp.path(), "postman-plugins-telegram"), Marker::Stale);
+    }
+
+    /// Офлайн-установка из файла (PLG-16): exe набора кладётся в каталог с маркером версии; архив без
+    /// канальных файлов — ошибкой.
+    #[test]
+    fn install_from_file_places_the_set() {
+        use std::io::Write as _;
+        let set = "postman-plugins-telegram";
+        let exe = format!("{set}{}", std::env::consts::EXE_SUFFIX);
+        let tmp = tempfile::tempdir().unwrap();
+        let zip = tmp.path().join("component.zip");
+        let file = std::fs::File::create(&zip).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        w.start_file(exe.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(b"MZ component").unwrap();
+        w.finish().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        assert_eq!(install_at(base.path(), &zip).unwrap(), set);
+        assert_eq!(
+            std::fs::read(base.path().join(exe)).unwrap(),
+            b"MZ component".as_slice()
+        );
+        assert_eq!(marker_at(base.path(), set), Marker::Current);
+        let other = tmp.path().join("other.zip");
+        let file = std::fs::File::create(&other).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        w.start_file("postman-plugins-ldap.exe", zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(b"x").unwrap();
+        w.finish().unwrap();
+        assert!(install_at(base.path(), &other).is_err());
     }
 }

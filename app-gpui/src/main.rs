@@ -198,6 +198,8 @@ Usage: postman [options]
   --density compact|normal|comfortable
                         list row density (default: normal)
   --sign-out            forget the saved sign-in
+  --install-component <file.zip>
+                        install a channel component from a release file (offline), then exit
   --minimized           start with the window minimized (autostart)
   mailto:...            open a new message (default mail client)
   --bench               measure and exit: one key=value line on stdout
@@ -227,6 +229,24 @@ fn main() {
     }
     if args.iter().any(|a| a == "--version") {
         println!("postman {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // `--install-component <файл.zip>` (PLG-16, решение 2026-11-19 «components»): офлайн-установка компонента
+    // канала из файла выпуска — без окна и сети, без запуска Postman. При запущенной программе файл не
+    // заменится (exe занят) — ошибкой.
+    if let Some(i) = args.iter().position(|a| a == "--install-component") {
+        sys::attach_parent_console();
+        let Some(path) = args.get(i + 1) else {
+            eprintln!("--install-component requires a path to the component archive");
+            std::process::exit(2);
+        };
+        match components::install_file_headless(std::path::Path::new(path)) {
+            Ok(set) => println!("component installed: {set}"),
+            Err(e) => {
+                eprintln!("component install failed: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     let n = args.iter().position(|a| a == "--demo").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(50_000);
