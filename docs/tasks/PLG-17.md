@@ -1,7 +1,7 @@
 # PLG-17: пакеты без файлов каналов, компонентные ассеты выпуска
 
 lane: x/plg-17-pack        # scripts (полоса ci) — упаковка трёх ОС
-status: todo
+status: done
 deps: [PLG-16]
 class: B                   # состав пакета и выпуск
 files: [scripts/windows/package.ps1, scripts/linux/package.sh, scripts/linux/data/apparmor/postman, scripts/macos/package.sh, docs/DEV.md]

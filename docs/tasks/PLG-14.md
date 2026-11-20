@@ -1,7 +1,7 @@
 # PLG-14: каталог компонентов и «компонент не установлен»
 
 lane: x/plg-14-components  # core (договор каналов), app-gpui (корень, экраны каналов)
-status: todo
+status: done
 deps: [PLG-13]
 class: B                   # поведение хоста и договор ошибки канала
 files: [crates/core/src/channel/mod.rs, crates/core/src/backend/remote.rs, crates/core/src/backend/wire.rs, app-gpui/src/plugins.rs, app-gpui/src/account_telegram.rs, app-gpui/src/account_matrix.rs, app-gpui/src/chats.rs, app-gpui/i18n/ru/channels.ftl, app-gpui/i18n/en/channels.ftl]
