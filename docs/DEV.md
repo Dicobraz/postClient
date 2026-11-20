@@ -76,6 +76,14 @@ Actions — для разработки. Схема общая для Pets (ск
 | `<файл .msi, .zip, .dmg, .AppImage, .deb или .rpm>.minisig` | Подпись minisign для самообновления (решение 2026-11-11 «self-update») |
 | `SHA256SUMS.txt` | Контрольные суммы всех файлов |
 
+Каналы Telegram и Matrix MSI ставит по умолчанию вместе со всем (PLG-13, решение 2026-11-19
+`docs/decisions/2026-11-19-components.md`): обычному пользователю выбирать ничего не надо, неиспользуемый канал не
+запускается. Состав каналов для сетевой раскатки — свойство `CHANNELS` в тихой установке (мастера в MSI нет):
+`msiexec /i postman.msi /qn` — всё; `CHANNELS=none` — только почта и каталог; `CHANNELS=Telegram,Matrix` — точный
+список. Выбор переживает обновления (маркеры в `HKLM\SOFTWARE\Pets\Postman\Channels`); снять канал —
+`msiexec /i postman.msi REMOVE=Telegram`. Автопроверка — `scripts\windows\msi-check.ps1` (только CI-раннер:
+скрипт меняет систему), сценарии для рук — `docs/manual-tests/PLG-13.md`.
+
 - Тег `v<версия>` — ровно `version` из `Cargo.toml` (CI сверяет). `v0.2.0` — стабильный выпуск, `v0.2.0-beta.1` —
   предварительный (канал «Предварительный» в настройках).
 - **Гейт — полная сверка документации** (решение 2026-11-12 «release-docs-gate»): в PR с новой `version` — файл
