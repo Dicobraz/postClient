@@ -1,7 +1,7 @@
 # PLG-15: докачка компонента канала из выпуска
 
 lane: x/plg-15-components  # core (Host::retry), app-gpui (компоненты, экраны каналов)
-status: todo
+status: done
 deps: [PLG-14]
 class: B                   # сеть интерфейса: вторая точка скачивания — из собственного выпуска
 files: [app-gpui/src/components.rs, app-gpui/src/plugins.rs, app-gpui/src/main.rs, app-gpui/src/account_telegram.rs, app-gpui/src/account_matrix.rs, app-gpui/i18n/ru/channels.ftl, app-gpui/i18n/en/channels.ftl, crates/core/src/backend/remote.rs]

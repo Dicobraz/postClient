@@ -1,7 +1,7 @@
 # PLG-13: каналы в MSI — по умолчанию всё, состав раскатки — CHANNELS
 
 lane: x/plg-pack           # tools/pack, scripts/windows — полоса ci
-status: todo
+status: done
 deps: [PLG-03]
 class: B                   # состав пакета и свойства установщика
 files: [tools/pack/src/msi.rs, scripts/windows/msi-check.ps1, docs/DEV.md, docs/decisions/2026-11-19-components.md, docs/adr/0013-plugins-on-demand.md, docs/manual-tests/PLG-13.md]

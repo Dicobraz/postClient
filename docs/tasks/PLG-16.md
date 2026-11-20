@@ -1,7 +1,7 @@
 # PLG-16: офлайн-установка компонента — «из файла» и --install-component
 
 lane: x/plg-16-offline     # app-gpui (компоненты, флаг запуска)
-status: todo
+status: done
 deps: [PLG-15]
 class: A                   # способ раскатки без интернета (решение владельца 2026-11-19)
 files: [app-gpui/src/components.rs, app-gpui/src/main.rs, app-gpui/i18n/ru/channels.ftl, app-gpui/i18n/en/channels.ftl]
