@@ -12,7 +12,8 @@
 //!   локальном файле (`labels::LocalFile`). Сервер недоступен — `Reply::Failed`, правка ждёт (`Book::pending`).
 //! - **Снять категорию с писем** — только явным выбором при удалении (`Request::Purge`).
 
-use postman_cache::{Cache, scoped};
+use postman_cache::scoped;
+use postman_core::backend::mail::MailCache;
 use postman_core::categories::{ATTEMPTS, Error as FileError, FILE, FOLDER, Scope, decode, encode};
 pub use postman_core::categories::{Reply, Request};
 use postman_core::labels::Categories;
@@ -110,7 +111,7 @@ pub async fn load_all(client: &Client, own: &str, shared: &[String], notify: &im
 }
 
 /// Выполнить запрос; ответ — через `notify`. `cache` — для [`Request::Purge`] (письма в кэше — без слова сразу).
-pub async fn handle(client: &Client, own: &str, cache: Option<&Cache>, request: Request, notify: &impl Fn(Reply)) {
+pub async fn handle(client: &Client, own: &str, cache: Option<&dyn MailCache>, request: Request, notify: &impl Fn(Reply)) {
     let failed = |account: Scope, e: Error| match e {
         Error::File(FileError::Unsupported) => Reply::Unsupported { account },
         e => Reply::Failed { account, error: e.to_string() },
@@ -145,7 +146,7 @@ pub async fn handle(client: &Client, own: &str, cache: Option<&Cache>, request: 
 }
 
 /// Снять слово со всех писем почтового аккаунта клиента `mail` (во всех папках): страницами, пока находится.
-async fn purge(mail: &Client, scope: Option<&str>, cache: Option<&Cache>, keyword: &str) -> postman_jmap::Result<usize> {
+async fn purge(mail: &Client, scope: Option<&str>, cache: Option<&dyn MailCache>, keyword: &str) -> postman_jmap::Result<usize> {
     let kw = vec![postman_core::labels::normalize(keyword)];
     let mut count = 0;
     for _ in 0..PURGE_ROUNDS {

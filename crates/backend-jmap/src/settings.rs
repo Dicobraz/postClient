@@ -95,7 +95,7 @@ pub async fn handle(client: &Client, request: Request, notify: &impl Fn(Reply)) 
                 notify(Reply::VacationSaved(v));
                 notify(Reply::AutoReply(reply));
                 if limited {
-                    notify(Reply::Failed { area: Area::Vacation, error: ONE_TEXT_ONLY.to_owned() });
+                    notify(Reply::Failed { area: Area::Vacation, error: postman_core::settings::ONE_TEXT_ONLY.to_owned() });
                 }
                 if client.has(SIEVE) {
                     notify(Reply::Rules(sieve.state()));
@@ -183,11 +183,6 @@ fn with_stored(v: VacationResponse, stored: Option<&Stored>) -> VacationResponse
     let Some(s) = stored else { return v };
     VacationResponse { from_date: v.from_date.or_else(|| s.from.clone()), to_date: v.to_date.or_else(|| s.to.clone()), ..v }
 }
-
-/// Автоответ Postman: `VacationResponse/set` (как раньше), «Вне офиса» в календаре, затем свой скрипт `vacation`
-/// с теми же включением и периодом.
-/// Сервер не даёт записать свой скрипт `vacation`: разные тексты и круг адресатов не применены.
-pub const ONE_TEXT_ONLY: &str = "this server keeps one autoreply text for everyone: separate texts and audience are not applied";
 
 async fn set_autoreply(client: &Client, save: AutoReplySave) -> postman_jmap::Result<(VacationResponse, Sieve, Option<AutoReply>, bool)> {
     let primary = save.reply.primary();
