@@ -132,6 +132,12 @@ impl Client {
         let final_url = resp.url().clone();
         let mut session: Session = resp.json().await?;
         session.resolve_urls(&final_url)?;
+        // Учётка по https — сессия только по https: письма, токен и пароль уходят в api-, download-, upload-адреса
+        // и в EventSource; сессия, прибитая resolve_urls к http, — отказ входа, а не молчаливый перевод данных в
+        // открытый текст.
+        if final_url.scheme() == "https" && session.api_url.starts_with("http://") {
+            return Err(Error::Protocol("the https account got an http session: not sending mail data in cleartext".into()));
+        }
         if !session.capabilities.contains_key(MAIL) {
             return Err(Error::MissingCapability(MAIL));
         }
