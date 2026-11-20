@@ -94,6 +94,11 @@ const JMAP: Row =
 /// Плагины отдельными процессами.
 pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS, IMAP, JMAP];
 
+/// Файлы наборов каналов (PLG-15): ключ компонента — имя файла набора; экраны по нему спрашивают состояние
+/// и запускают докачку, хост по нему находит строку плагина ([`component_ready`]).
+pub(crate) const TELEGRAM_SET: &str = TELEGRAM.set;
+pub(crate) const MATRIX_SET: &str = MATRIX.set;
+
 static HOST: OnceLock<Host> = OnceLock::new();
 
 /// Хост плагинов процесса. Создание — без ввода-вывода и без процессов: каталог набора и политика namespaces читаются
@@ -119,6 +124,14 @@ pub(crate) fn remote_channel(id: &str) -> Option<Arc<dyn postman_core::channel::
 /// зовёт). Процесс ещё не поднимался — не знаем, показываем вход: отказ «нет ключа» вернёт сам плагин.
 pub(crate) fn telegram_has_key() -> bool {
     host().channel(TELEGRAM).has_key()
+}
+
+/// Компонент набора установлен (PLG-15, докачка из выпуска): будим «проблему» плагина — канал поднимется сам.
+/// Строки набора нет — нечего будить.
+pub(crate) fn component_ready(set: &'static str) {
+    if let Some(row) = ROWS.iter().find(|r| r.set == set) {
+        host().retry(row.id);
+    }
 }
 
 /// Заместитель каталога (PLG-06): настройки запроса — из «Настройки → Безопасность» и хранилища учётных данных

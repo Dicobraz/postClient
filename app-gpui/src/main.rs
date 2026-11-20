@@ -30,6 +30,7 @@ mod chats;
 mod chrome;
 mod comfort;
 mod commands;
+mod components;
 mod compose;
 mod composer;
 mod contacts;
