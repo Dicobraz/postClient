@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 postman-ir.workspace = true
+# Паника задачи плагина не подвешивает заместителя: catch_unwind вокруг задач `spawn_local` (PLG-12).
+futures = { version = "0.3", default-features = false, features = ["async-await"] }
 postman-cache = { workspace = true, features = ["store6"] }
 postman-worker.workspace = true
 # Хост плагинов (ADR 0013, `backend::remote`): процессы, песочница и связь — общий механизм, второго нет.

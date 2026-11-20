@@ -70,6 +70,21 @@ fn answer(link: &PluginLink, id: u64, reply: Reply, bin: &[u8]) {
     }
 }
 
+/// Задача плагина не паникует молча (PLG-12, хвост PLG-07): паника в задаче `spawn_local` оставляла вопрос
+/// заместителя без ответа — его `Conn::ask` ждёт без таймаута, заместитель висел навсегда. Паника — в журнал
+/// и отказ по обмену тем же `id`.
+fn spawn_quiet(link: &Arc<PluginLink>, id: u64, task: impl Future<Output = ()> + 'static) {
+    use std::panic::AssertUnwindSafe;
+    let link = Arc::clone(link);
+    let done = async move {
+        if futures::FutureExt::catch_unwind(AssertUnwindSafe(task)).await.is_err() {
+            tracing::error!("plugin task panicked: answering a refusal so the host does not hang");
+            answer(&link, id, Reply::Unit(Err(ChannelError::Protocol("plugin task panicked".into()))), &[]);
+        }
+    };
+    tokio::task::spawn_local(done);
+}
+
 /// Вопрос, на который отвечают сразу, без рантайма. `false` — не такой.
 fn quick(link: &PluginLink, id: &'static str, key: bool, plugin: Option<&dyn ChannelPlugin>, n: u64, ask: &Ask) -> bool {
     let reply = match (ask, plugin) {
@@ -386,7 +401,7 @@ impl ServedAreas {
     fn ask(self: &Rc<Self>, id: u64, ask: Ask) {
         match ask {
             Ask::AreaOpen { session, url, profile, login } => {
-                tokio::task::spawn_local(Rc::clone(self).open(id, session, url, profile, login));
+                spawn_quiet(&self.link, id, Rc::clone(self).open(id, session, url, profile, login));
             }
             Ask::AreaCommand { session, cmd } => self.area_send(session, id, Job::Command { id, cmd: *cmd }),
             Ask::AreaRespond { session, invite, status, answer } => {
@@ -395,13 +410,13 @@ impl ServedAreas {
             Ask::AreaChanged { session } => self.area_send(session, id, Job::Changed { id }),
             Ask::AreaTask { session, op } => self.area_send(session, id, Job::TaskOp { id, op }),
             Ask::Probe(url) => {
-                tokio::task::spawn_local(Rc::clone(self).probe(id, url));
+                spawn_quiet(&self.link, id, Rc::clone(self).probe(id, url));
             }
             Ask::Fetch { url, max, etag } => {
-                tokio::task::spawn_local(Rc::clone(self).fetch(id, url, max, etag));
+                spawn_quiet(&self.link, id, Rc::clone(self).fetch(id, url, max, etag));
             }
             Ask::MailOpen { session, url, profile, login } => {
-                tokio::task::spawn_local(Rc::clone(self).open_mail(id, session, url, profile, login));
+                spawn_quiet(&self.link, id, Rc::clone(self).open_mail(id, session, url, profile, login));
             }
             Ask::MailCommand { session, cmd } => {
                 let sent = self.mails.borrow().get(&session).is_some_and(|tx| tx.send(*cmd).is_ok());
@@ -691,10 +706,10 @@ impl Served {
     fn ask(self: &Rc<Self>, id: u64, ask: Ask, bin: Vec<u8>) {
         match ask {
             Ask::Open { session, account, secret } => {
-                tokio::task::spawn_local(Rc::clone(self).open(id, session, account, secret));
+                spawn_quiet(&self.link, id, Rc::clone(self).open(id, session, account, secret));
             }
             Ask::SignIn { flow } => {
-                tokio::task::spawn_local(Rc::clone(self).sign_in(id, flow));
+                spawn_quiet(&self.link, id, Rc::clone(self).sign_in(id, flow));
             }
             Ask::Step { flow, answer: a } => {
                 let sent = self.flows.borrow().get(&flow).is_some_and(|tx| tx.send((id, a)).is_ok());
@@ -703,7 +718,7 @@ impl Served {
                 }
             }
             Ask::Session { session, call } => {
-                tokio::task::spawn_local(Rc::clone(self).call(id, session, call, bin));
+                spawn_quiet(&self.link, id, Rc::clone(self).call(id, session, call, bin));
             }
             // Вопросы описания отвечает поток чтения; сюда они не доходят.
             other => {
