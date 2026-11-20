@@ -1,0 +1,91 @@
+# Авто-доска Project №1 «Postman 0.2.0» (https://github.com/users/Dicobraz/projects/1).
+# События PR/issue сами двигают карточки; правда по задаче — карточка в docs/tasks/.
+# GITHUB_TOKEN проекты v2 не видит (docs GitHub), поэтому мутации идут через секрет
+# BOARD_TOKEN — PAT с правом Projects (учётка Dicobraz): Projects → Read and write.
+name: project-board
+
+on:
+  issues:
+    types: [opened, reopened, closed]
+  pull_request:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+
+permissions:
+  issues: read
+  pull-requests: read
+
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: board-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.BOARD_TOKEN }}
+      PROJECT_ID: PVT_kwHOAQ79Vc4BsVwx
+      STATUS_FIELD_ID: PVTSSF_lAHOAQ79Vc4BsVwxzhqkW4Y
+      OPT_TODO: f75ad846
+      OPT_IN_PROGRESS: 47fc9ee4
+      OPT_DONE: 98236657
+    steps:
+      - name: Карточка доски по событию
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::Не задан секрет BOARD_TOKEN (PAT, право Projects: write). Как завести — в описании этого PR."
+            exit 1
+          fi
+          EV="$GITHUB_EVENT_PATH"
+          MERGED=$(jq -r '.pull_request.merged // "-"' "$EV")
+          if [ "$EVENT" = pull_request ]; then
+            N=$(jq -r .pull_request.number "$EV"); KIND=pr
+            NODE_ID=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$N" --jq .node_id)
+          else
+            N=$(jq -r .issue.number "$EV"); KIND=issue
+            NODE_ID=$(gh api "repos/$GITHUB_REPOSITORY/issues/$N" --jq .node_id)
+          fi
+          ACTION=$(jq -r .action "$EV")
+
+          OPT=
+          case "$KIND:$ACTION:$MERGED" in
+            issue:opened:* | issue:reopened:*)                                        OPT=$OPT_TODO ;;
+            issue:closed:*)                                                           OPT=$OPT_DONE ;;
+            pr:closed:true)                                                           OPT=$OPT_DONE ;;
+            pr:opened:* | pr:reopened:* | pr:ready_for_review:* | pr:converted_to_draft:*) OPT=$OPT_IN_PROGRESS ;;
+            pr:closed:false)                                                          OPT=REMOVE ;;
+            *) echo "Событие $KIND:$ACTION:$MERGED — для него правила нет, пропускаю"; exit 0 ;;
+          esac
+
+          ITEM_ID=$(gh api graphql \
+            -f query='query($id:ID!){node(id:$id){... on Issue{projectItems(first:20){nodes{id project{id}}}}... on PullRequest{projectItems(first:20){nodes{id project{id}}}}}}' \
+            -f id="$NODE_ID" \
+            --jq ".data.node.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | .id")
+
+          if [ "$OPT" = REMOVE ]; then
+            if [ -n "$ITEM_ID" ]; then
+              gh api graphql \
+                -f query='mutation($p:ID!,$i:ID!){deleteProjectV2Item(input:{projectId:$p,itemId:$i}){clientMutationId}}' \
+                -f p="$PROJECT_ID" -f i="$ITEM_ID" >/dev/null
+              echo "Карточка #$N убрана с доски (PR закрыт без мерджа)"
+            else
+              echo "Карточки #$N на доске нет — убирать нечего"
+            fi
+            exit 0
+          fi
+
+          if [ -z "$ITEM_ID" ]; then
+            ITEM_ID=$(gh api graphql \
+              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+              -f p="$PROJECT_ID" -f c="$NODE_ID" \
+              --jq .data.addProjectV2ItemById.item.id)
+            echo "Карточка #$N добавлена в проект"
+          fi
+
+          # singleSelectOptionId в value — String! по схеме GitHub, не ID!
+          gh api graphql \
+            -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){clientMutationId}}' \
+            -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$STATUS_FIELD_ID" -f o="$OPT" >/dev/null
+          echo "Статус #$N → $OPT"
