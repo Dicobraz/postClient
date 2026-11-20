@@ -176,11 +176,11 @@ impl Client {
     /// Один JMAP-запрос с несколькими вызовами. Ответы — в порядке вызовов;
     /// ответ `error` превращается в [`Error::Method`].
     pub async fn call(&self, using: &[&str], calls: &[Invocation]) -> Result<Vec<Invocation>> {
+        // Все адреса сессии прижаты к origin соединения (`Session::resolve_urls`), а при https-учётке вход с
+        // http-сессией отклонён ([`Client::connect`]): открытого текста нет — схему URL анализатор доказать
+        // не умеет.
+        // codeql:disable rust/cleartext-transmission
         let resp: Response = authorize(self.http.post(&self.session.api_url), &self.auth)
-            // Все адреса сессии прижаты к origin соединения (`Session::resolve_urls`), а при https-учётке
-            // вход с http-сессией отклонён ([`Client::connect`]): открытого текста нет — утаём анализатор,
-            // схему URL он доказать не умеет.
-            // codeql:disable rust/cleartext-transmission
             .json(&Request { using, method_calls: calls })
             .send()
             .await?
