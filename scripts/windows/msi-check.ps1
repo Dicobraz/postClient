@@ -114,7 +114,8 @@ $core = ($cargo -split '-')[0] -split '\.'
 $patch = [int]$core[2]
 function Next-Kit([int]$add) {
   $out = Join-Path $env:RUNNER_TEMP "postman-next$add.msi"
-  & $Pack msi $Kit $out --as "$($core[0]).$($core[1]).$($patch + $add)"
+  # Pack's stdout ("msi: ...") must not reach the pipeline: it would turn the returned path into an array.
+  & $Pack msi $Kit $out --as "$($core[0]).$($core[1]).$($patch + $add)" | Out-Null
   if ($LASTEXITCODE) { throw "postman-pack --as +$add failed" }
   return $out
 }
