@@ -297,6 +297,8 @@ pub enum CacheOp {
     AttachRemote(LetterId, RemoteRef),
     /// Связи после своего переноса ([`postman_cache::Cache::upsert_remotes`]).
     UpsertRemotes(String, Vec<(String, LetterRow)>),
+    /// Папка ([`postman_cache::Cache::upsert_folder`]) — ответ [`CacheDone::FolderUpserted`] (RENAME у IMAP).
+    UpsertFolder(FolderRow),
     /// Адреса «От» — в адреса бесед писем ([`crate::channel::mail::remember_senders`], ADR 0012).
     RememberSenders(Vec<Sender>),
     /// Состояние синхронизации ([`postman_cache::Cache::state`]) — ответ [`CacheDone::State`].
@@ -344,6 +346,8 @@ pub enum CacheDone {
     LetterOf(Option<LetterId>),
     Blob(Option<Vec<u8>>),
     Folder(Option<FolderRow>),
+    /// Ключ папки после записи ([`postman_cache::Cache::upsert_folder`], RENAME у IMAP).
+    FolderUpserted(FolderId),
     FolderOf(Option<FolderId>),
     Letter(Option<LetterRow>),
 }
@@ -1128,6 +1132,20 @@ mod tests {
     /// Ответ хранилища для примера: состояния нет.
     fn cache_done() -> CacheDone {
         CacheDone::State(None)
+    }
+
+    /// Запись папки ([`CacheOp::UpsertFolder`], PLG-09 — RENAME у IMAP) — по обмену туда и обратно: строка папки,
+    /// ответ — её ключ в кэше.
+    #[test]
+    fn upsert_folder_crosses_the_wire() {
+        round(&CacheOp::UpsertFolder(FolderRow {
+            owner: postman_cache::Owner::Account("acc".into()),
+            parent: None,
+            name: "Архив".into(),
+            role: None,
+            remote: Some("f0123".into()),
+        }));
+        round(&CacheDone::FolderUpserted(postman_cache::FolderId(7)));
     }
 
     /// Разбор воркером по обмену — то же значение (`Mime` воркера байтами postcard).
