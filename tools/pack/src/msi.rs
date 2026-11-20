@@ -386,10 +386,11 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
             Column::build("Type").int16(),
         ],
     )?;
-    // Root 2 — HKEY_LOCAL_MACHINE; тип 2 — сырое значение: свойство задаёт само наличие значения.
+    // Root 2 — HKLM; тип 18 = сырое значение (2) из 64-битного представления (16): маркеры пишут 64-битные
+    // компоненты, а без 16 движок читает WOW6432Node и на обновлении не находит их (KeepNo срабатывает зря).
     p.insert_rows(
         Insert::into("RegLocator")
-            .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("{name}PrevLoc")), i(2), s(CHANNELS_KEY), s(name), i(2)]).collect()),
+            .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("{name}PrevLoc")), i(2), s(CHANNELS_KEY), s(name), i(18)]).collect()),
     )?;
     p.create_table(
         "AppSearch",
@@ -434,28 +435,29 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
         vec![s("SetInstallLocation"), i(51), s("ARPINSTALLLOCATION"), s("[INSTALLDIR]")],
         vec![s("RemoveAppContainer"), i(CA_EXE_IGNORE), s("worker.exe"), s("--remove-appcontainer")],
     ];
-    for (name, _) in &CHANNELS {
-        action_rows.push(vec![s(&format!("No{name}")), i(51), s("REMOVE"), s(&format!("[REMOVE][~]{name}"))]);
-        action_rows.push(vec![s(&format!("KeepNo{name}")), i(51), s("REMOVE"), s(&format!("[REMOVE][~]{name}"))]);
-    }
-    p.insert_rows(Insert::into("CustomAction").rows(action_rows))?;
-
     // Условия состава каналов (PLG-13): CHANNELS задаёт точный состав (не назван — в REMOVE); при обновлении без
     // CHANNELS маркеры держат прошлый состав (не было — остаётся без). Явный REMOVE важнее всего.
+    // REMOVE — список фич через запятую: пустое и непустое значения дописываются разными действиями, иначе в
+    // списке возникает пустой токен, и CostFinalize отказывает (2711 «Feature name ('')»); [~] для этого не
+    // годится — это NUL-разделитель REG_MULTI_SZ, не списков свойств.
     let mut channel_actions = Vec::new();
     for (n, (name, _)) in CHANNELS.iter().enumerate() {
         let prev = format!("PREV{}", name.to_uppercase());
-        channel_actions.push((
-            format!("No{name}"),
-            format!("CHANNELS AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")"),
-            940 + 2 * n as i32,
-        ));
-        channel_actions.push((
-            format!("KeepNo{name}"),
-            format!("OLDERFOUND AND NOT CHANNELS AND NOT {prev} AND NOT (REMOVE >< \"{name}\")"),
-            941 + 2 * n as i32,
-        ));
+        let no = format!("CHANNELS AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")");
+        let keep = format!("OLDERFOUND AND NOT CHANNELS AND NOT {prev} AND NOT (REMOVE >< \"{name}\")");
+        let seq = 940 + 4 * n as i32;
+        let variants = [
+            (format!("No{name}Empty"), format!("{no} AND NOT REMOVE"), name.to_string()),
+            (format!("No{name}Join"), format!("{no} AND REMOVE"), format!("[REMOVE],{name}")),
+            (format!("KeepNo{name}Empty"), format!("{keep} AND NOT REMOVE"), name.to_string()),
+            (format!("KeepNo{name}Join"), format!("{keep} AND REMOVE"), format!("[REMOVE],{name}")),
+        ];
+        for (m, (action, cond, target)) in variants.iter().enumerate() {
+            action_rows.push(vec![s(action), i(51), s("REMOVE"), s(target)]);
+            channel_actions.push((action.clone(), cond.clone(), seq + m as i32));
+        }
     }
+    p.insert_rows(Insert::into("CustomAction").rows(action_rows))?;
     let mut ui = vec![
         ("FindRelatedProducts", None, 25),
         ("AppSearch", None, 100),
@@ -614,17 +616,29 @@ mod tests {
         assert!(p.tables().any(|t| t.name() == "Signature"), "Signature table missing from the file");
         let secure = property(&mut p, "SecureCustomProperties");
         assert!(secure.contains("CHANNELS") && secure.contains("PREVTELEGRAM") && secure.contains("PREVMATRIX"), "{secure}");
+        // Локатор маркеров читает 64-битное представление: тип 18 = сырое значение (2) + 64-битный вид (16).
+        let loc = p.select_rows(Select::table("RegLocator")).unwrap().find(|r| r[0].as_str() == Some("TelegramPrevLoc")).unwrap();
+        assert_eq!(loc[4].as_int(), Some(18), "TelegramPrevLoc type");
+        // Убиратели каналов: по четыре на канал — No*/KeepNo*, пустой REMOVE ставит имя фичи, непустой дописывает
+        // через запятую (пустой токен в списке — отказ CostFinalize 2711).
         for name in ["Telegram", "Matrix"] {
-            let no = format!("No{name}");
-            let target = format!("[REMOVE][~]{name}");
-            let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some(no.as_str())).unwrap();
-            assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("REMOVE"), Some(target.as_str())), "{name}");
-            let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(no.as_str())).unwrap();
-            let cond = seq[1].as_str().unwrap();
-            assert!(cond.contains(&format!("NOT (CHANNELS >< \"{name}\")")) && cond.contains("NOT (REMOVE ><"), "{cond}");
-            assert!(seq[2].as_int().unwrap() < 1000, "after CostFinalize: {cond}");
+            let join = format!("[REMOVE],{name}");
+            for base in ["No", "KeepNo"] {
+                for (kind, target) in [("Empty", name), ("Join", join.as_str())] {
+                    let action = format!("{base}{name}{kind}");
+                    let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some(action.as_str())).unwrap();
+                    assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("REMOVE"), Some(target)), "{action}");
+                    let seq =
+                        p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(action.as_str())).unwrap();
+                    let cond = seq[1].as_str().unwrap();
+                    assert!(cond.contains(&format!("(REMOVE >< \"{name}\")")), "{cond}");
+                    assert!(seq[2].as_int().unwrap() < 1000, "after CostFinalize: {cond}");
+                    let ends = if kind == "Empty" { "AND NOT REMOVE" } else { "AND REMOVE" };
+                    assert!(cond.ends_with(ends), "{cond}");
+                }
+            }
         }
-        let keep = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("KeepNoTelegram")).unwrap();
+        let keep = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("KeepNoTelegramEmpty")).unwrap();
         assert!(keep[1].as_str().unwrap().starts_with("OLDERFOUND AND NOT CHANNELS AND NOT PREVTELEGRAM"), "{:?}", keep[1].as_str());
 
         // Встроенный CAB читается и содержит файлы под ключами таблицы File.

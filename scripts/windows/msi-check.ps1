@@ -27,8 +27,9 @@ function Msiexec([string]$what, [string]$name, [int[]]$ok = @(0, 3010)) {
   $p = Start-Process msiexec.exe -ArgumentList "$what /qn /norestart /l*v `"$log`"" -Wait -PassThru
   if ($p.ExitCode -notin $ok) {
     Get-Content $log -Tail 60
-    # Отказавшее действие и его причина: хвост попадает в дамп свойств — вытащить срез с «value 3».
-    Select-String -Path $log -Pattern "value 3|error 1|error 2|CustomAction.*returned" -Context 4 | ForEach-Object {
+    # Отказавшее действие и его причина: хвост попадает в дамп свойств — вытащить срез с «value 3» и следы
+    # сработавших действий состава каналов.
+    Select-String -Path $log -Pattern "value 3|error 1|error 2|CustomAction.*returned|Doing action: (No|KeepNo)" -Context 4 | ForEach-Object {
       "--- $($_.LineNumber)"
       $_.Context.PreContext
       $_.Line
