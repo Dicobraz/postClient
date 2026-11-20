@@ -13,9 +13,9 @@
 //! - **Push** — IDLE на «Входящих» отдельным соединением; остальные папки — опросом ([`POLL`]).
 //! - **Тело** — письмо целиком (`BODY.PEEK[]`), разбор MIME — в воркере-песочнице (`postman_worker::mime`);
 //!   письмо целиком — содержимым письма в хранилище (ADR 0006 п. 2, части — воркером), вложения — `<ключ>#<номер>`.
-//! - **Отправка** — SMTP submission, копия — `APPEND` в «Отправленные». «Отменить» — письмо держит сама синхронизация
-//!   (`Release::After`, S7-04в): до срока его можно вернуть в черновики; закрыли Postman — уходит сразу. «Отправить
-//!   позже» — нет (сервер не держит письмо): `Scheduled` с `max_delay: 0` — интерфейс прячет «позже».
+//! - **Отправка** — SMTP submission, копия — `APPEND` в «Отправленные». Окно «Отменить» и очередь отправки — у ядра
+//!   (PLG-08): путь получает письмо в момент отправки и подтверждает итог. «Отправить позже» — нет (сервер не
+//!   держит письмо): `Scheduled` с `max_delay: 0` — интерфейс прячет «позже».
 //! - **Перенос из другой учётки** (S8-13, ADR 0006 п. 4) — шаги задания ядра: письмо целиком (`FetchRaw`), выгрузка
 //!   (`Import` — `APPEND` с флагами, ключевыми словами при `PERMANENTFLAGS \*` и `INTERNALDATE`; UID — `APPENDUID`,
 //!   иначе поиск по `Message-ID`), повтор — сначала поиск по `Message-ID` в папке; удаление у источника
@@ -26,7 +26,6 @@
 //!   Без них, как и правил и автоответа, — нет.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -39,10 +38,13 @@ use postman_imap::state::{FolderState, Plan};
 use postman_imap::{AppendError, Config, Header, Role, Security, Session, flags, smtp, uid_set};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use postman_core::backend::{BoxFuture, MailPlugin, Spawn};
-use postman_core::model::{Auth, Feature, Features, ImportError, JobId, Remote, Selector};
+use postman_core::backend::mail::{MailCache, MailSeal, MailServer, MailServices, MailWorker};
+use postman_core::backend::remote::{AreaServer, AreaSession, FetchedBody, PluginLink, serve_mail_area};
+use postman_core::backend::wire::MailLogin;
+use postman_core::backend::{BoxFuture, Login, MailPlugin, Spawn};
+use postman_core::model::{Auth, Error as ModelError, Feature, Features, ImportError, JobId, Remote, Selector};
 use postman_core::settings;
-use postman_core::sync::{Account, Command, ErrorKind, Event, FOLDER_UNSUPPORTED, Index, SendReceive, Sender, Stage, Status, SyncError};
+use postman_core::sync::{Account, Command, ErrorKind, Event, FOLDER_UNSUPPORTED, SendReceive, Sender, Stage, Status, SyncError};
 
 /// Писем папки при первом входе — не больше (дальше — «Загрузить ещё»).
 pub const INITIAL: usize = 500;
@@ -54,8 +56,6 @@ pub const POLL: Duration = Duration::from_secs(120);
 const IDLE_RETRY: Duration = Duration::from_secs(30);
 /// Найдено поиском в папке — не больше.
 const SEARCH_LIMIT: usize = 200;
-/// Сколько ждать воркер на разборе письма.
-const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Учётная запись IMAP: адрес (он же «От»), IMAP и SMTP.
 #[derive(Clone, Debug)]
@@ -185,7 +185,7 @@ impl MailPlugin for ImapPlugin {
 
     fn spawn(&self, s: Spawn) -> UnboundedSender<Command> {
         match ImapAccount::of(&s.account) {
-            Some(a) => spawn(a, s.profile, s.cache, s.index, s.events, s.repaint),
+            Some(a) => spawn(a, s.profile, s.cache, s.events, s.repaint),
             None => {
                 let detail = format!("not an IMAP account: {}", s.account.url);
                 let _ = s.events.send(Event::Error(SyncError { kind: ErrorKind::Protocol, stage: Stage::Start, detail }));
@@ -194,6 +194,75 @@ impl MailPlugin for ImapPlugin {
             }
         }
     }
+}
+
+/// Идентификатор пути в наборе (`postman-plugins --plugin=imap`, PLG-09).
+pub const ID: &str = "imap";
+
+/// Путь IMAP + SMTP на стороне процесса (PLG-09): вид сервера и запуск синхронизации учётки с услугами ядра
+/// ([`MailServices`]): хранилище учётки — по обмену, разбор письма — воркером ядра, S/MIME — у ядра.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ImapServer;
+
+impl MailServer for ImapServer {
+    /// IMAP на введённом узле: порт 993 отвечает ([`ImapPlugin::probe`]).
+    fn probe<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Option<String>> {
+        ImapPlugin.probe(url)
+    }
+
+    /// Запустить синхронизацию учётной записи: свой поток с рантаймом, как у пути в ядре; события — хосту
+    /// (`FromPlugin::MailEvent`), команды — из канала. Учётка — из адреса и входа ([`ImapAccount::from_url`]).
+    /// `Err` — поток не завёлся.
+    fn open(
+        &self,
+        url: String,
+        profile: Option<String>,
+        login: MailLogin,
+        services: MailServices,
+        commands: UnboundedReceiver<Command>,
+        notify: Arc<dyn Fn(Event) + Send + Sync>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let Some(account) = ImapAccount::from_url(&url, &login.user, &String::from_utf8_lossy(login.password.expose())) else {
+            return Box::pin(async move { Err(format!("not an IMAP account: {url}")) });
+        };
+        let spawned = std::thread::Builder::new().name(format!("sync-{ID}")).spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => return notify(Event::Error(SyncError::internal(format!("tokio runtime: {e}")))),
+            };
+            rt.block_on(async move {
+                run(account, profile, services, commands, &*notify).await;
+            });
+        });
+        Box::pin(async move {
+            spawned.map_err(|e| format!("sync thread: {e}"))?;
+            Ok(())
+        })
+    }
+}
+
+/// Областей у IMAP нет: календарь и контакты учётки «стандарты» ведёт процесс DAV (`?dav=…`, PLG-07). Заглушка —
+/// потому что путь и области обслуживает один вход процесса ([`serve_mail_area`]).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ImapAreaServer;
+
+impl AreaServer for ImapAreaServer {
+    fn probe<'a>(&'a self, _host: &'a str) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async { None })
+    }
+
+    fn connect<'a>(&'a self, _url: &'a str, _login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn AreaSession>, ModelError>> {
+        Box::pin(async { Err(ModelError::Protocol("IMAP does not serve areas".into())) })
+    }
+
+    fn fetch<'a>(&'a self, _url: &'a str, _max: u32, _etag: Option<&'a str>) -> BoxFuture<'a, Result<Option<FetchedBody>, String>> {
+        Box::pin(async { Err("IMAP does not serve public resources".to_owned()) })
+    }
+}
+
+/// Точка входа процесса: `postman-plugins --plugin=imap` (PLG-09). Ответ — код выхода.
+pub fn serve(link: PluginLink) -> i32 {
+    serve_mail_area(link, ID, Some(Arc::new(ImapServer)), || Arc::new(ImapAreaServer))
 }
 
 /// Папка сервера в кэше.
@@ -296,9 +365,9 @@ fn set_flags(r: &mut EmailRow, server: &[String]) {
 }
 
 /// Все письма папки в кэше (`page` выделяет память под предел — поэтому сначала число).
-fn letters(cache: &Cache, folder: &str) -> postman_cache::Result<Vec<EmailRow>> {
-    let n = cache.count(folder)?;
-    cache.page(folder, 0, n)
+fn letters(store: &dyn MailCache, folder: &str) -> postman_cache::Result<Vec<EmailRow>> {
+    let n = store.count(folder)?;
+    store.page(folder, 0, n)
 }
 
 fn error(stage: Stage, e: &postman_imap::Error) -> SyncError {
@@ -354,75 +423,65 @@ fn body_as(mut b: BodyRow, key: &str) -> BodyRow {
 /// Письма папки `g` — под связи папки с новым именем на сервере `raw` (UID и UIDVALIDITY у `RENAME` те же): у письма
 /// меняется связь с сервером, `LetterId` — тот же (T1-04в, ADR 0006 п. 1); содержимое остаётся при письме, тело —
 /// под новым ключом. `scope` — аккаунт ключей учётной записи.
-fn rekey(cache: &Cache, scope: Option<&str>, g: &Folder, raw: &str) -> postman_cache::Result<()> {
+fn rekey(store: &dyn MailCache, scope: Option<&str>, g: &Folder, raw: &str) -> postman_cache::Result<()> {
     let account = scope.unwrap_or("");
     let id = folder_id(raw);
-    let to = cache.upsert_folder(&FolderRow {
+    let to = store.upsert_folder(&FolderRow {
         owner: Owner::Account(account.to_owned()),
         parent: None,
         name: g.name.clone(),
         role: g.role.map(|r| r.jmap().to_owned()),
         remote: Some(id.clone()),
     })?;
-    let from = cache.folder_of(account, &g.id)?;
+    let from = store.folder_of(account, &g.id)?;
     let mut rows = Vec::new();
     let mut old = Vec::new();
-    for r in letters(cache, &g.key)? {
+    for r in letters(store, &g.key)? {
         let Some((_, validity, uid)) = parse_key(&r.id) else { continue };
-        let Some(letter) = cache.letter_of(account, unscoped(&r.id).1)? else { continue };
-        let Some(mut row) = cache.letter(letter)? else { continue };
+        let Some(letter) = store.letter_of(account, unscoped(&r.id).1)? else { continue };
+        let Some(mut row) = store.letter(letter)? else { continue };
         let new = format!("{id}.{validity}.{uid}");
-        cache.attach_remote(letter, RemoteRef { account: account.to_owned(), id: new.clone(), data: Vec::new(), detached: false })?;
+        store.attach_remote(letter, RemoteRef { account: account.to_owned(), id: new.clone(), data: Vec::new(), detached: false })?;
         for f in row.folders.iter_mut().filter(|f| Some(**f) == from) {
             *f = to;
         }
-        if let Some(b) = cache.body(&r.id)? {
-            cache.put_body(&scoped(scope, &new), &body_as(b, &scoped(scope, &new)))?;
+        if let Some(b) = store.body(&r.id)? {
+            store.put_body(&scoped(scope, &new), &body_as(b, &scoped(scope, &new)))?;
         }
         rows.push((new, row));
         old.push(r.id);
     }
-    cache.upsert_remotes(account, &rows)?;
+    store.upsert_remotes(account, &rows)?;
     // Прежние связи (и тела под прежними ключами): у письма уже есть новая — само письмо остаётся.
-    cache.delete_emails(&old)?;
+    store.delete_emails(&old)?;
     let state = |fid: &str| scoped(scope, &format!("imap.{fid}"));
-    if let Some(s) = cache.state(&state(&g.id))? {
-        cache.set_state(&state(&id), &s)?;
+    if let Some(s) = store.state(&state(&g.id))? {
+        store.set_state(&state(&id), &s)?;
     }
     Ok(())
 }
 
-/// Синхронизация учётной записи IMAP: свой поток, как у JMAP (`postman_core::sync::spawn_thread`). `areas` — пути
-/// областей реестра: подключаются те, чьи адреса есть у учётной записи.
-/// Писем в окне «Отменить» у всех учётных записей этого пути, ещё не ушедших.
-static HOLDING: AtomicUsize = AtomicUsize::new(0);
-/// Приложение выходит: удержанные письма — сейчас, а не по сроку.
-static LEAVING: AtomicBool = AtomicBool::new(false);
-/// Как часто удержание смотрит на [`LEAVING`].
-const LEAVE_LOOK: Duration = Duration::from_millis(100);
-
-/// Приложение выходит: письма в окне «Отменить» уходят сейчас. Процесс ждёт их по [`holding`]: без этого письмо пропало бы
-/// вместе с потоком синхронизации.
-pub fn leave() {
-    LEAVING.store(true, Ordering::Relaxed);
-}
-
-/// Сколько писем ещё держит этот путь.
-pub fn holding() -> usize {
-    HOLDING.load(Ordering::Relaxed)
-}
-
+/// Синхронизация учётной записи IMAP внутри `postman.exe` — для тестов и стенда; в наборе путь — [`ImapServer`]
+/// (PLG-09). Свой поток, как у JMAP (`postman_core::sync::spawn_thread`); услуги ядра — настоящими
+/// ([`postman_core::backend::mail::LocalCache`] и другие).
 pub fn spawn(
     account: ImapAccount,
     profile: Option<String>,
     cache: Cache,
-    index: Index,
     events: mpsc::Sender<Event>,
     repaint: impl Fn() + Send + 'static,
 ) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     postman_core::sync::spawn_thread("sync-imap", events, Box::new(repaint), move |notify| async move {
-        run(account, profile, cache, index, rx, &|e| notify.send(e)).await;
+        let services = MailServices {
+            store: Box::new(postman_core::backend::mail::LocalCache(cache)),
+            worker: Box::new(postman_core::backend::mail::LocalWorker::new(
+                postman_worker::Client::default_exe(),
+                postman_core::backend::mail::WORKER_TIMEOUT,
+            )),
+            seal: Box::new(postman_core::backend::mail::LocalSeal),
+        };
+        run(account, profile, services, rx, &|e| notify.send(e)).await;
     });
     tx
 }
@@ -433,45 +492,23 @@ struct Imap {
     scope: Option<String>,
     session: Option<Session>,
     folders: Vec<Folder>,
-    cache: Cache,
-    _index: Index,
-    worker: Option<postman_worker::Client>,
-    /// Письма в окне «Отменить» (S7-04в): уходят по сроку, отмена возвращает их в черновики.
-    held: Vec<Held>,
-    next_hold: u64,
+    /// Хранилище учётки — услугой ядра (PLG-08/09): в процессе — по обмену, внутри `postman.exe` — локально.
+    store: Box<dyn MailCache>,
+    worker: Box<dyn MailWorker>,
+    seal: Box<dyn MailSeal>,
     /// Первая сверка прошла: опрос раз в [`POLL`] идёт молча, `Status::Loading` — только первая загрузка.
     loaded: bool,
 }
 
-/// Письмо, которое держит синхронизация до срока окна «Отменить».
-struct Held {
-    /// Ключ отправки (`<аккаунт>/hold.<n>`): по нему интерфейс отменяет её (`Command::Unsend`).
-    id: String,
-    draft: Draft,
-    replace: Option<String>,
-    at: tokio::time::Instant,
-}
-
-async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index: Index, mut rx: UnboundedReceiver<Command>, notify: &impl Fn(Event)) {
+async fn run(account: ImapAccount, profile: Option<String>, services: MailServices, mut rx: UnboundedReceiver<Command>, notify: &dyn Fn(Event)) {
+    let MailServices { store, worker, seal } = services;
     notify(Event::Status(Status::Connecting { url: format!("{}:{}", account.imap.host, account.imap.port) }));
     let session = match Session::connect(&account.imap).await {
         Ok(s) => s,
         Err(e) => return notify(Event::Error(error(Stage::Connect, &e))),
     };
     let scope = in_profile(profile.as_deref(), None);
-    let mut me = Imap {
-        account,
-        profile,
-        scope,
-        session: Some(session),
-        folders: Vec::new(),
-        cache,
-        _index: index,
-        worker: None,
-        held: Vec::new(),
-        next_hold: 0,
-        loaded: false,
-    };
+    let mut me = Imap { account, profile, scope, session: Some(session), folders: Vec::new(), store, worker, seal, loaded: false };
     notify(Event::Status(Status::SignedIn { user: me.account.email.clone() }));
     let address = Address::new("", &me.account.email);
     if me.profile.is_none() {
@@ -491,7 +528,7 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
     }
     let senders = vec![Sender { account: me.scope.clone(), address, signature: String::new() }];
     // Адрес ящика — в адреса бесед писем (ADR 0012, поиск `беседа:`).
-    postman_core::channel::mail::remember_senders(&me.cache, &senders);
+    let _ = me.store.remember_senders(&senders);
     notify(Event::Senders(senders));
     // Сервер не держит письма: «Отправить позже» нет (интерфейс прячет его по `max_delay: 0`).
     notify(Event::Scheduled { list: Vec::new(), max_delay: 0 });
@@ -499,7 +536,7 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
         Some(p) => vec![AccountRow { id: p.clone(), name: me.account.email.clone(), is_personal: true, read_only: false }],
         None => Vec::new(),
     };
-    if let Err(e) = me.cache.replace_accounts_of(me.profile.as_deref(), &rows) {
+    if let Err(e) = me.store.replace_accounts_of(me.profile.as_deref(), &rows) {
         return notify(Event::Error(error(Stage::Load, &db(e))));
     }
     if let Err(e) = me.refresh_all(notify).await {
@@ -520,12 +557,11 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
             biased;
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else {
-                    // Интерфейс закрылся: письма в окне «Отменить» — отправить сейчас, а не потерять.
-                    me.release_held(true, notify).await;
+                    // Интерфейс закрылся: очередь окна «Отменить» допишет ядро (PLG-08).
                     return;
                 };
                 // Перенос папки в себя, в подпапку, в другой аккаунт — отказ ядра до сервера.
-                let Some(cmd) = postman_core::sync::admit(cmd, || me.cache.mailboxes().unwrap_or_default(), notify) else { continue };
+                let Some(cmd) = postman_core::sync::admit(cmd, || me.store.mailboxes().unwrap_or_default(), notify) else { continue };
                 if let Err(e) = me.handle(cmd, notify).await {
                     tracing::error!("imap: command failed: {e}");
                     if is_network(&e) {
@@ -551,25 +587,12 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
                     notify(Event::MailboxesChanged);
                 }
             }
-            () = held_until(me.held.iter().map(|h| h.at).min()) => me.release_held(LEAVING.load(Ordering::Relaxed), notify).await,
             _ = poll.tick() => {
                 if let Err(e) = me.refresh_all(notify).await {
                     notify(Event::Error(e));
                 }
             }
         }
-    }
-}
-
-/// Срок ближайшего удержанного письма; нет — никогда.
-async fn held_until(at: Option<tokio::time::Instant>) {
-    let Some(at) = at else { return std::future::pending().await };
-    while !LEAVING.load(Ordering::Relaxed) {
-        let now = tokio::time::Instant::now();
-        if now >= at {
-            return;
-        }
-        tokio::time::sleep((at - now).min(LEAVE_LOOK)).await;
     }
 }
 
@@ -636,7 +659,7 @@ impl Imap {
     ///
     /// Обрыв на одной папке не прекращает сверку: соединение — заново, дальше — следующая папка (не больше
     /// [`MAX_DROPS`] обрывов за проход; не подключиться — проход прекращён). «Входящие» — первыми ([`sync_order`]).
-    async fn refresh_all(&mut self, notify: &impl Fn(Event)) -> Result<(), SyncError> {
+    async fn refresh_all(&mut self, notify: &dyn Fn(Event)) -> Result<(), SyncError> {
         if let Err(e) = self.load_folders().await {
             if is_network(&e) {
                 self.session = None;
@@ -711,7 +734,7 @@ impl Imap {
             .iter()
             .enumerate()
             .map(|(i, f)| {
-                let letters = letters(&self.cache, &f.key).unwrap_or_default();
+                let letters = letters(self.store.as_ref(), &f.key).unwrap_or_default();
                 MailboxRow {
                     id: f.key.clone(),
                     parent_id: f.parent.clone(),
@@ -725,18 +748,18 @@ impl Imap {
                 }
             })
             .collect();
-        self.cache.replace_mailboxes(self.scope(), &rows).map_err(db)
+        self.store.replace_mailboxes(self.scope(), &rows).map_err(db)
     }
 
     /// Сверить папку с сервером; `true` — письма в кэше изменились.
     async fn refresh(&mut self, f: &Folder) -> postman_imap::Result<bool> {
         let scope = self.scope.clone();
         let state_key = scoped(scope.as_deref(), &format!("imap.{}", f.id));
-        let old = self.cache.state(&state_key).map_err(db)?.and_then(|s| FolderState::decode(&s));
+        let old = self.store.state(&state_key).map_err(db)?.and_then(|s| FolderState::decode(&s));
         let session = self.session().await?;
         let sel = session.select(&f.raw).await?;
         let validity = sel.state.uid_validity;
-        let here = letters(&self.cache, &f.key).map_err(db)?;
+        let here = letters(self.store.as_ref(), &f.key).map_err(db)?;
         let mut upsert: Vec<EmailRow> = Vec::new();
         let mut gone: Vec<String> = Vec::new();
         match postman_imap::state::plan(old, sel.state) {
@@ -786,12 +809,12 @@ impl Imap {
             }
         }
         if !gone.is_empty() {
-            self.cache.delete_emails(&gone).map_err(db)?;
+            self.store.delete_emails(&gone).map_err(db)?;
         }
         if !upsert.is_empty() {
-            self.cache.upsert_emails(&upsert).map_err(db)?;
+            self.store.upsert_emails(&upsert).map_err(db)?;
         }
-        self.cache.set_state(&state_key, &sel.state.encode()).map_err(db)?;
+        self.store.set_state(&state_key, &sel.state.encode()).map_err(db)?;
         Ok(!gone.is_empty() || !upsert.is_empty())
     }
 
@@ -844,9 +867,9 @@ impl Imap {
     /// Письмо целиком: содержимое письма в хранилище или с сервера (тогда — в содержимое).
     async fn raw(&mut self, key: &str) -> postman_imap::Result<Vec<u8>> {
         let key = key.split_once('#').map_or(key, |(k, _)| k);
-        let letter = self.cache.letter_of(self.account(), unscoped(key).1).map_err(db)?;
+        let letter = self.store.letter_of(self.account(), unscoped(key).1).map_err(db)?;
         if let Some(l) = letter
-            && let Some(raw) = self.cache.letter_content(l).map_err(db)?
+            && let Some(raw) = self.store.letter_content(l).map_err(db)?
         {
             return Ok(raw);
         }
@@ -861,39 +884,22 @@ impl Imap {
     /// Письмо целиком — содержимым письма: крупные части — отдельно (разбор — воркером); не разобралось — целиком.
     async fn put_content(&mut self, letter: LetterId, raw: &[u8]) -> postman_imap::Result<()> {
         let bytes = raw.to_vec();
-        let parts = match self.in_worker(move |w| w.mime_split(&bytes).and_then(|(split, decoded)| postman_core::store::parts(split, &decoded))).await
-        {
+        let parts = match self.worker.mime_split(bytes).and_then(|(split, decoded)| postman_core::store::parts(split, &decoded)) {
             Ok(p) => p,
             Err(e) => {
                 tracing::debug!("imap: content split: {e}");
                 Vec::new()
             }
         };
-        self.cache.put_content(letter, raw, &parts).map_err(db)?;
+        self.store.put_content(letter, raw, &parts).map_err(db)?;
         Ok(())
-    }
-
-    /// Работа воркера-песочницы — в отдельном потоке (он блокирует).
-    async fn in_worker<T: Send + 'static>(
-        &mut self,
-        f: impl FnOnce(&mut postman_worker::Client) -> Result<T, String> + Send + 'static,
-    ) -> postman_imap::Result<T> {
-        let mut worker = self.worker.take().unwrap_or_else(|| postman_worker::Client::new(postman_worker::Client::default_exe(), WORKER_TIMEOUT));
-        let (worker, out) = tokio::task::spawn_blocking(move || {
-            let out = f(&mut worker);
-            (worker, out)
-        })
-        .await
-        .map_err(|e| postman_imap::Error::Protocol(format!("worker task: {e}")))?;
-        self.worker = Some(worker);
-        out.map_err(|e| postman_imap::Error::Protocol(format!("worker: {e}")))
     }
 
     /// Заголовки цепочки (In-Reply-To, References) из строк письма — разбором в воркере (S8-36): письмо в процессе
     /// приложения не разбирается. Воркер не ответил — писем без цепочки (каждое своей), список всё равно обновляется.
     async fn threads(&mut self, mut headers: Vec<Header>) -> Vec<Header> {
         let heads: Vec<Vec<u8>> = headers.iter_mut().map(|h| std::mem::take(&mut h.head)).collect();
-        match self.in_worker(move |w| w.threads(&heads)).await {
+        match self.worker.threads(&heads) {
             Ok(threads) => {
                 for (h, t) in headers.iter_mut().zip(threads) {
                     h.in_reply_to = t.in_reply_to;
@@ -907,7 +913,7 @@ impl Imap {
 
     async fn body(&mut self, key: &str) -> postman_imap::Result<()> {
         let raw = self.raw(key).await?;
-        let m = self.in_worker(move |w| w.mime(&raw)).await?;
+        let m = self.worker.mime(raw).map_err(|e| postman_imap::Error::Protocol(format!("worker: {e}")))?;
         let addrs = |v: Vec<postman_worker::mime::Addr>| v.into_iter().map(|a| Addr { name: a.name, email: a.email }).collect();
         let body = BodyRow {
             to: addrs(m.to),
@@ -931,27 +937,27 @@ impl Imap {
                 .collect(),
             blob_id: Some(key.to_owned()),
         };
-        self.cache.put_body(key, &body).map_err(db)?;
+        self.store.put_body(key, &body).map_err(db)?;
         // Превью строки — из текста письма, как у JMAP.
-        if let Some(mut r) = self.cache.rows_by_ids(&[key.to_owned()]).map_err(db)?.pop()
+        if let Some(mut r) = self.store.rows_by_ids(&[key.to_owned()]).map_err(db)?.pop()
             && r.preview.is_empty()
             && let Some(text) = m.text
         {
             r.preview = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(256).collect();
-            self.cache.upsert_emails(&[r]).map_err(db)?;
+            self.store.upsert_emails(&[r]).map_err(db)?;
         }
         Ok(())
     }
 
     async fn blob(&mut self, blob_id: &str) -> postman_imap::Result<Vec<u8>> {
-        if let Some(b) = self.cache.blob(blob_id).map_err(db)? {
+        if let Some(b) = self.store.blob(blob_id).map_err(db)? {
             return Ok(b);
         }
         let raw = self.raw(blob_id).await?;
         let Some((_, index)) = blob_id.split_once('#') else { return Ok(raw) };
         let index: u32 = index.parse().map_err(|_| postman_imap::Error::Protocol(format!("bad blob {blob_id}")))?;
-        let data = self.in_worker(move |w| w.mime_part(&raw, index)).await?;
-        self.cache.put_blob(blob_id, &data).map_err(db)?;
+        let data = self.worker.mime_part(raw, index).map_err(|e| postman_imap::Error::Protocol(format!("worker: {e}")))?;
+        self.store.put_blob(blob_id, &data).map_err(db)?;
         Ok(data)
     }
 
@@ -1003,7 +1009,7 @@ impl Imap {
     }
 
     /// Сверить папки по ключам и сказать интерфейсу.
-    async fn after(&mut self, folders: &[String], notify: &impl Fn(Event)) {
+    async fn after(&mut self, folders: &[String], notify: &dyn Fn(Event)) {
         let list: Vec<Folder> = self.folders.iter().filter(|f| folders.contains(&f.key) || folders.contains(&f.id)).cloned().collect();
         let mut changed = false;
         for f in &list {
@@ -1043,7 +1049,7 @@ impl Imap {
     /// Письмо — в байты (S/MIME «Конфиденциально» — как у JMAP); вложения пересылки — из кэша или с сервера.
     async fn message_bytes(&mut self, draft: &mut Draft, message_id: &str) -> postman_imap::Result<Vec<u8>> {
         self.fill(&mut draft.attachments).await?;
-        message_bytes(draft, jiff::Timestamp::now().as_second(), message_id)
+        message_bytes(draft, jiff::Timestamp::now().as_second(), message_id, self.seal.as_ref())
     }
 
     /// Отправить через SMTP, копию — в «Отправленные». В ответе с новыми участниками (решение владельца 2026-11-13) —
@@ -1054,7 +1060,7 @@ impl Imap {
         if let Some(share) = draft.share.as_mut().filter(|_| newcomers) {
             self.fill(&mut share.attachments).await?;
         }
-        let out = to_send(&draft, jiff::Timestamp::now().as_second())?;
+        let out = to_send(&draft, jiff::Timestamp::now().as_second(), self.seal.as_ref())?;
         for l in &out {
             smtp::submit(&self.account.smtp, &draft.from.email, &l.rcpt, &l.raw).await?;
         }
@@ -1124,13 +1130,13 @@ impl Imap {
             let uids = session.search(query).await?;
             let uids = &uids[uids.len().saturating_sub(SEARCH_LIMIT)..];
             let keys: Vec<String> = uids.iter().map(|&u| email_key(scope.as_deref(), &f.id, sel.state.uid_validity, u)).collect();
-            let known: HashSet<String> = self.cache.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
+            let known: HashSet<String> = self.store.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
             let missing: Vec<u32> = uids.iter().zip(&keys).filter(|(_, k)| !known.contains(*k)).map(|(&u, _)| u).collect();
             if !missing.is_empty() {
                 let (headers, _) = self.fetch_headers(&f, sel.state.uid_validity, &missing).await?;
                 let headers = self.threads(headers).await;
                 let rows: Vec<EmailRow> = headers.iter().map(|h| row(scope.as_deref(), &f, sel.state.uid_validity, h)).collect();
-                self.cache.upsert_emails(&rows).map_err(db)?;
+                self.store.upsert_emails(&rows).map_err(db)?;
             }
             out.extend(keys);
         }
@@ -1141,7 +1147,7 @@ impl Imap {
     async fn load_more(&mut self, mailbox: &str) -> postman_imap::Result<usize> {
         let f = self.folder_by_key(mailbox).cloned().ok_or_else(|| postman_imap::Error::Protocol(format!("no folder {mailbox}")))?;
         let scope = self.scope.clone();
-        let here = letters(&self.cache, &f.key).map_err(db)?;
+        let here = letters(self.store.as_ref(), &f.key).map_err(db)?;
         let oldest = here.iter().filter_map(|r| parse_key(&r.id).map(|(_, _, u)| u)).min().unwrap_or(u32::MAX);
         let session = self.session().await?;
         let sel = session.select(&f.raw).await?;
@@ -1153,7 +1159,7 @@ impl Imap {
         let (headers, _) = self.fetch_headers(&f, sel.state.uid_validity, page).await?;
         let headers = self.threads(headers).await;
         let rows: Vec<EmailRow> = headers.iter().map(|h| row(scope.as_deref(), &f, sel.state.uid_validity, h)).collect();
-        self.cache.upsert_emails(&rows).map_err(db)?;
+        self.store.upsert_emails(&rows).map_err(db)?;
         Ok(rows.len())
     }
 
@@ -1183,31 +1189,11 @@ impl Imap {
         let (headers, skipped) = self.fetch_headers(&f, sel.state.uid_validity, &uids).await?;
         let headers = self.threads(headers).await;
         let rows: Vec<EmailRow> = headers.iter().map(|h| row(scope.as_deref(), &f, sel.state.uid_validity, h)).collect();
-        self.cache.upsert_emails(&rows).map_err(db)?;
+        self.store.upsert_emails(&rows).map_err(db)?;
         // Пропущенные сервером не отдал, но они есть: не «удалены».
         let mut found: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
         found.extend(skipped.iter().map(|&u| email_key(scope.as_deref(), &f.id, sel.state.uid_validity, u)));
         Ok(keys.iter().filter(|k| !found.contains(k.as_str())).cloned().collect())
-    }
-
-    /// Отправить удержанные письма, срок которых вышел (`all` — все).
-    async fn release_held(&mut self, all: bool, notify: &impl Fn(Event)) {
-        let now = tokio::time::Instant::now();
-        let (due, keep): (Vec<Held>, Vec<Held>) =
-            std::mem::take(&mut self.held).into_iter().partition(|h| postman_core::send_later::release_now(h.at, now, all));
-        self.held = keep;
-        if due.is_empty() {
-            return;
-        }
-        for h in due {
-            if let Err(e) = self.send(h.draft, h.replace).await {
-                tracing::error!("imap: held letter not sent: {e}");
-                notify(Event::Error(error(Stage::Command, &e)));
-            }
-            HOLDING.fetch_sub(1, Ordering::Relaxed);
-        }
-        let folders: Vec<String> = [Role::Sent, Role::Drafts].iter().filter_map(|r| self.folder_by_role(*r).map(|f| f.key.clone())).collect();
-        self.after(&folders, notify).await;
     }
 
     /// Имя папки на сервере по ключу кэша; `None` — верхний уровень ящика.
@@ -1220,7 +1206,7 @@ impl Imap {
 
     /// Создать, переименовать или перенести папку (T1-04в): `CREATE`, `RENAME` в новый путь; у переименованной —
     /// ключи кэша её и подпапок (путь — часть ключа), затем папки заново и `MailboxesChanged`; отказ — `FolderFailed`.
-    async fn folder_command(&mut self, cmd: Command, notify: &impl Fn(Event)) {
+    async fn folder_command(&mut self, cmd: Command, notify: &dyn Fn(Event)) {
         let (mailbox, result) = match cmd {
             Command::CreateFolder { parent, name, .. } => {
                 let result = match self.raw_of(parent.as_deref()) {
@@ -1282,12 +1268,12 @@ impl Imap {
             })
             .collect();
         for (g, raw) in moved {
-            rekey(&self.cache, self.scope(), &g, &raw).map_err(db)?;
+            rekey(self.store.as_ref(), self.scope(), &g, &raw).map_err(db)?;
         }
         Ok(())
     }
 
-    async fn handle(&mut self, cmd: Command, notify: &impl Fn(Event)) -> postman_imap::Result<()> {
+    async fn handle(&mut self, cmd: Command, notify: &dyn Fn(Event)) -> postman_imap::Result<()> {
         match cmd {
             cmd @ (Command::CreateFolder { .. } | Command::RenameFolder { .. } | Command::MoveFolder { .. }) => {
                 self.folder_command(cmd, notify).await
@@ -1298,10 +1284,10 @@ impl Imap {
             }
             Command::Thread(thread) => {
                 // Беседа — письма кэша с тем же ключом цепочки (`thread_key`) из всех папок; тела — с сервера.
-                let mut rows = self.cache.thread(&thread).map_err(db)?;
+                let mut rows = self.store.thread(&thread).map_err(db)?;
                 rows.sort_by_key(|r| r.received_at);
                 for r in &rows {
-                    if self.cache.body(&r.id).map_err(db)?.is_none() {
+                    if self.store.body(&r.id).map_err(db)?.is_none() {
                         self.body(&r.id).await?;
                     }
                 }
@@ -1407,31 +1393,17 @@ impl Imap {
                 }
                 notify(Event::Counts { ticket, counts: Some(counts) });
             }
-            Command::Send { draft, replace, ticket, release } => {
-                let hold = match release {
-                    postman_core::model::Release::At(_) => {
-                        notify(Event::ComposeFailed { ticket, error: "send later is not available for IMAP".into() });
-                        return Ok(());
-                    }
-                    postman_core::model::Release::After(s) => s,
-                    postman_core::model::Release::Now => 0,
-                };
-                if hold > 0 {
-                    // Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
-                    let scheduled = self.hold(*draft, replace, hold);
-                    notify(Event::Sent { ticket, scheduled: Some(scheduled) });
-                    return Ok(());
+            // Окно «Отменить» и «Отправить позже» держит ядро (PLG-08): путь получает письмо в момент отправки,
+            // `Release` всегда «сейчас»; ответ — итог отправки.
+            Command::Send { draft, replace, ticket, .. } => match self.send(*draft, replace).await {
+                Ok(()) => {
+                    notify(Event::Sent { ticket, scheduled: None });
+                    let folders: Vec<String> =
+                        [Role::Sent, Role::Drafts].iter().filter_map(|r| self.folder_by_role(*r).map(|f| f.key.clone())).collect();
+                    self.after(&folders, notify).await;
                 }
-                match self.send(*draft, replace).await {
-                    Ok(()) => {
-                        notify(Event::Sent { ticket, scheduled: None });
-                        let folders: Vec<String> =
-                            [Role::Sent, Role::Drafts].iter().filter_map(|r| self.folder_by_role(*r).map(|f| f.key.clone())).collect();
-                        self.after(&folders, notify).await;
-                    }
-                    Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
-                }
-            }
+                Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
+            },
             Command::SaveDraft { draft, replace, ticket } => match self.save_draft(*draft, replace).await {
                 Ok(id) => {
                     notify(Event::DraftSaved { ticket, id });
@@ -1441,15 +1413,8 @@ impl Imap {
                 Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
             },
             Command::Scheduled => notify(Event::Scheduled { list: Vec::new(), max_delay: 0 }),
-            Command::Unsend { scheduled, ticket } => match self.held.iter().position(|h| h.id == scheduled.submission) {
-                // Письмо ещё здесь: не отправлять; черновик откроет интерфейс (он держит его с окна «Отменить»).
-                Some(i) => {
-                    self.held.remove(i);
-                    HOLDING.fetch_sub(1, Ordering::Relaxed);
-                    notify(Event::Unsent { ticket, email: String::new() });
-                }
-                None => notify(Event::UnsendFailed { ticket, too_late: true, error: String::new() }),
-            },
+            // Отменять нечего: письма в окне «Отменить» держит ядро (PLG-08) и команду не пересылает.
+            Command::Unsend { ticket, .. } => notify(Event::UnsendFailed { ticket, too_late: true, error: String::new() }),
             Command::Reconnect => {
                 if self.session.is_none() {
                     self.session().await?;
@@ -1475,21 +1440,9 @@ impl Imap {
                 notify(Event::SendReceive(SendReceive::Finished { error }));
             }
             Command::RespondInvite { invite, status, in_reply_to, answer } => self.respond_invite(*invite, status, in_reply_to, answer, notify).await,
-            Command::Delegate { uid, drafts, ticket, release } => self.delegate(uid, drafts, ticket, release, notify).await,
-            Command::Withhold { scheduled, ticket } => {
-                // Письма шага поручения в окне «Отменить» держит синхронизация: убрать те, что ещё здесь.
-                let mut too_late = false;
-                for s in &scheduled {
-                    match self.held.iter().position(|h| h.id == s.submission) {
-                        Some(i) => {
-                            self.held.remove(i);
-                            HOLDING.fetch_sub(1, Ordering::Relaxed);
-                        }
-                        None => too_late = true,
-                    }
-                }
-                notify(Event::Withheld { ticket, too_late, error: None });
-            }
+            Command::Delegate { uid, drafts, ticket, .. } => self.delegate(uid, drafts, ticket, notify).await,
+            // Окно «Отменить» у шагов поручения было у синхронизации; очередь — у ядра (PLG-08), письмо шага уходит сразу.
+            Command::Withhold { ticket, .. } => notify(Event::Withheld { ticket, too_late: true, error: None }),
             Command::FetchRaw { letter } => {
                 let data = match self.remote_of(letter) {
                     Ok(Some(id)) => self.raw(&scoped(self.scope(), &id)).await.map(Arc::new).map_err(|e| e.to_string()),
@@ -1524,12 +1477,12 @@ impl Imap {
 
     /// Связь письма с сервером этой учётки — и `detached` (письмо задания переноса у источника); `None` — связи нет.
     fn remote_of(&self, letter: postman_core::model::LetterId) -> postman_cache::Result<Option<String>> {
-        Ok(self.cache.remotes(LetterId(letter.0))?.into_iter().find(|r| r.account == self.account()).map(|r| r.id))
+        Ok(self.store.remotes(LetterId(letter.0))?.into_iter().find(|r| r.account == self.account()).map(|r| r.id))
     }
 
     /// Папка этой учётки по папке хранилища (цель выгрузки).
     fn folder_at(&self, folder: postman_core::model::FolderId) -> Option<&Folder> {
-        let row = self.cache.folder(postman_cache::FolderId(folder.0)).ok()??;
+        let row = self.store.folder(postman_cache::FolderId(folder.0)).ok()??;
         let Owner::Account(a) = &row.owner else { return None };
         let remote = row.remote.as_deref().filter(|_| a == self.account())?;
         self.folder_by_id(remote)
@@ -1548,7 +1501,7 @@ impl Imap {
         retry: bool,
     ) -> Result<String, ImportError> {
         let f = self.folder_at(folder).cloned().ok_or_else(|| ImportError::Rejected("no such folder".into()))?;
-        let raw = match self.cache.letter_content(LetterId(letter.0)) {
+        let raw = match self.store.letter_content(LetterId(letter.0)) {
             Ok(Some(raw)) => raw,
             Ok(None) => return Err(ImportError::Rejected("letter content is not stored".into())),
             Err(e) => return Err(ImportError::Rejected(e.to_string())),
@@ -1602,7 +1555,7 @@ impl Imap {
         type InFolder = (Folder, u32, Vec<(postman_core::model::LetterId, u32)>);
         let mut by: Vec<InFolder> = Vec::new();
         for &letter in letters {
-            let found = match self.cache.remotes(LetterId(letter.0)) {
+            let found = match self.store.remotes(LetterId(letter.0)) {
                 Ok(refs) => refs.into_iter().find(|r| r.account == account).map(|r| r.id),
                 Err(e) => {
                     out.push(Event::DestroyFailed { job, letter, error: e.to_string() });
@@ -1660,16 +1613,6 @@ impl Imap {
     }
 
     /// Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
-    fn hold(&mut self, draft: Draft, replace: Option<String>, secs: u32) -> postman_core::send_later::Scheduled {
-        self.next_hold += 1;
-        let id = scoped(self.scope(), &format!("hold.{}", self.next_hold));
-        let send_at = jiff::Timestamp::now().as_second() + i64::from(secs);
-        let at = tokio::time::Instant::now() + Duration::from_secs(u64::from(secs));
-        self.held.push(Held { id: id.clone(), draft, replace, at });
-        HOLDING.fetch_add(1, Ordering::Relaxed);
-        postman_core::send_later::Scheduled { submission: id.clone(), email: id, send_at }
-    }
-
     /// Ответ на приглашение: своей копией на CalDAV (REPLY шлёт сервер), иначе — письмом организатору (iMIP).
     async fn respond_invite(
         &mut self,
@@ -1677,7 +1620,7 @@ impl Imap {
         status: postman_calendar::Partstat,
         in_reply_to: Option<String>,
         answer: postman_core::invite::Answer,
-        notify: &impl Fn(Event),
+        notify: &dyn Fn(Event),
     ) {
         use postman_core::invite::{Delivery, Responded, delivery};
         // Свою копию, если она была, уже ответила область (PLG-07, развод команд ядром): сюда команда доходит,
@@ -1699,28 +1642,22 @@ impl Imap {
     }
 
     /// Шаг поручения (S6-09): своя копия задачи — на CalDAV (без рассылки сервером, `SCHEDULE-AGENT=CLIENT`), затем
-    /// письма iTIP шага по SMTP; окно «Отменить» — как у `Send`.
-    async fn delegate(&mut self, uid: String, drafts: Vec<Draft>, ticket: u64, release: postman_core::model::Release, notify: &impl Fn(Event)) {
+    /// письма iTIP шага по SMTP. Окно «Отменить» у шагов — у ядра очередь письма `Send`; здесь шаг уходит сразу.
+    async fn delegate(&mut self, uid: String, drafts: Vec<Draft>, ticket: u64, notify: &dyn Fn(Event)) {
         // Копию задачи на сервер отправляет ядро (PLG-07, развод команд ядром): сюда шаг доходит после неё —
-        // письма iTIP шага по SMTP; окно «Отменить» — как у `Send`.
-        let mut scheduled = Vec::new();
+        // письма iTIP шага по SMTP.
         for draft in drafts {
-            match release {
-                postman_core::model::Release::After(s) if s > 0 => scheduled.push(self.hold(draft, None, s)),
-                _ => {
-                    if let Err(e) = self.send(draft, None).await {
-                        return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled });
-                    }
-                }
+            if let Err(e) = self.send(draft, None).await {
+                return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled: Vec::new() });
             }
         }
-        notify(Event::Delegated { ticket, uid, error: None, scheduled });
+        notify(Event::Delegated { ticket, uid, error: None, scheduled: Vec::new() });
     }
 
     /// Календарь, задачи, занятость и контакты ведёт ядро путями областей (PLG-07, `backend::areas`): сюда доходят
     /// команды, которых области не взяли. Справочника у IMAP нет — список рассылки «не поддерживается» (T3-09);
     /// остальное — в журнал.
-    fn area_command(&self, cmd: Command, notify: &impl Fn(Event)) {
+    fn area_command(&self, cmd: Command, notify: &dyn Fn(Event)) {
         if let Command::ExpandList { ticket, address } = cmd {
             return notify(Event::ListMembers { ticket, address, members: Vec::new(), error: Some(postman_core::sync::ListError::Unsupported) });
         }
@@ -1802,13 +1739,14 @@ fn command_name(c: &Command) -> &'static str {
     }
 }
 
-/// Письмо — в байты: сборка и S/MIME «Конфиденциально» (как у JMAP). Вложения — уже с байтами.
-fn message_bytes(draft: &Draft, now: i64, message_id: &str) -> postman_imap::Result<Vec<u8>> {
+/// Письмо — в байты: сборка и S/MIME «Конфиденциально» (как у JMAP) — запечатывает услуга ядра (ключи пользователя
+/// плагину недоступны, PLG-08). Вложения — уже с байтами.
+fn message_bytes(draft: &Draft, now: i64, message_id: &str, seal: &dyn MailSeal) -> postman_imap::Result<Vec<u8>> {
     let raw = postman_compose::build(draft, now, message_id).map_err(|e| postman_imap::Error::Protocol(format!("building the message: {e}")))?;
     if draft.encrypt_to.is_empty() {
         return Ok(raw);
     }
-    postman_core::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_imap::Error::Protocol(format!("{e:?}")))
+    seal.seal_outgoing(raw, draft.encrypt_to.clone()).map_err(|e| postman_imap::Error::Protocol(format!("{e:?}")))
 }
 
 /// Письмо на отправку SMTP: байты, адреса конверта (RCPT TO), класть ли его в «Отправленные».
@@ -1821,12 +1759,12 @@ struct Outgoing {
 
 /// Копии письма ([`Draft::outgoing`]) в байты, каждая со своим Message-ID. Копия новым участникам — первой: не ушла
 /// она — не уходит и основная. Байты вложений — уже в черновике.
-fn to_send(draft: &Draft, now: i64) -> postman_imap::Result<Vec<Outgoing>> {
+fn to_send(draft: &Draft, now: i64, seal: &dyn MailSeal) -> postman_imap::Result<Vec<Outgoing>> {
     let mut out = draft
         .outgoing()
         .into_iter()
         .map(|c| {
-            let raw = message_bytes(&c.draft, now, &postman_compose::new_message_id(&c.draft.from, now))?;
+            let raw = message_bytes(&c.draft, now, &postman_compose::new_message_id(&c.draft.from, now), seal)?;
             Ok(Outgoing { raw, rcpt: c.rcpt, keep: c.keep })
         })
         .collect::<postman_imap::Result<Vec<_>>>()?;
@@ -1871,7 +1809,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = super::to_send(&draft, 1_792_240_200).unwrap();
+        let out = super::to_send(&draft, 1_792_240_200, &postman_core::backend::mail::LocalSeal).unwrap();
         let got: Vec<_> = out.iter().map(|l| (l.rcpt.clone(), l.keep)).collect();
         assert_eq!(got, [(vec!["olga@x.example".to_owned()], false), (vec!["ivan@x.example".to_owned()], true)]);
         use postman_worker::mime::{parse, part};
@@ -1889,7 +1827,7 @@ mod tests {
         // Отключили в черновике — одно письмо всем, как раньше.
         let mut off = draft.clone();
         off.share.as_mut().unwrap().off = true;
-        let out = super::to_send(&off, 0).unwrap();
+        let out = super::to_send(&off, 0, &postman_core::backend::mail::LocalSeal).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rcpt, ["ivan@x.example", "olga@x.example"]);
         assert!(out[0].keep);
@@ -1953,7 +1891,7 @@ mod tests {
         cache.move_letters(&[l2], local).unwrap();
 
         let g = Folder { key: old.clone(), id: old.clone(), raw: "Old".into(), name: "Old".into(), parent: None, role: None, selectable: true };
-        rekey(&cache, None, &g, "New").unwrap();
+        rekey(&postman_core::backend::mail::LocalCache(cache.clone()), None, &g, "New").unwrap();
 
         let new = folder_id("New");
         let n1 = email_key(None, &new, 7, 1);
