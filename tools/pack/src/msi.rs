@@ -464,12 +464,17 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
         action_rows.push(vec![s(name), i(51), s("ADDLOCAL"), s(target)]);
         channel_actions.push(((*name).into(), format!("OLDERFOUND AND NOT CHANNELS AND {markers} AND NOT ADDLOCAL"), 943 + n as i32));
     }
-    // REMOVE — список через запятую: пустое и непустое значения дописываются разными действиями, иначе в
-    // списке возникает пустой токен, и CostFinalize отказывает (2711 «Feature name ('')»); [~] для этого не
-    // годится — это NUL-разделитель REG_MULTI_SZ, не списков свойств.
+    // REMOVE — только обслуживание того же кода (свойство Installed задано, свежая транзакция исключена —
+    // см. выше), и строго ДО CostFinalize: после него состав уже посчитан, поздний REMOVE на выбор фич не
+    // влияет. Канал стоит ⟺ его маркер прошлой установки найден (PREV*). Список через запятую: пустое и
+    // непустое значения дописываются разными действиями, иначе пустой токен — отказ CostFinalize (2711);
+    // [~] для этого не годится — это NUL-разделитель REG_MULTI_SZ, не списков свойств.
     for (n, (name, _)) in CHANNELS.iter().enumerate() {
-        let no = format!("CHANNELS AND NOT OLDERFOUND AND NOT (CHANNELS >< \"{name}\") AND !{name}=3 AND NOT (REMOVE >< \"{name}\")");
-        let seq = 1350 + 2 * n as i32;
+        let no = format!(
+            "CHANNELS AND NOT OLDERFOUND AND Installed AND PREV{} AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")",
+            name.to_uppercase()
+        );
+        let seq = 950 + 2 * n as i32;
         for (m, (kind, extra, target)) in
             [("Empty", "AND NOT REMOVE", name.to_string()), ("Join", "AND REMOVE", format!("[REMOVE],{name}"))].iter().enumerate()
         {
@@ -642,7 +647,8 @@ mod tests {
         assert_eq!(loc[4].as_int(), Some(18), "TelegramPrevLoc type");
         // Состав каналов: ADDLOCAL — эксклюзивный состав на обновлении (непустой REMOVE в свежей транзакции
         // InstallValidate переписывает в «ALL» и вырождает её в обслуживание); REMOVE — только в обслуживании
-        // (!фича=3), после CostFinalize и до InstallValidate. Пустой токен в списке — отказ 2711.
+        // (Installed + маркер PREV*), строго до CostFinalize (поздний REMOVE на состав не влияет). Пустой
+        // токен в списке — отказ 2711.
         let expected = [
             ("SetAddLocalMain", "Main", "CHANNELS AND NOT ADDLOCAL", 940),
             ("AddLocalTelegram", "[ADDLOCAL],Telegram", "CHANNELS >< \"Telegram\"", 941),
@@ -667,8 +673,14 @@ mod tests {
                 assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("REMOVE"), Some(target)), "{action}");
                 let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(action.as_str())).unwrap();
                 let cond = seq[1].as_str().unwrap();
-                assert!(cond.contains(&format!("!{name}=3")) && cond.contains("NOT OLDERFOUND"), "{action}: {cond}");
-                assert!((1350..1400).contains(&seq[2].as_int().unwrap()), "before InstallValidate: {cond}");
+                assert!(
+                    cond.contains("NOT OLDERFOUND")
+                        && cond.contains("Installed")
+                        && cond.contains(&format!("PREV{}", name.to_uppercase()))
+                        && cond.contains(&format!("(REMOVE >< \"{name}\")")),
+                    "{action}: {cond}"
+                );
+                assert!((950..1000).contains(&seq[2].as_int().unwrap()), "before CostFinalize: {cond}");
                 let ends = if kind == "Empty" { "AND NOT REMOVE" } else { "AND REMOVE" };
                 assert!(cond.ends_with(ends), "{cond}");
             }
