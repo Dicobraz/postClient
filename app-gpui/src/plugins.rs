@@ -8,8 +8,8 @@
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
 //! по запросу. Так работают демо-канал (PLG-02, общий набор `postman-plugins`), Matrix (PLG-04, свой файл
 //! `postman-plugins-matrix`), Telegram (PLG-05, свой файл `postman-plugins-telegram`), каталог сертификатов
-//! (PLG-06, общий набор) и CalDAV/CardDAV (PLG-07, общий набор: области учётки и публичные загрузки); почтовые
-//! пути — внутри `postman.exe`, как были (PLG-08…10).
+//! (PLG-06, общий набор), CalDAV/CardDAV (PLG-07, общий набор: области учётки и публичные загрузки), EWS
+//! (PLG-08) и IMAP + SMTP (PLG-09) — общим набором: почтовые пути из `postman.exe` ушли (остался JMAP — PLG-10).
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -76,8 +76,15 @@ const EWS: Row = Row {
     profile: Profile::Network { enterprise_auth: true },
 };
 
+/// IMAP + SMTP (PLG-09) — общим набором `postman-plugins` (решение владельца 2026-11-16): почта учётки
+/// «стандарты», IDLE и отправка SMTP — одним сетевым стеком с каталогом, областями и EWS. Адрес — своя схема
+/// ([`Claim::Scheme`]: префикс `imap` — обе, `imaps://` и `imap://` STARTTLS); области учётки (`?dav=…`) — процесс
+/// DAV ([`DAV`]); хранилище учётки, воркер и S/MIME — услуги ядра по обмену, окно «Отменить» и очередь — у ядра.
+const IMAP: Row =
+    Row { id: "imap", kind: Kind::Mail, claim: Claim::Scheme("imap"), set: "postman-plugins", profile: Profile::Network { enterprise_auth: false } };
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS, IMAP];
 
 /// Файлы наборов каналов (PLG-15): ключ компонента — имя файла набора; экраны по нему спрашивают состояние
 /// и запускают докачку, хост по нему находит строку плагина ([`component_ready`]).
@@ -204,7 +211,8 @@ pub(crate) fn registry() -> &'static Registry {
             // EWS — процессом общего набора (PLG-08, ADR 0013): почта и свои области одним процессом, хранилище
             // учётки, воркер и S/MIME — услуги ядра по обмену.
             .with_mail(host().mail(EWS))
-            .with_mail(postman_backend_imap::ImapPlugin)
+            // IMAP + SMTP — тем же набором (PLG-09): IDLE и отправка SMTP в процессе, окно «Отменить» — у ядра.
+            .with_mail(host().mail(IMAP))
             // CalDAV и CardDAV — процессом общего набора (PLG-07, ADR 0013); области EWS у IMAP-учётки на
             // Exchange — тем же процессом набора ([`EWS`]).
             .with_area(remote_area())
@@ -221,7 +229,7 @@ pub(crate) fn autoreply_limited(error: &str) -> bool {
     error == postman_backend_jmap::settings::ONE_TEXT_ONLY
 }
 
-/// Выход: письма в окне «Отменить» держат поток IMAP и очередь отправки ядра (PLG-08), сообщения каналов — очереди
+/// Выход: письма в окне «Отменить» держит очередь отправки ядра (PLG-08), сообщения каналов — очереди
 /// отправки потоков каналов (ADR 0012 п. 11): они уходят сейчас, выход их дожидается. Окна уже нет: не дольше
 /// [`LEAVE_LIMIT`], сервер без ответа не держит программу вечно.
 pub(crate) fn finish_sends() {
@@ -230,11 +238,10 @@ pub(crate) fn finish_sends() {
     if let Some(host) = HOST.get() {
         host.leave();
     }
-    let left = || postman_backend_imap::holding() + outbox::holding() + mail_holding();
+    let left = || outbox::holding() + mail_holding();
     if left() == 0 {
         return;
     }
-    postman_backend_imap::leave();
     mail_leave();
     outbox::leave();
     let start = Instant::now();
