@@ -7,6 +7,7 @@ tg-add = Add Telegram account
 tg-no-key = This build has no Telegram application key: sign-in is unavailable.
 comp-missing = The channel component is not installed.
 comp-download = Download
+comp-from-file = Install from file…
 comp-stale = The channel component changed with the update: download it again.
 comp-busy = Downloading the component…
 comp-percent = Downloading the component: { $pct } %
