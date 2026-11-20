@@ -37,7 +37,7 @@ use crate::roles::Look;
 
 /// Открытые ключи minisign выпусков (строка `RW…` из `.pub`; второй — на время смены ключа). Пусто — ни проверок,
 /// ни скачиваний. Ключ общий с Урфином (id FBEB16F843D809C6, 2026-11-12); тот же — в переменной `UPDATE_PUBLIC_KEY`.
-pub(crate) const UPDATE_PUBLIC_KEYS: &[&str] = &["RWTGCdhD+Bbr+0a0+iypW5+F7ZLUgkBqE3nPPC2N3zSxTkuUPSZ5E3gb"];
+pub(crate) const UPDATE_PUBLIC_KEYS: &[&str] = &["RWSyQwL2kzhQ0Q2doYdJNgkB+qX179avD94j7HtQ1i3xZfl4C9LQLyXY"];
 
 /// Файл-флаг portable рядом с exe: кладёт его архив (`package.ps1`) и `install.ps1`, MSI — нет.
 pub(crate) const PORTABLE_FLAG: &str = "postman.portable";
@@ -62,7 +62,7 @@ pub(crate) fn product() -> Option<Product> {
 
 fn product_with(keys: &'static [&'static str]) -> Option<Product> {
     let current = Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
-    Some(Product { name: "Postman", repo: "Dicobraz421/Postman", asset_prefix: "postman", current, public_keys: keys })
+    Some(Product { name: "Postman", repo: "Dicobraz/postClient", asset_prefix: "postman", current, public_keys: keys })
 }
 
 /// Первая строка `main`: запуск помощника установки — ставит обновление и выходит, окна нет.
@@ -571,11 +571,11 @@ pub(crate) mod scenes {
         m.allowed = true;
         m.status = Status::Available(VERSION.into());
         let asset = format!("postman-{VERSION}-windows-x64.msi");
-        let base = format!("https://github.com/Dicobraz421/Postman/releases/download/v{VERSION}");
+        let base = format!("https://github.com/Dicobraz/postClient/releases/download/v{VERSION}");
         m.offer = Some(pets_update::Update {
             version: pets_update::Version::new(0, 2, 0),
             kind: pets_update::InstallKind::Msi,
-            page_url: format!("https://github.com/Dicobraz421/Postman/releases/tag/v{VERSION}"),
+            page_url: format!("https://github.com/Dicobraz/postClient/releases/tag/v{VERSION}"),
             asset_url: format!("{base}/{asset}"),
             size: 40 << 20,
             signature_url: format!("{base}/{asset}.minisig"),
@@ -672,7 +672,7 @@ mod tests {
                 )
             };
             let body = format!(
-                r#"[{{"tag_name":"v{v}","prerelease":{},"html_url":"https://github.com/Dicobraz421/Postman/releases/tag/v{v}",
+                r#"[{{"tag_name":"v{v}","prerelease":{},"html_url":"https://github.com/Dicobraz/postClient/releases/tag/v{v}",
                 "assets":[{},{}]}}]"#,
                 v.contains('-'),
                 asset("msi"),
@@ -704,7 +704,7 @@ mod tests {
             assert_eq!(u.asset_name, format!("postman-99.0.0-{OS}-{ARCH}.{ext}"));
             assert_eq!(u.signature_url, format!("https://example.invalid/postman-99.0.0-{OS}-{ARCH}.{ext}.minisig"));
             assert_eq!(net.calls(), 1);
-            assert!(net.calls.lock().unwrap()[0].starts_with("https://api.github.com/repos/Dicobraz421/Postman/releases"));
+            assert!(net.calls.lock().unwrap()[0].starts_with("https://api.github.com/repos/Dicobraz/postClient/releases"));
         }
     }
 
@@ -787,7 +787,7 @@ mod tests {
     #[test]
     fn update_product_and_dir() {
         let p = product_with(KEY).unwrap();
-        assert_eq!((p.name, p.repo, p.asset_prefix), ("Postman", "Dicobraz421/Postman", "postman"));
+        assert_eq!((p.name, p.repo, p.asset_prefix), ("Postman", "Dicobraz/postClient", "postman"));
         assert_eq!(p.current.to_string(), env!("CARGO_PKG_VERSION"));
         let data = Path::new("Postman");
         assert_eq!(dir(data), data.join("updates"));

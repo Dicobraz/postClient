@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dicobraz421/Postman/releases"><b>Скачать</b></a> ·
+  <a href="https://github.com/Dicobraz/postClient/releases"><b>Скачать</b></a> ·
   <a href="docs/USER-GUIDE.md"><b>Инструкция</b></a>
 </p>
 
@@ -95,7 +95,7 @@ PDF, Word, Excel, PowerPoint, картинки, архивы и вложенны
 
 ## Установка
 
-Файлы — на странице [выпусков](https://github.com/Dicobraz421/Postman/releases), выберите свой:
+Файлы — на странице [выпусков](https://github.com/Dicobraz/postClient/releases), выберите свой:
 
 | Файл | Для чего | Когда выбрать |
 |---|---|---|

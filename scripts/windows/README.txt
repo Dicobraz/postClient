@@ -9,7 +9,7 @@
   postman.portable    — (только в архиве) метка: эта копия обновляется из архива, а не из MSI
   README.txt          — этот файл
 
-Новые версии и отдельные файлы: https://github.com/Dicobraz421/Postman/releases
+Новые версии и отдельные файлы: https://github.com/Dicobraz/postClient/releases
 Пропал postman-worker.exe или postman-viewer.exe — скачайте только его из выпуска своей версии
 и положите рядом с postman.exe; переустанавливать не нужно. Каналы (Telegram, Matrix) MSI несёт в себе
 и ставит по умолчанию; в архиве их файлов нет — «Настройки» → «Каналы» предложит «Скачать»,

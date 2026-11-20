@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 pub const ID: &str = "Pets.Postman";
 const SCHEMA: &str = "1.9.0";
-const REPO: &str = "https://github.com/Dicobraz421/Postman";
+const REPO: &str = "https://github.com/Dicobraz/postClient";
 
 /// Имя MSI выпуска — как его кладёт `package.ps1`.
 pub fn msi_name(version: &str) -> String {
@@ -89,7 +89,7 @@ mod tests {
         let installer = fs::read_to_string(dir.join("Pets.Postman.installer.yaml")).unwrap();
         assert!(
             installer.contains(
-                "InstallerUrl: https://github.com/Dicobraz421/Postman/releases/download/v0.1.0-beta.2/postman-0.1.0-beta.2-windows-x64.msi"
+                "InstallerUrl: https://github.com/Dicobraz/postClient/releases/download/v0.1.0-beta.2/postman-0.1.0-beta.2-windows-x64.msi"
             )
         );
         // SHA-256 от "abc".

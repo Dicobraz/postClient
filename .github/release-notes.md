@@ -2,7 +2,7 @@
 <!-- pre -->
 **Бета-версия.** Основное работает, но возможны ошибки. Нашли ошибку — «Настройки» → «Общие» → «Отчёт для поддержки» и приложите файл к сообщению.
 
-**Бета-тестерам.** Версии 0.1.0-beta.5 и новее предложат эту версию сами. Версии 0.1.0-beta.4 и старше обновить себя не умеют: один раз установите эту версию вручную (файлы ниже) — письма и вход сохранятся, — затем «Настройки» → «Общие» → «Обновления» → канал **«Предварительный»**.
+**Бета-тестерам.** Версии 0.1.0-беты обновлением не предложат эту версию: у выпуска 0.2.0 новый ключ подписи обновлений. Один раз установите её вручную (файлы ниже) — письма и вход сохранятся, — затем «Настройки» → «Общие» → «Обновления»: следующие версии предложатся сами.
 <!-- /pre -->
 
 ## Что нового
@@ -23,8 +23,8 @@
 
 | | Что это | Права |
 |---|---|---|
-| [**Установщик** (.msi)](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-windows-x64.msi) | Обычный выбор. Откройте файл — Postman установится для всех на этом компьютере и появится в меню «Пуск». | Нужны права администратора: Windows попросит подтвердить. |
-| [**Архив** (.zip)](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-windows-x64.zip) | Если прав администратора нет. Распакуйте и запустите `install.ps1` — как, написано в `README.txt` внутри. Postman установится только для вас. | Не нужны. |
+| [**Установщик** (.msi)](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-windows-x64.msi) | Обычный выбор. Откройте файл — Postman установится для всех на этом компьютере и появится в меню «Пуск». | Нужны права администратора: Windows попросит подтвердить. |
+| [**Архив** (.zip)](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-windows-x64.zip) | Если прав администратора нет. Распакуйте и запустите `install.ps1` — как, написано в `README.txt` внутри. Postman установится только для вас. | Не нужны. |
 
 Обновления Postman ставит сам и спрашивает перед установкой. Вручную — так же, как установка: новая версия ставится поверх старой, письма и вход сохраняются. Перед этим выйдите из Postman: «Выход» в меню его значка в трее (крестик только прячет окно).
 <!-- unsigned -->
@@ -38,8 +38,8 @@
 
 | | Что это |
 |---|---|
-| [**Образ диска** (.dmg)](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-macos-arm64.dmg) | Обычный выбор. Откройте файл и перетащите **Postman** на ярлык **Applications** («Программы») в том же окне. |
-| [**Архив** (.zip)](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-macos-arm64.zip) | То же приложение: распакуйте двойным щелчком и перенесите `Postman.app` в «Программы». |
+| [**Образ диска** (.dmg)](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-macos-arm64.dmg) | Обычный выбор. Откройте файл и перетащите **Postman** на ярлык **Applications** («Программы») в том же окне. |
+| [**Архив** (.zip)](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-macos-arm64.zip) | То же приложение: распакуйте двойным щелчком и перенесите `Postman.app` в «Программы». |
 
 На Mac с процессором Intel Postman не работает.
 
@@ -62,9 +62,9 @@
 
 | | Что это |
 |---|---|
-| [**Пакет для Ubuntu и Debian** (.deb)](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-linux-x64.deb) | `sudo apt install ./postman-{version}-linux-x64.deb` — Postman появится в меню приложений. |
-| [**Пакет для Fedora, RHEL и openSUSE** (.rpm)](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-linux-x64.rpm) | `sudo dnf install ./postman-{version}-linux-x64.rpm` (openSUSE — `sudo zypper install …`). |
-| [**AppImage**](https://github.com/Dicobraz421/Postman/releases/download/v{version}/postman-{version}-linux-x64.AppImage) | Один файл для любого дистрибутива, без установки: сделайте его исполняемым (`chmod +x`) и запустите. |
+| [**Пакет для Ubuntu и Debian** (.deb)](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-linux-x64.deb) | `sudo apt install ./postman-{version}-linux-x64.deb` — Postman появится в меню приложений. |
+| [**Пакет для Fedora, RHEL и openSUSE** (.rpm)](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-linux-x64.rpm) | `sudo dnf install ./postman-{version}-linux-x64.rpm` (openSUSE — `sudo zypper install …`). |
+| [**AppImage**](https://github.com/Dicobraz/postClient/releases/download/v{version}/postman-{version}-linux-x64.AppImage) | Один файл для любого дистрибутива, без установки: сделайте его исполняемым (`chmod +x`) и запустите. |
 
 Пакеты .deb и .rpm лучше AppImage на Ubuntu 23.10 и новее: с ними вложения открываются в более строгой изоляции. Обновления: AppImage Postman обновляет сам; с пакетами .deb и .rpm он сообщит о новой версии и даст ссылку «Скачать» — поставьте её так же, как при установке, письма и вход сохранятся.
 
