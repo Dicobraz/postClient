@@ -27,12 +27,15 @@ POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный
 cargo run --release -p postman-gpui                     # без окружения: сохранённый вход или строка входа; --sign-out — забыть
 ```
 
-Плагины отдельными процессами (ADR 0013): набор `postman-plugins` лежит рядом с `postman.exe` — с PLG-03 он в пакетах
-всех трёх ОС (архив и MSI, `Contents/MacOS`, deb/rpm/AppImage; состав наборов — решение 2026-11-16). Пока в нём только
-демо-канал: в отладочной сборке `--demo` поднимает его процессом после первого кадра — собрать набор вместе с
-программой: `cargo build -p postman-gpui -p postman-worker -p postman-plugins`. Нет файла набора — канал в «проблеме»,
-в журнале `plugin set postman-plugins not found`. Снимки и release-сборка без `POSTMAN_BENCH_PLUGINS` держат демо-канал
-в своём процессе, как прежде. Журнал плагина — в общем журнале с меткой `plugin=<id>`.
+Плагины отдельными процессами (ADR 0013): набор `postman-plugins` лежит рядом с `postman.exe` — он в пакетах
+всех трёх ОС (архив и MSI, `Contents/MacOS`, deb/rpm/AppImage; состав наборов — решение 2026-11-16). В наборе —
+все протоколы почты и каталога (JMAP, IMAP+SMTP, DAV, EWS, LDAP), каналы — своими файлами
+(`postman-plugins-telegram`, `postman-plugins-matrix`): в `postman.exe` протоколов и их сетевого стека нет.
+Собирать набор вместе с программой: `cargo build -p postman-gpui -p postman-worker -p postman-plugins`
+(и `-p postman-plugins-telegram` / `-p postman-plugins-matrix` для каналов). Нет файла набора — учётка и канал
+в «проблеме», в журнале `plugin set postman-plugins not found`. Демо-канал в отладочной сборке держится
+в своём процессе (`demo_remote`), снимки и release — как прежде; процесс набора — после первого кадра и по
+запросу, простой 5 минут его завершает. Журнал плагина — в общем журнале с меткой `plugin=<id>`.
 
 Release-сборка — без консоли (`windows_subsystem`): `--bench`, `--screens`, `--help` пишут в консоль родителя
 или в перенаправление (`> файл`, канал). Git Bash и `.cmd` ждут выхода сами; в интерактивном cmd — `start /wait`,
