@@ -1,10 +1,13 @@
 # S4-01: the delivery zip postman-<version>-windows-x64.zip: postman.exe, postman-worker.exe, README.txt, install.ps1,
-# postman.portable (the self-update flag), postman-viewer.exe (S8-24, ADR 0007), postman-plugins.exe (the common
-# plugin set, ADR 0013: mail and directory together, owner decision 2026-11-16), postman-plugins-telegram.exe
-# (the Telegram set file, PLG-05) and postman-plugins-matrix.exe (the Matrix set file, PLG-04). WASM viewer modules
-# (viewers/*) are not packaged.
-# The MSI postman-<version>-windows-x64.msi (owner decision 2026-11-07) - the same files without install.ps1, made by
-# postman-pack.exe of the same build (tools/pack); signed afterwards by scripts\windows\sign.ps1 in CI.
+# postman.portable (the self-update flag), postman-viewer.exe (S8-24, ADR 0007) and postman-plugins.exe (the common
+# plugin set, ADR 0013: mail and directory together). The channel components (PLG-17, owner decision 2026-11-19
+# "components") are NOT in the zip: the app downloads their set files from the release (PLG-15), and they are
+# published as their own zips - postman-plugins-<channel>-windows-x64.zip - the same files the app unpacks into the
+# components folder; without the network an administrator hands them over and postman --install-component installs
+# them (PLG-16). WASM viewer modules (viewers/*) are not packaged.
+# The MSI postman-<version>-windows-x64.msi (owner decision 2026-11-07) - the base files plus the channel set files
+# as optional features, off by default and turned on by CHANNELS (PLG-13); made by postman-pack.exe of the same
+# build (tools/pack); signed afterwards by scripts\windows\sign.ps1 in CI.
 # Takes the exes of a finished release build (cargo build --release --workspace --features postman-worker/viewer);
 # the version is the one built into postman.exe (Cargo). Prints the zip path; in GitHub Actions also sets the
 # outputs name, dir (the folder with the packaged files, the build artifact), version, msi (its path) and assets
@@ -45,11 +48,11 @@ Copy-Item -LiteralPath $viewer -Destination $dir
 $plugins = Join-Path $release "postman-plugins.exe"
 if (-not (Test-Path -LiteralPath $plugins)) { throw "no $plugins - build the whole workspace (cargo build --release --workspace)" }
 Copy-Item -LiteralPath $plugins -Destination $dir
-# The Telegram set file (PLG-05, owner decision 2026-11-16: channels get their own set files): same place.
+# The Telegram set file (PLG-05) and the Matrix one (PLG-04): the MSI cabinet carries them (optional features,
+# PLG-13); the zip does not (PLG-17).
 $pluginsTelegram = Join-Path $release "postman-plugins-telegram.exe"
 if (-not (Test-Path -LiteralPath $pluginsTelegram)) { throw "no $pluginsTelegram - build the whole workspace (cargo build --release --workspace)" }
 Copy-Item -LiteralPath $pluginsTelegram -Destination $dir
-# The Matrix set file (PLG-04): same place.
 $pluginsMatrix = Join-Path $release "postman-plugins-matrix.exe"
 if (-not (Test-Path -LiteralPath $pluginsMatrix)) { throw "no $pluginsMatrix - build the whole workspace (cargo build --release --workspace)" }
 Copy-Item -LiteralPath $pluginsMatrix -Destination $dir
@@ -58,11 +61,20 @@ Copy-Item -LiteralPath "$PSScriptRoot\README.txt", "$PSScriptRoot\install.ps1" -
 # The MSI lists its files itself (tools/pack ITEMS) and does not install the flag.
 Set-Content -LiteralPath (Join-Path $dir "postman.portable") -Value "Postman portable: updates replace these files from the zip." -Encoding ascii
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-Compress-Archive -Path "$dir\*" -DestinationPath $zip -CompressionLevel Optimal
-# Release files: the zip and the components a user can download alone ("Component missing", S8-38).
+# The zip without the channel set files (PLG-17): the base kit only - the MSI still carries both (its cabinet
+# is made from the whole $dir).
+Compress-Archive -Path (Join-Path $dir "postman.exe"), (Join-Path $dir "postman-worker.exe"), (Join-Path $dir "postman-viewer.exe"), (Join-Path $dir "postman-plugins.exe"), (Join-Path $dir "README.txt"), (Join-Path $dir "install.ps1"), (Join-Path $dir "postman.portable") -DestinationPath $zip -CompressionLevel Optimal
+# Release files: the zip, the components a user can download alone ("Component missing", S8-38) and the channel
+# components as their own zips (PLG-17): what the app downloads (PLG-15) and what --install-component takes
+# offline (PLG-16); signed by minisign in CI like the rest.
 $assets = Join-Path $Out "assets"
 if (Test-Path -LiteralPath $assets) { Remove-Item -LiteralPath $assets -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $assets | Out-Null
+foreach ($set in "postman-plugins-telegram", "postman-plugins-matrix") {
+  $component = Join-Path $assets "$set-windows-x64.zip"
+  if (Test-Path -LiteralPath $component) { Remove-Item -LiteralPath $component -Force }
+  Compress-Archive -Path (Join-Path $dir "$set.exe") -DestinationPath $component -CompressionLevel Optimal
+}
 Copy-Item -LiteralPath $zip, (Join-Path $dir "postman-worker.exe"), (Join-Path $dir "postman-viewer.exe") -Destination $assets
 $pack = Join-Path $release "postman-pack.exe"
 if (-not (Test-Path -LiteralPath $pack)) { throw "no $pack - build the whole workspace (cargo build --release --workspace)" }

@@ -3,12 +3,15 @@
 #   postman-<version>-linux-x64.AppImage - one file for any distribution (the self-update replaces it);
 #   postman-<version>-linux-x64.deb      - Debian, Ubuntu and derivatives;
 #   postman-<version>-linux-x64.rpm      - Fedora, openSUSE, RHEL and derivatives.
-# Each holds postman, postman-worker, postman-viewer, postman-plugins (the common plugin set, ADR 0013),
-# postman-plugins-telegram (the Telegram set file, PLG-05) and postman-plugins-matrix (the Matrix set file,
-# PLG-04) side by side
+# Each holds postman, postman-worker, postman-viewer, postman-plugins (the common plugin set, ADR 0013: mail and
+# directory together) side by side
 # (the worker and the plugin host look for them next to postman), postman.desktop (the mailto scheme), hicolor icons
-# from app-gpui/res/postman.ico. deb and rpm also hold an AppArmor profile for the worker, the viewer and the plugin
-# set (data/apparmor/postman): Ubuntu 23.10+ forbids unprivileged user namespaces, and without them the worker
+# from app-gpui/res/postman.ico. The channel components (PLG-17, owner decision 2026-11-19 "components") are NOT in
+# the packages: the app downloads their set files from the release (PLG-15), so they are published here as their own
+# zips - postman-plugins-<channel>-linux-x64.zip - the same files the app unpacks into the components folder;
+# without the network an administrator hands them over and postman --install-component installs them (PLG-16).
+# deb and rpm also hold an AppArmor profile for the worker, the viewer, the plugin set and the components folder
+# (data/apparmor/postman): Ubuntu 23.10+ forbids unprivileged user namespaces, and without them the worker
 # sandbox runs without namespaces (ADR 0010, mode optional). The profile goes to
 # /etc/apparmor.d only where AppArmor 4 is installed; the AppImage has none - the sandbox diagnostics show it.
 # Glibc: the binaries take the glibc of the build host - CI builds in an old container (ci.yml, job release); the
@@ -41,8 +44,10 @@ mkdir -p "$out"
 target="$(cd "$target" && pwd)"
 out="$(cd "$out" && pwd)"
 bin="$target/$profile"
-bins=(postman postman-worker postman-viewer postman-plugins postman-plugins-telegram postman-plugins-matrix)
-for b in "${bins[@]}"; do
+bins=(postman postman-worker postman-viewer postman-plugins)
+# The channel components (PLG-17): built by the same call, shipped as their own zips - not in the packages.
+components=(postman-plugins-telegram postman-plugins-matrix)
+for b in "${bins[@]}" "${components[@]}"; do
   if [ ! -x "$bin/$b" ]; then
     echo "no $bin/$b - run cargo build --$profile --workspace --features postman-worker/viewer first" >&2
     exit 1
@@ -58,13 +63,14 @@ if [ -z "$version" ]; then echo "no version in [workspace.package] of Cargo.toml
 # deb and rpm: a pre-release sorts before the release with "~" (0.1.0~beta.4 < 0.1.0).
 pkgver="${version/-/\~}"
 
-# Oldest glibc the binaries run on: the newest versioned symbol they import.
-glibc="$(for b in "${bins[@]}"; do objdump -T "$bin/$b"; done | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)"
+# Oldest glibc the binaries run on: the newest versioned symbol they import. The channel components (PLG-17)
+# ship outside the packages, but they must run on the same floor.
+glibc="$(for b in "${bins[@]}" "${components[@]}"; do objdump -T "$bin/$b"; done | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)"
 if [ -z "$glibc" ]; then echo "no GLIBC_ symbols in the binaries" >&2; exit 1; fi
 
 # Libraries: linked ones must be known here (a new one - a line below and in both dependency lists); gpui and wgpu
 # load Vulkan, xkbcommon-x11 and the X11/Wayland client at run time (dlopen), so they are listed by hand.
-for b in "${bins[@]}"; do objdump -p "$bin/$b" | sed -n 's/^ *NEEDED *//p'; done | sort -u | while read -r so; do
+for b in "${bins[@]}" "${components[@]}"; do objdump -p "$bin/$b" | sed -n 's/^ *NEEDED *//p'; done | sort -u | while read -r so; do
   case "$so" in
     libc.so.6|libm.so.6|libdl.so.2|libpthread.so.0|librt.so.1|libgcc_s.so.1|ld-linux-x86-64.so.2) ;;
     libssl.so.3|libcrypto.so.3|libgssapi_krb5.so.2|libxkbcommon.so.0|libxkbcommon-x11.so.0|libfontconfig.so.1|libfreetype.so.6) ;;
@@ -176,8 +182,6 @@ mkdir -p "$rpmtop/SPECS" "$rpmtop/RPMS"
   echo "/usr/bin/postman-worker"
   echo "/usr/bin/postman-viewer"
   echo "/usr/bin/postman-plugins"
-  echo "/usr/bin/postman-plugins-telegram"
-  echo "/usr/bin/postman-plugins-matrix"
   echo "/usr/share/applications/postman.desktop"
   echo "/usr/share/icons/hicolor/*/apps/postman.png"
   echo "/usr/share/postman"
@@ -185,6 +189,17 @@ mkdir -p "$rpmtop/SPECS" "$rpmtop/RPMS"
 rpmbuild -bb --quiet --define "_topdir $rpmtop" --define "_rpmdir $rpmtop/RPMS" \
   --define "_build_name_fmt %%{NAME}.rpm" "$rpmtop/SPECS/postman.spec"
 mv "$rpmtop/RPMS/postman.rpm" "$rpm"
+
+# --- channel components (PLG-17): their own zips next to the packages - what the app downloads (PLG-15)
+# and what an administrator hands over for offline rollout (--install-component, PLG-16) ---
+for c in "${components[@]}"; do
+  component="$assets/$c-linux-x64.zip"
+  python3 - "$bin/$c" "$component" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[2], "w", compression=zipfile.ZIP_DEFLATED) as z:
+    z.write(sys.argv[1], sys.argv[1].split("/")[-1])
+PY
+done
 
 # --- AppImage: type 2 runtime + squashfs of AppDir (AppRun, desktop file and icon at the root, usr/ inside) ---
 appimage="$assets/$name.AppImage"
