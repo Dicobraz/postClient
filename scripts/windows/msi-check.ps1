@@ -23,21 +23,28 @@ $channelFiles = "postman-plugins-telegram.exe", "postman-plugins-matrix.exe"
 New-Item -ItemType Directory -Force $logs | Out-Null
 
 function Msiexec([string]$what, [string]$name, [int[]]$ok = @(0, 3010)) {
+  $script:lastMsi = $name
   $log = Join-Path $logs "$name.log"
   $p = Start-Process msiexec.exe -ArgumentList "$what /qn /norestart /l*v `"$log`"" -Wait -PassThru
   if ($p.ExitCode -notin $ok) {
-    Get-Content $log -Tail 60
-    # Отказавшее действие и его причина: хвост попадает в дамп свойств — вытащить срез с «value 3» и следы
-    # сработавших действий состава каналов.
-    Select-String -Path $log -Pattern "value 3|error 1|error 2|CustomAction.*returned|Doing action: (No|KeepNo)" -Context 4 | ForEach-Object {
-      "--- $($_.LineNumber)"
-      $_.Context.PreContext
-      $_.Line
-      $_.Context.PostContext
-    } | Select-Object -First 80
+    Dump-Diag $name
     throw "msiexec $what -> $($p.ExitCode), expected $($ok -join '/')"
   }
   "msiexec $name -> $($p.ExitCode)"
+}
+
+# Диагностика упавшего шага: хвост verbose-лога (конец — дамп свойств) маскирует отказавшее действие, поэтому
+# срез по следам: «value 3», сработавшие/пропущенные действия состава каналов и снятия старой версии,
+# изменения REMOVE и UPGRADINGPRODUCTCODE.
+function Dump-Diag([string]$name) {
+  $log = Join-Path $logs "$name.log"
+  Get-Content $log -Tail 60
+  Select-String -Path $log -Pattern "value 3|error 1|error 2|CustomAction.*returned|Doing action: (No|KeepNo|RemoveExistingProducts|RemoveAppContainer)|Skipping action: (No|KeepNo|RemoveExistingProducts|RemoveAppContainer)|Removing older products|PROPERTY CHANGE.*(REMOVE|UPGRADING)" -Context 3 | ForEach-Object {
+    "--- $($_.LineNumber)"
+    $_.Context.PreContext
+    $_.Line
+    $_.Context.PostContext
+  } | Select-Object -First 120
 }
 
 # Postman entries in "Installed apps" (64-bit view).
@@ -57,8 +64,16 @@ function Assert-Installed([string]$displayVersion) {
     throw "event source: $($k.GetValueKind('EventMessageFile')) '$msg'"
   }
   $e = Entries
-  if ($e.Count -ne 1) { throw "expected one Postman entry in Installed apps, found $($e.Count)" }
-  if ($e[0].DisplayVersion -ne $displayVersion) { throw "Installed apps version $($e[0].DisplayVersion), expected $displayVersion" }
+  if ($e.Count -ne 1) {
+    $e | ForEach-Object { "ARP: '$($_.DisplayName)' '$($_.DisplayVersion)' $($_.PSChildName)" }
+    Dump-Diag $script:lastMsi
+    throw "expected one Postman entry in Installed apps, found $($e.Count)"
+  }
+  if ($e[0].DisplayVersion -ne $displayVersion) {
+    "ARP: '$($e[0].DisplayName)' '$($e[0].DisplayVersion)' $($e[0].PSChildName)"
+    Dump-Diag $script:lastMsi
+    throw "Installed apps version $($e[0].DisplayVersion), expected $displayVersion"
+  }
   if ($e[0].InstallLocation.TrimEnd('\') -ine $dir) { throw "InstallLocation '$($e[0].InstallLocation)'" }
   "installed: $displayVersion, $dir, shortcut, event source"
 }
