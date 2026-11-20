@@ -7691,6 +7691,7 @@ version = "0.2.0"
 dependencies = [
  "core-foundation 0.10.1",
  "cpu-time",
+ "futures",
  "jiff",
  "memory-stats",
  "open",
