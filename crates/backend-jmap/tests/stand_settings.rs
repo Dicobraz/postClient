@@ -191,7 +191,7 @@ async fn autoreply_split_texts() {
             _ => None,
         });
         // Stalwart не даёт менять `vacation`: остаётся один текст через `VacationResponse/set`, и пользователю об этом сказано.
-        if failed.as_deref() == Some(postman_backend_jmap::settings::ONE_TEXT_ONLY) {
+        if failed.as_deref() == Some(postman_core::settings::ONE_TEXT_ONLY) {
             let saved = replies.iter().any(|r| matches!(r, Reply::VacationSaved(v) if v.is_enabled));
             return if saved { Ok(()) } else { Err("автоответ не включён".to_owned()) };
         }

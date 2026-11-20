@@ -9,7 +9,7 @@
 
 use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
-use postman_cache::{Cache, EmailRow, LetterRow, all_folders};
+use postman_cache::{Cache, EmailRow, LetterRow, TaskCache, all_folders};
 use postman_calendar::{MailLink, Moment, Task};
 
 use crate::lifecycle::{self, Patch};
@@ -70,7 +70,7 @@ pub fn row_of(id: LetterId, row: &LetterRow) -> EmailRow {
 }
 
 /// Письмо задачи для сроков: по ссылке [`store::letter_ref`] или по ключу кэша; нет — `None`.
-fn lookup(cache: &Cache, id: &str) -> postman_cache::Result<Option<EmailRow>> {
+fn lookup(cache: &impl TaskCache, id: &str) -> postman_cache::Result<Option<EmailRow>> {
     match store::parse_ref(id) {
         Some(letter) => Ok(cache.letter(cache_id(letter))?.map(|r| row_of(letter, &r))),
         None => Ok(cache.rows_by_ids(&[id.to_owned()])?.pop()),
@@ -214,7 +214,7 @@ pub fn letter_patch_in(cache: &Cache, task: &Task, tz: &TimeZone) -> postman_cac
 }
 
 /// [`reconcile`] по кэшу: задачи и письма — из него.
-pub fn reconcile_cache(cache: &Cache, now: i64, tz: &TimeZone) -> postman_cache::Result<Vec<Task>> {
+pub fn reconcile_cache(cache: &impl TaskCache, now: i64, tz: &TimeZone) -> postman_cache::Result<Vec<Task>> {
     let tasks: Vec<Task> = cache.tasks()?.iter().filter_map(crate::tasks::from_row).collect();
     if !tasks.iter().any(|t| t.mail.as_ref().is_some_and(|m| m.email_id.is_some())) {
         return Ok(Vec::new());

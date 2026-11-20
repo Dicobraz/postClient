@@ -11,7 +11,7 @@
 //!
 //! Номер сессии и номер входа выдаёт хост: им же помечены события и вызовы хранилища, хост по ним находит учётку.
 
-use postman_cache::{AccountRow, BodyRow, EmailRow, FolderId, FolderRow, LetterId, LetterRow, MailboxRow, RemoteRef};
+use postman_cache::{AccountRow, BodyRow, EmailRow, FolderId, FolderRow, LetterId, LetterRow, MailboxRow, Patch, Recipients, RemoteRef, TaskRow};
 use postman_calendar::{Invitation, Partstat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -31,8 +31,9 @@ use crate::tasks::Delta;
 /// каталога (`Ask::Certificates`, PLG-06: LDAP — процессом набора); №4 — области учётки и публичные загрузки
 /// (`Ask::Area*`, `Ask::Fetch`, PLG-07: CalDAV и CardDAV — процессом, задачи поверх кэша — услугой ядра); №5 —
 /// почтовый путь и услуги ядра ([`Ask::MailOpen`], [`FromPlugin::MailEvent`], [`FromPlugin::Cache`], [`FromPlugin::Worker`],
-/// [`FromPlugin::Smime`], PLG-08: EWS — процессом, хранилище учётки, разбор письма и S/MIME — услугами).
-pub const WIRE: u32 = 5;
+/// [`FromPlugin::Smime`], PLG-08: EWS — процессом, хранилище учётки, разбор письма и S/MIME — услугами); №6 — JMAP
+/// процессом ([`FromPlugin::Index`], операции хранилища JMAP, вход по токену в [`MailLogin`], PLG-10).
+pub const WIRE: u32 = 6;
 
 /// `serde_json::Value` и `Map` в сообщениях обмена (задачи областей, PLG-07): кодек postcard — формат без
 /// самоописания, `Value` он не разбирает (`deserialize_any` не поддержан), поэтому значение едет байтами JSON — тем
@@ -266,10 +267,12 @@ pub struct AreaLogin {
 }
 
 /// Вход почтового пути ([`Ask::MailOpen`], PLG-08): логин и пароль учётной записи; адрес ящика путь узнаёт у сервера.
+/// Токен JMAP — в `bearer` (PLG-10), `password` тогда пуст.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailLogin {
     pub user: String,
     pub password: Secret,
+    pub bearer: Option<Secret>,
 }
 
 /// Операция хранилища учётки ([`FromPlugin::Cache`], PLG-08): база открыта только у ядра, путь-процесс спрашивает
@@ -329,6 +332,42 @@ pub enum CacheOp {
     Letter(LetterId),
     /// Цепочка ([`postman_cache::Cache::thread`]) — ответ [`CacheDone::Rows`].
     Thread(String),
+    /// Правки строк писем ([`postman_cache::Cache::patch_emails`], PLG-10) — ответ [`CacheDone::Emails`].
+    PatchEmails(Vec<Patch>),
+    /// Ключи писем без тела ([`postman_cache::Cache::missing_bodies`], PLG-10) — ответ [`CacheDone::Ids`].
+    MissingBodies(usize),
+    /// Самое старое письмо папки ([`postman_cache::Cache::oldest`], PLG-10) — ответ [`CacheDone::Oldest`].
+    Oldest(String),
+    /// Ключевые слова письма ([`postman_cache::Cache::set_keywords`], PLG-10) — ответ [`CacheDone::Email`].
+    SetKeywords(String, Vec<String>, Vec<String>),
+    /// Получатели строк ([`postman_cache::Cache::set_recipients`], PLG-10).
+    SetRecipients(Vec<(String, Recipients)>),
+    /// Состояние синхронизации снять ([`postman_cache::Cache::remove_state`], PLG-10).
+    RemoveState(String),
+    /// Задачи ([`postman_cache::Cache::tasks`], PLG-10) — ответ [`CacheDone::Tasks`].
+    Tasks,
+    /// Задачи с несохранённой правкой ([`postman_cache::Cache::dirty_tasks`], PLG-10) — ответ [`CacheDone::Tasks`].
+    DirtyTasks,
+    /// Задача по ключу ([`postman_cache::Cache::task`], PLG-10) — ответ [`CacheDone::Task`].
+    Task(String),
+    /// Ключ задачи по связи с сервером ([`postman_cache::Cache::task_uid`], PLG-10) — ответ [`CacheDone::TaskUid`].
+    TaskUid(String),
+    /// Задачи записать ([`postman_cache::Cache::put_tasks`], PLG-10).
+    PutTasks(Vec<TaskRow>),
+    /// Задачи удалить ([`postman_cache::Cache::remove_tasks`], PLG-10).
+    RemoveTasks(Vec<String>),
+    /// Задачи заново ([`postman_cache::Cache::replace_tasks`], PLG-10).
+    ReplaceTasks(Vec<TaskRow>),
+    /// Связь беседы с письмами ([`postman_cache::Cache::xref_set`], PLG-10).
+    XrefSet(String, Vec<String>),
+    /// Связи источников убрать ([`postman_cache::Cache::xref_drop`], PLG-10).
+    XrefDrop(Vec<String>),
+    /// Источники цели ([`postman_cache::Cache::xref_sources`], PLG-10) — ответ [`CacheDone::Ids`].
+    XrefSources(String),
+    /// Цели источника ([`postman_cache::Cache::xref_targets`], PLG-10) — ответ [`CacheDone::Ids`].
+    XrefTargets(String),
+    /// Строки по ключевому слову ([`postman_cache::Cache::keyword_prefix`], PLG-10) — ответ [`CacheDone::Rows`].
+    KeywordPrefix(String, String, usize),
 }
 
 /// Ответ хранилища учётки на вызов с ответом ([`ToPlugin::Cached`], PLG-08).
@@ -350,6 +389,20 @@ pub enum CacheDone {
     FolderUpserted(FolderId),
     FolderOf(Option<FolderId>),
     Letter(Option<LetterRow>),
+    /// Строки писем после правок ([`postman_cache::Cache::patch_emails`], PLG-10).
+    Emails(Vec<EmailRow>),
+    /// Ключи писем ([`postman_cache::Cache::missing_bodies`], PLG-10).
+    Ids(Vec<String>),
+    /// Самое старое письмо папки ([`postman_cache::Cache::oldest`], PLG-10).
+    Oldest(Option<String>),
+    /// Строка письма после правки ([`postman_cache::Cache::set_keywords`], PLG-10).
+    Email(Option<EmailRow>),
+    /// Задачи ([`postman_cache::Cache::tasks`] и [`postman_cache::Cache::dirty_tasks`], PLG-10).
+    Tasks(Vec<TaskRow>),
+    /// Задача по ключу ([`postman_cache::Cache::task`], PLG-10).
+    Task(Option<TaskRow>),
+    /// Ключ задачи ([`postman_cache::Cache::task_uid`], PLG-10).
+    TaskUid(Option<String>),
 }
 
 /// Разбор письма воркером-песочницей ([`FromPlugin::Worker`], PLG-08): чужие данные — только в воркере, и воркер
@@ -500,6 +553,16 @@ pub enum FromPlugin {
     /// S/MIME исходящего — услуга ядра вызовом связи (PLG-08): ключи пользователя плагину недоступны. Ответ —
     /// [`ToPlugin::Sealed`].
     Smime { op: SmimeOp },
+    /// Поисковый индекс — услуга ядра без ответа (PLG-10): индекс и тело письма — у ядра (файлы и база его), путь
+    /// только называет строки. Ответа нет: порядок не важен, ошибка — в журнал ядра.
+    Index { session: u64, op: IndexOp },
+}
+
+/// Операция поискового индекса ([`FromPlugin::Index`], PLG-10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IndexOp {
+    /// Строки писем — в индекс ([`crate::indexer::rows`]): текст берёт ядро у себя из базы.
+    Rows(Vec<EmailRow>),
 }
 
 /// Вызов `PluginStore`.
@@ -893,7 +956,7 @@ mod tests {
                 session: 4,
                 url: "https://mail.example.test/EWS/Exchange.asmx".into(),
                 profile: Some("@2".into()),
-                login: MailLogin { user: "user".into(), password: Secret::new(b"pw".to_vec()) },
+                login: MailLogin { user: "user".into(), password: Secret::new(b"pw".to_vec()), bearer: None },
             },
             Ask::MailCommand { session: 4, cmd: Box::new(mail_command()) },
         ];
@@ -1099,6 +1162,7 @@ mod tests {
             FromPlugin::CacheWrite { session: 4, op: CacheOp::UpsertEmails(Vec::new()) },
             FromPlugin::Worker { op: WorkerOp::Part { raw: b"raw".to_vec(), index: 2 } },
             FromPlugin::Smime { op: SmimeOp::Seal { raw: b"raw".to_vec(), to: Vec::new() } },
+            FromPlugin::Index { session: 4, op: IndexOp::Rows(Vec::new()) },
         ];
         from.iter().for_each(round);
         let covered = |m: &FromPlugin| match m {
@@ -1112,6 +1176,7 @@ mod tests {
             FromPlugin::CacheWrite { .. } => 7,
             FromPlugin::Worker { .. } => 8,
             FromPlugin::Smime { .. } => 9,
+            FromPlugin::Index { .. } => 10,
         };
         assert!(from.iter().map(covered).all(|i| i > 0), "ответы — выше");
     }
@@ -1148,6 +1213,32 @@ mod tests {
             remote: Some("f0123".into()),
         }));
         round(&CacheDone::FolderUpserted(postman_cache::FolderId(7)));
+    }
+
+    /// Операции хранилища JMAP и услуга индекса ([`CacheOp`], [`IndexOp`], PLG-10) — по обмену туда и обратно.
+    #[test]
+    fn jmap_store_ops_cross_the_wire() {
+        round(&CacheOp::PatchEmails(Vec::new()));
+        round(&CacheDone::Emails(Vec::new()));
+        round(&CacheOp::MissingBodies(3));
+        round(&CacheDone::Ids(Vec::new()));
+        round(&CacheOp::Oldest("f0123.1.2".into()));
+        round(&CacheDone::Oldest(None));
+        round(&CacheOp::SetKeywords("f0123.1.2".into(), Vec::new(), Vec::new()));
+        round(&CacheDone::Email(None));
+        round(&CacheOp::SetRecipients(Vec::new()));
+        round(&CacheOp::RemoveState("jmap.state".into()));
+        round(&CacheOp::Tasks);
+        round(&CacheOp::DirtyTasks);
+        round(&CacheDone::Tasks(Vec::new()));
+        round(&CacheOp::Task("t1".into()));
+        round(&CacheDone::Task(None));
+        round(&CacheOp::TaskUid("<sid>".into()));
+        round(&CacheDone::TaskUid(None));
+        round(&CacheOp::PutTasks(Vec::new()));
+        round(&CacheOp::RemoveTasks(Vec::new()));
+        round(&CacheOp::ReplaceTasks(Vec::new()));
+        round(&IndexOp::Rows(Vec::new()));
     }
 
     /// Разбор воркером по обмену — то же значение (`Mime` воркера байтами postcard).

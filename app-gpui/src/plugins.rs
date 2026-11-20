@@ -8,8 +8,8 @@
 //! файл набора и профиль песочницы, без запуска процесса; процессы ведёт хост ([`host`]) — после первого кадра и только
 //! по запросу. Так работают демо-канал (PLG-02, общий набор `postman-plugins`), Matrix (PLG-04, свой файл
 //! `postman-plugins-matrix`), Telegram (PLG-05, свой файл `postman-plugins-telegram`), каталог сертификатов
-//! (PLG-06, общий набор), CalDAV/CardDAV (PLG-07, общий набор: области учётки и публичные загрузки), EWS
-//! (PLG-08) и IMAP + SMTP (PLG-09) — общим набором: почтовые пути из `postman.exe` ушли (остался JMAP — PLG-10).
+//! (PLG-06, общий набор), CalDAV/CardDAV (PLG-07, области учётки и публичные загрузки), EWS (PLG-08),
+//! IMAP + SMTP (PLG-09) и JMAP (PLG-10) — общим набором: в `postman.exe` сетевого стека протоколов больше нет.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -83,8 +83,16 @@ const EWS: Row = Row {
 const IMAP: Row =
     Row { id: "imap", kind: Kind::Mail, claim: Claim::Scheme("imap"), set: "postman-plugins", profile: Profile::Network { enterprise_auth: false } };
 
+/// JMAP (PLG-10) — общим набором `postman-plugins` (решение владельца 2026-11-16): основной путь (The Post) —
+/// последним из `postman.exe`; календарь, контакты, задачи, правила и автоответ — события той же сессии.
+/// Своего адреса у пути нет ([`Claim::None`]): узел отвечает `/.well-known/jmap` — вид сервера по сети
+/// ([`Registry::detect`], процесс поднимается по первому вопросу). Хранилище учётки (с задачами и связями
+/// бесед), поисковый индекс, воркер и S/MIME — услуги ядра по обмену; вход — логин с паролем или токен.
+const JMAP: Row =
+    Row { id: "jmap", kind: Kind::Mail, claim: Claim::None, set: "postman-plugins", profile: Profile::Network { enterprise_auth: false } };
+
 /// Плагины отдельными процессами.
-pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS, IMAP];
+pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS, IMAP, JMAP];
 
 /// Файлы наборов каналов (PLG-15): ключ компонента — имя файла набора; экраны по нему спрашивают состояние
 /// и запускают докачку, хост по нему находит строку плагина ([`component_ready`]).
@@ -207,7 +215,9 @@ pub(crate) fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let r = Registry::default()
-            .with_mail(postman_backend_jmap::JmapPlugin)
+            // JMAP — тем же набором (PLG-10): основной путь последним ушёл из `postman.exe`; узел без схемы
+            // проверяется по сети (`/.well-known/jmap`), потому заместитель первым на пробу.
+            .with_mail(host().mail(JMAP))
             // EWS — процессом общего набора (PLG-08, ADR 0013): почта и свои области одним процессом, хранилище
             // учётки, воркер и S/MIME — услуги ядра по обмену.
             .with_mail(host().mail(EWS))
@@ -226,7 +236,7 @@ pub(crate) fn registry() -> &'static Registry {
 /// Автоответ записан, но сервер хранит один текст всем (отказ в своём скрипте `vacation`, плагин JMAP): это не ошибка
 /// записи, а ограничение, о котором надо сказать пользователю.
 pub(crate) fn autoreply_limited(error: &str) -> bool {
-    error == postman_backend_jmap::settings::ONE_TEXT_ONLY
+    error == postman_core::settings::ONE_TEXT_ONLY
 }
 
 /// Выход: письма в окне «Отменить» держит очередь отправки ядра (PLG-08), сообщения каналов — очереди

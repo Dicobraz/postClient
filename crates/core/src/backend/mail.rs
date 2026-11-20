@@ -18,7 +18,8 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use postman_cache::{
-    AccountRow, BodyRow, Cache, EmailRow, FolderId, FolderRow, Hash, LetterId, LetterRow, MailboxRow, RemoteRef, Result as CacheResult, SplitPart,
+    AccountRow, BodyRow, Cache, EmailRow, FolderId, FolderRow, Hash, LetterId, LetterRow, MailboxRow, Patch, Recipients, RemoteRef,
+    Result as CacheResult, SplitPart, TaskRow,
 };
 use postman_compose::Draft;
 use postman_worker::mime::Mime as ParsedMime;
@@ -26,7 +27,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::remote::{MailScope, PROBE_WAIT, PluginLink, STORE_WAIT, lock, ready_async};
-use super::wire::{CacheDone, CacheOp, FromPlugin, MailLogin, SmimeOp, ToPlugin, WorkerDone, WorkerOp};
+use super::wire::{CacheDone, CacheOp, FromPlugin, IndexOp, MailLogin, SmimeOp, ToPlugin, WorkerDone, WorkerOp};
 use super::{BoxFuture, MailPlugin, Spawn};
 use crate::model::Auth;
 use crate::sync::{Account, Command, Event, SyncError, UnboundedSender};
@@ -36,7 +37,7 @@ pub const WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 
 /// Хранилище учётки для потока синхронизации (PLG-08): методы кэша из описи. Записи у пути-процесса уходят без
 /// ответа (ошибка — на ближайшем чтении), у ядра — как были; остальное у обоих — с ответом.
-pub trait MailCache: Send {
+pub trait MailCache: Send + Sync {
     fn replace_mailboxes(&self, account: Option<&str>, rows: &[MailboxRow]) -> CacheResult<()>;
     fn replace_accounts_of(&self, profile: Option<&str>, rows: &[AccountRow]) -> CacheResult<()>;
     fn upsert_emails(&self, rows: &[EmailRow]) -> CacheResult<()>;
@@ -48,6 +49,24 @@ pub trait MailCache: Send {
     fn attach_remote(&self, letter: LetterId, link: RemoteRef) -> CacheResult<()>;
     fn upsert_remotes(&self, account: &str, rows: &[(String, LetterRow)]) -> CacheResult<Vec<LetterId>>;
     fn upsert_folder(&self, row: &FolderRow) -> CacheResult<FolderId>;
+    fn patch_emails(&self, patches: &[Patch]) -> CacheResult<Vec<EmailRow>>;
+    fn missing_bodies(&self, limit: usize) -> CacheResult<Vec<String>>;
+    fn oldest(&self, mailbox_id: &str) -> CacheResult<Option<String>>;
+    fn set_keywords(&self, id: &str, add: &[String], remove: &[String]) -> CacheResult<Option<EmailRow>>;
+    fn set_recipients(&self, rows: &[(String, Recipients)]) -> CacheResult<()>;
+    fn remove_state(&self, kind: &str) -> CacheResult<()>;
+    fn tasks(&self) -> CacheResult<Vec<TaskRow>>;
+    fn dirty_tasks(&self) -> CacheResult<Vec<TaskRow>>;
+    fn task(&self, uid: &str) -> CacheResult<Option<TaskRow>>;
+    fn task_uid(&self, server_id: &str) -> CacheResult<Option<String>>;
+    fn put_tasks(&self, rows: &[TaskRow]) -> CacheResult<()>;
+    fn remove_tasks(&self, uids: &[String]) -> CacheResult<()>;
+    fn replace_tasks(&self, rows: &[TaskRow]) -> CacheResult<()>;
+    fn xref_set(&self, source: &str, targets: &[String]) -> CacheResult<()>;
+    fn xref_drop(&self, sources: &[String]) -> CacheResult<()>;
+    fn xref_sources(&self, target: &str) -> CacheResult<Vec<String>>;
+    fn xref_targets(&self, source: &str) -> CacheResult<Vec<String>>;
+    fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> CacheResult<Vec<EmailRow>>;
     fn remember_senders(&self, senders: &[crate::sync::Sender]) -> CacheResult<()>;
     fn state(&self, kind: &str) -> CacheResult<Option<String>>;
     fn body(&self, id: &str) -> CacheResult<Option<BodyRow>>;
@@ -78,6 +97,40 @@ pub trait MailWorker: Send {
 pub trait MailSeal: Send {
     fn seal_outgoing(&self, raw: Vec<u8>, to: Vec<postman_smime::seal::To>) -> Result<Vec<u8>, String>;
     fn sign_outgoing(&self, raw: Vec<u8>, from: &str, hwnd: Option<isize>, now: i64) -> Result<Vec<u8>, String>;
+}
+
+/// Поисковый индекс (PLG-10): строки писем — в индекс ядра; текст письма и сам индекс (tantivy, файлы) — у ядра,
+/// путь только называет строки. Ответа нет: очередью ведёт ядро (`Conn::serve`), ошибки — его журнал.
+pub trait MailIndex: Send {
+    fn rows(&self, rows: &[EmailRow]);
+}
+
+/// Путь без поиска по индексу (PLG-10: IMAP и EWS ищут на сервере): ядру делать нечего.
+pub struct NopIndex;
+
+impl MailIndex for NopIndex {
+    fn rows(&self, _rows: &[EmailRow]) {}
+}
+
+/// Настоящий индекс ядра как [`MailIndex`] (PLG-10): поток ядра и тесты путей. Индекс может отсутствовать
+/// (`SearchIndex` не завёлся) — тогда путь пишет, ядро не индексирует.
+pub struct LocalIndex {
+    index: crate::sync::Index,
+    cache: Cache,
+}
+
+impl LocalIndex {
+    pub fn new(index: crate::sync::Index, cache: Cache) -> Self {
+        Self { index, cache }
+    }
+}
+
+impl MailIndex for LocalIndex {
+    fn rows(&self, rows: &[EmailRow]) {
+        if let Some(i) = &self.index {
+            crate::indexer::rows(i, &self.cache, rows);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -129,6 +182,78 @@ impl MailCache for LocalCache {
 
     fn upsert_folder(&self, row: &FolderRow) -> CacheResult<FolderId> {
         self.0.upsert_folder(row)
+    }
+
+    fn patch_emails(&self, patches: &[Patch]) -> CacheResult<Vec<EmailRow>> {
+        self.0.patch_emails(patches)
+    }
+
+    fn missing_bodies(&self, limit: usize) -> CacheResult<Vec<String>> {
+        self.0.missing_bodies(limit)
+    }
+
+    fn oldest(&self, mailbox_id: &str) -> CacheResult<Option<String>> {
+        self.0.oldest(mailbox_id)
+    }
+
+    fn set_keywords(&self, id: &str, add: &[String], remove: &[String]) -> CacheResult<Option<EmailRow>> {
+        self.0.set_keywords(id, add, remove)
+    }
+
+    fn set_recipients(&self, rows: &[(String, Recipients)]) -> CacheResult<()> {
+        self.0.set_recipients(rows)
+    }
+
+    fn remove_state(&self, kind: &str) -> CacheResult<()> {
+        self.0.remove_state(kind)
+    }
+
+    fn tasks(&self) -> CacheResult<Vec<TaskRow>> {
+        self.0.tasks()
+    }
+
+    fn dirty_tasks(&self) -> CacheResult<Vec<TaskRow>> {
+        self.0.dirty_tasks()
+    }
+
+    fn task(&self, uid: &str) -> CacheResult<Option<TaskRow>> {
+        self.0.task(uid)
+    }
+
+    fn task_uid(&self, server_id: &str) -> CacheResult<Option<String>> {
+        self.0.task_uid(server_id)
+    }
+
+    fn put_tasks(&self, rows: &[TaskRow]) -> CacheResult<()> {
+        self.0.put_tasks(rows)
+    }
+
+    fn remove_tasks(&self, uids: &[String]) -> CacheResult<()> {
+        self.0.remove_tasks(uids)
+    }
+
+    fn replace_tasks(&self, rows: &[TaskRow]) -> CacheResult<()> {
+        self.0.replace_tasks(rows)
+    }
+
+    fn xref_set(&self, source: &str, targets: &[String]) -> CacheResult<()> {
+        self.0.xref_set(source, targets)
+    }
+
+    fn xref_drop(&self, sources: &[String]) -> CacheResult<()> {
+        self.0.xref_drop(sources)
+    }
+
+    fn xref_sources(&self, target: &str) -> CacheResult<Vec<String>> {
+        self.0.xref_sources(target)
+    }
+
+    fn xref_targets(&self, source: &str) -> CacheResult<Vec<String>> {
+        self.0.xref_targets(source)
+    }
+
+    fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> CacheResult<Vec<EmailRow>> {
+        self.0.keyword_prefix(prefix, mailbox, limit)
     }
 
     fn remember_senders(&self, senders: &[crate::sync::Sender]) -> CacheResult<()> {
@@ -257,6 +382,24 @@ pub fn run_cache(cache: &Cache, op: &CacheOp) -> CacheResult<CacheDone> {
         CacheOp::AttachRemote(letter, link) => local.attach_remote(*letter, link.clone()).map(|_| CacheDone::Done),
         CacheOp::UpsertRemotes(account, rows) => local.upsert_remotes(account, rows).map(|_| CacheDone::Done),
         CacheOp::UpsertFolder(row) => local.upsert_folder(row).map(CacheDone::FolderUpserted),
+        CacheOp::PatchEmails(patches) => local.patch_emails(patches).map(CacheDone::Emails),
+        CacheOp::MissingBodies(limit) => local.missing_bodies(*limit).map(CacheDone::Ids),
+        CacheOp::Oldest(mailbox) => local.oldest(mailbox).map(CacheDone::Oldest),
+        CacheOp::SetKeywords(id, add, remove) => local.set_keywords(id, add, remove).map(CacheDone::Email),
+        CacheOp::SetRecipients(rows) => local.set_recipients(rows).map(|_| CacheDone::Done),
+        CacheOp::RemoveState(kind) => local.remove_state(kind).map(|_| CacheDone::Done),
+        CacheOp::Tasks => local.tasks().map(CacheDone::Tasks),
+        CacheOp::DirtyTasks => local.dirty_tasks().map(CacheDone::Tasks),
+        CacheOp::Task(uid) => local.task(uid).map(CacheDone::Task),
+        CacheOp::TaskUid(server_id) => local.task_uid(server_id).map(CacheDone::TaskUid),
+        CacheOp::PutTasks(rows) => local.put_tasks(rows).map(|_| CacheDone::Done),
+        CacheOp::RemoveTasks(uids) => local.remove_tasks(uids).map(|_| CacheDone::Done),
+        CacheOp::ReplaceTasks(rows) => local.replace_tasks(rows).map(|_| CacheDone::Done),
+        CacheOp::XrefSet(source, targets) => local.xref_set(source, targets).map(|_| CacheDone::Done),
+        CacheOp::XrefDrop(sources) => local.xref_drop(sources).map(|_| CacheDone::Done),
+        CacheOp::XrefSources(target) => local.xref_sources(target).map(CacheDone::Ids),
+        CacheOp::XrefTargets(source) => local.xref_targets(source).map(CacheDone::Ids),
+        CacheOp::KeywordPrefix(prefix, mailbox, limit) => local.keyword_prefix(prefix, mailbox, *limit).map(CacheDone::Rows),
         CacheOp::RememberSenders(senders) => local.remember_senders(senders).map(|_| CacheDone::Done),
         CacheOp::State(kind) => local.state(kind).map(CacheDone::State),
         CacheOp::Body(id) => local.body(id).map(CacheDone::Body),
@@ -375,6 +518,111 @@ impl MailCache for RemoteCache {
         // Ключ папки нужен ответом (RENAME у IMAP перелицовывает ключи писем): вызов с ответом.
         match self.read(CacheOp::UpsertFolder(row.clone()))? {
             CacheDone::FolderUpserted(id) => Ok(id),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn patch_emails(&self, patches: &[Patch]) -> CacheResult<Vec<EmailRow>> {
+        match self.read(CacheOp::PatchEmails(patches.to_vec()))? {
+            CacheDone::Emails(rows) => Ok(rows),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn missing_bodies(&self, limit: usize) -> CacheResult<Vec<String>> {
+        match self.read(CacheOp::MissingBodies(limit))? {
+            CacheDone::Ids(ids) => Ok(ids),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn oldest(&self, mailbox_id: &str) -> CacheResult<Option<String>> {
+        match self.read(CacheOp::Oldest(mailbox_id.to_owned()))? {
+            CacheDone::Oldest(id) => Ok(id),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn set_keywords(&self, id: &str, add: &[String], remove: &[String]) -> CacheResult<Option<EmailRow>> {
+        match self.read(CacheOp::SetKeywords(id.to_owned(), add.to_vec(), remove.to_vec()))? {
+            CacheDone::Email(row) => Ok(row),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn set_recipients(&self, rows: &[(String, Recipients)]) -> CacheResult<()> {
+        self.write(CacheOp::SetRecipients(rows.to_vec()))
+    }
+
+    fn remove_state(&self, kind: &str) -> CacheResult<()> {
+        self.write(CacheOp::RemoveState(kind.to_owned()))
+    }
+
+    fn tasks(&self) -> CacheResult<Vec<TaskRow>> {
+        match self.read(CacheOp::Tasks)? {
+            CacheDone::Tasks(rows) => Ok(rows),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn dirty_tasks(&self) -> CacheResult<Vec<TaskRow>> {
+        match self.read(CacheOp::DirtyTasks)? {
+            CacheDone::Tasks(rows) => Ok(rows),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn task(&self, uid: &str) -> CacheResult<Option<TaskRow>> {
+        match self.read(CacheOp::Task(uid.to_owned()))? {
+            CacheDone::Task(row) => Ok(row),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn task_uid(&self, server_id: &str) -> CacheResult<Option<String>> {
+        match self.read(CacheOp::TaskUid(server_id.to_owned()))? {
+            CacheDone::TaskUid(uid) => Ok(uid),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn put_tasks(&self, rows: &[TaskRow]) -> CacheResult<()> {
+        self.write(CacheOp::PutTasks(rows.to_vec()))
+    }
+
+    fn remove_tasks(&self, uids: &[String]) -> CacheResult<()> {
+        self.write(CacheOp::RemoveTasks(uids.to_vec()))
+    }
+
+    fn replace_tasks(&self, rows: &[TaskRow]) -> CacheResult<()> {
+        self.write(CacheOp::ReplaceTasks(rows.to_vec()))
+    }
+
+    fn xref_set(&self, source: &str, targets: &[String]) -> CacheResult<()> {
+        self.write(CacheOp::XrefSet(source.to_owned(), targets.to_vec()))
+    }
+
+    fn xref_drop(&self, sources: &[String]) -> CacheResult<()> {
+        self.write(CacheOp::XrefDrop(sources.to_vec()))
+    }
+
+    fn xref_sources(&self, target: &str) -> CacheResult<Vec<String>> {
+        match self.read(CacheOp::XrefSources(target.to_owned()))? {
+            CacheDone::Ids(ids) => Ok(ids),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn xref_targets(&self, source: &str) -> CacheResult<Vec<String>> {
+        match self.read(CacheOp::XrefTargets(source.to_owned()))? {
+            CacheDone::Ids(ids) => Ok(ids),
+            _ => Err(postman_cache::Error::other("store: unexpected reply")),
+        }
+    }
+
+    fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> CacheResult<Vec<EmailRow>> {
+        match self.read(CacheOp::KeywordPrefix(prefix.to_owned(), mailbox.to_owned(), limit))? {
+            CacheDone::Rows(rows) => Ok(rows),
             _ => Err(postman_cache::Error::other("store: unexpected reply")),
         }
     }
@@ -551,6 +799,95 @@ impl MailSeal for WireSeal {
             (ToPlugin::Sealed(r), _) => r,
             _ => Err("smime: unexpected reply".into()),
         }
+    }
+}
+
+/// Задачи и связи поверх услуги хранилища (PLG-10): [`postman_cache::TaskCache`] для пути в процессе —
+/// `tasks::handle` у пути работает с тем же хранилищем по обмену, что и весь путь.
+pub struct MailTasks<'a>(pub &'a dyn MailCache);
+
+impl postman_cache::TaskCache for MailTasks<'_> {
+    fn tasks(&self) -> postman_cache::Result<Vec<TaskRow>> {
+        self.0.tasks()
+    }
+
+    fn dirty_tasks(&self) -> postman_cache::Result<Vec<TaskRow>> {
+        self.0.dirty_tasks()
+    }
+
+    fn task(&self, uid: &str) -> postman_cache::Result<Option<TaskRow>> {
+        self.0.task(uid)
+    }
+
+    fn task_uid(&self, server_id: &str) -> postman_cache::Result<Option<String>> {
+        self.0.task_uid(server_id)
+    }
+
+    fn put_tasks(&self, rows: &[TaskRow]) -> postman_cache::Result<()> {
+        self.0.put_tasks(rows)
+    }
+
+    fn remove_tasks(&self, uids: &[String]) -> postman_cache::Result<()> {
+        self.0.remove_tasks(uids)
+    }
+
+    fn replace_tasks(&self, rows: &[TaskRow]) -> postman_cache::Result<()> {
+        self.0.replace_tasks(rows)
+    }
+
+    fn set_state(&self, kind: &str, value: &str) -> postman_cache::Result<()> {
+        self.0.set_state(kind, value)
+    }
+
+    fn state(&self, kind: &str) -> postman_cache::Result<Option<String>> {
+        self.0.state(kind)
+    }
+
+    fn xref_set(&self, source: &str, targets: &[String]) -> postman_cache::Result<()> {
+        self.0.xref_set(source, targets)
+    }
+
+    fn xref_drop(&self, sources: &[String]) -> postman_cache::Result<()> {
+        self.0.xref_drop(sources)
+    }
+
+    fn xref_sources(&self, target: &str) -> postman_cache::Result<Vec<String>> {
+        self.0.xref_sources(target)
+    }
+
+    fn xref_targets(&self, source: &str) -> postman_cache::Result<Vec<String>> {
+        self.0.xref_targets(source)
+    }
+
+    fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> postman_cache::Result<Vec<EmailRow>> {
+        self.0.keyword_prefix(prefix, mailbox, limit)
+    }
+
+    fn letter(&self, id: LetterId) -> postman_cache::Result<Option<LetterRow>> {
+        self.0.letter(id)
+    }
+
+    fn rows_by_ids(&self, ids: &[String]) -> postman_cache::Result<Vec<EmailRow>> {
+        self.0.rows_by_ids(ids)
+    }
+}
+
+/// Поисковый индекс по обмену ([`MailIndex`] в процессе, PLG-10): строки — ядру без ответа; текст и индекс — у него.
+pub struct RemoteIndex {
+    link: Arc<PluginLink>,
+    session: u64,
+}
+
+impl RemoteIndex {
+    pub fn new(link: Arc<PluginLink>, session: u64) -> Self {
+        Self { link, session }
+    }
+}
+
+impl MailIndex for RemoteIndex {
+    fn rows(&self, rows: &[EmailRow]) {
+        // Связи нет — путь в любом случае кончается; индексация догонит при следующем входе сессии.
+        let _ = self.link.send(&FromPlugin::Index { session: self.session, op: IndexOp::Rows(rows.to_vec()) }, &[]);
     }
 }
 
@@ -760,23 +1097,26 @@ pub trait MailServer: Send + Sync {
     ) -> BoxFuture<'_, Result<(), String>>;
 }
 
-/// Услуги ядра почтовому пути по обмену: хранилище учётки, разбор письма в воркере, подпись и шифрование S/MIME
-/// ([`MailServer::open`]).
+/// Услуги ядра почтовому пути по обмену: хранилище учётки, разбор письма в воркере, подпись и шифрование S/MIME,
+/// поисковый индекс ([`MailServer::open`]; индекс зовёт только JMAP, PLG-10, остальным — [`NopIndex`]).
 pub struct MailServices {
     pub store: Box<dyn MailCache>,
     pub worker: Box<dyn MailWorker>,
     pub seal: Box<dyn MailSeal>,
+    pub index: Box<dyn MailIndex>,
 }
 
-/// Логин и пароль из учётной записи договора ([`Account::auth`]) для [`MailServer::open`]; токенов у путей с окном
-/// «Отменить» в ядре нет (EWS — логин и пароль; токены — JMAP, он остаётся в потоке ядра до своей волны).
+/// Вход из учётной записи договора ([`Account::auth`]) для [`MailServer::open`]: логин и пароль (EWS, IMAP) или
+/// токен ([`MailLogin::bearer`], JMAP, PLG-10).
 pub fn mail_login(a: &Account) -> Result<MailLogin, SyncError> {
     match &a.auth {
-        Auth::Basic { user, password } => Ok(MailLogin { user: user.clone(), password: crate::channel::Secret::new(password.clone().into_bytes()) }),
-        Auth::Bearer(_) => Err(SyncError {
-            kind: crate::model::ErrorKind::Auth,
-            stage: crate::sync::Stage::Start,
-            detail: "the path signs in with a login and password only".to_owned(),
+        Auth::Basic { user, password } => {
+            Ok(MailLogin { user: user.clone(), password: crate::channel::Secret::new(password.clone().into_bytes()), bearer: None })
+        }
+        Auth::Bearer(token) => Ok(MailLogin {
+            user: String::new(),
+            password: crate::channel::Secret::new(Vec::new()),
+            bearer: Some(crate::channel::Secret::new(token.clone().into_bytes())),
         }),
     }
 }
@@ -834,7 +1174,7 @@ impl MailPlugin for RemoteMail {
             }
         };
         let (tx, mut rx) = unbounded_channel::<Command>();
-        let Spawn { account, profile, cache, events, repaint, .. } = s;
+        let Spawn { account, profile, cache, index, events, repaint, .. } = s;
         // Пробуждение — одно замыкание на все события сессии: под замком, чтобы делить между входами.
         let repaint: Arc<dyn Fn() + Send + Sync> = {
             let repaint = Arc::new(Mutex::new(repaint));
@@ -850,7 +1190,7 @@ impl MailPlugin for RemoteMail {
                     return;
                 }
             };
-            rt.block_on(session(&host, &plugin, MailRun { url: account.url, profile, login, cache, events, repaint }, &mut rx));
+            rt.block_on(session(&host, &plugin, MailRun { url: account.url, profile, login, cache, index, events, repaint }, &mut rx));
         });
         if let Err(e) = spawned {
             let _ = tx_err(&spawn_errors, SyncError::internal(format!("sync thread: {e}")));
@@ -876,6 +1216,8 @@ struct MailRun {
     profile: Option<String>,
     login: MailLogin,
     cache: Cache,
+    /// Поисковый индекс (PLG-10): услуга `FromPlugin::Index` индексирует его; пути без поиска идут мимо.
+    index: crate::sync::Index,
     events: std::sync::mpsc::Sender<Event>,
     repaint: Arc<dyn Fn() + Send + Sync>,
 }
@@ -884,7 +1226,7 @@ struct MailRun {
 /// отправки — здесь, у ядра ([`MailQueue`]). Процесс упал — вход заново (письмо очереди дождётся новой сессии);
 /// синхронизация кончилась (ответ `Unit(Err)`, отказ входа) — конец, как у пути в потоке ядра.
 async fn session(host: &Arc<super::remote::Inner>, plugin: &Arc<super::remote::Plugin>, run: MailRun, rx: &mut UnboundedReceiver<Command>) {
-    let MailRun { url, profile, login, cache, events, repaint } = run;
+    let MailRun { url, profile, login, cache, index, events, repaint } = run;
     let scope = postman_cache::in_profile(profile.as_deref(), None).unwrap_or_default();
     let queue = Arc::new(MailQueue::new(cache.clone(), &scope));
     loop {
@@ -910,6 +1252,7 @@ async fn session(host: &Arc<super::remote::Inner>, plugin: &Arc<super::remote::P
                     events: events.clone(),
                     repaint: Mutex::new(wake),
                     cache: cache.clone(),
+                    index: index.clone(),
                     failed: Mutex::new(None),
                     queue: Arc::clone(&queue),
                 },

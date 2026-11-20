@@ -18,6 +18,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 jiff.workspace = true
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# Воркер разбора писем — услугой ядра (PLG-10); настоящий — путь внутри `postman.exe` (тесты и стенд).
+postman-worker.workspace = true
 tracing = "0.1"
 
 [dev-dependencies]
