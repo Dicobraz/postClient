@@ -393,7 +393,9 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
     )?;
     p.create_table(
         "AppSearch",
-        vec![Column::build("Property_").primary_key().id_string(72), Column::build("Signature_").primary_key().id_string(72)],
+        // Первая колонка — ровно `Property` (без подчёркивания): её имя спрашивает действие AppSearch
+        // (`SELECT `Property`, `Signature_` FROM `AppSearch``); не совпало — 2235 и 1603 (диагностика CI).
+        vec![Column::build("Property").primary_key().id_string(72), Column::build("Signature_").primary_key().id_string(72)],
     )?;
     p.insert_rows(
         Insert::into("AppSearch")
