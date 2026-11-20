@@ -401,6 +401,22 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
         Insert::into("AppSearch")
             .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("PREV{}", name.to_uppercase())), s(&format!("{name}PrevLoc"))]).collect()),
     )?;
+    // AppSearch зондирует таблицу `Signature` на каждом поиске: отсутствие самой таблицы — фатальные 2228 и
+    // 1603 даже для чисто реестровых поисков (go-msi SEARCH-03); пустой таблицы достаточно.
+    p.create_table(
+        "Signature",
+        vec![
+            Column::build("Signature").primary_key().id_string(72),
+            Column::build("FileName").nullable().category(Category::WildCardFilename).string(255),
+            Column::build("MinVersion").nullable().category(Category::Version).string(20),
+            Column::build("MaxVersion").nullable().category(Category::Version).string(20),
+            Column::build("MinSize").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("MaxSize").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("MinDate").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("MaxDate").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("Languages").nullable().category(Category::Language).string(128),
+        ],
+    )?;
 
     p.create_table(
         "CustomAction",
@@ -594,6 +610,8 @@ mod tests {
             .map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned()))
             .collect();
         assert_eq!(search, vec![("PREVTELEGRAM".into(), "TelegramPrevLoc".into()), ("PREVMATRIX".into(), "MatrixPrevLoc".into())]);
+        // AppSearch требует саму таблицу `Signature` (даже пустую): без неё — 2228 и 1603 (go-msi SEARCH-03).
+        assert!(p.tables().any(|t| t.name() == "Signature"), "Signature table missing from the file");
         let secure = property(&mut p, "SecureCustomProperties");
         assert!(secure.contains("CHANNELS") && secure.contains("PREVTELEGRAM") && secure.contains("PREVMATRIX"), "{secure}");
         for name in ["Telegram", "Matrix"] {
