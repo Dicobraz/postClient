@@ -2,9 +2,12 @@
 # MAC-01, MAC-06: Postman.app for macOS (Apple Silicon, macOS 13+), the zip postman-<version>-macos-arm64.zip
 # (Postman.app and README.txt - the self-update replaces the bundle from it) and the disk image
 # postman-<version>-macos-arm64.dmg (Postman.app, README.txt and the "Applications" shortcut to drag it onto).
-# Contents/MacOS: postman, postman-worker, postman-viewer (the worker looks for them next to postman),
-# postman-plugins (the common plugin set, ADR 0013), postman-plugins-telegram (the Telegram set file, PLG-05)
-# and postman-plugins-matrix (the Matrix set file, PLG-04; signed together with the helpers);
+# Contents/MacOS: postman, postman-worker, postman-viewer (the worker looks for them next to postman) and
+# postman-plugins (the common plugin set, ADR 0013: mail and directory together). The channel components (PLG-17,
+# owner decision 2026-11-19 "components") are NOT in the bundle: the app downloads their set files from the release
+# (PLG-15), so they are signed like the helpers and published as their own zips -
+# postman-plugins-<channel>-macos-arm64.zip - the same files the app unpacks into the components folder; without
+# the network an administrator hands them over and postman --install-component installs them (PLG-16);
 # Info.plist: bundle id, version from Cargo.toml, LSMinimumSystemVersion 13.0, the mailto scheme; Postman.icns made
 # from app-gpui/res/postman.ico (PNG frames).
 # Signature: ad-hoc (codesign -s -) by default - no Apple Developer ID yet (docs/decisions/2026-11-11-macos.md), the
@@ -71,7 +74,7 @@ dmg="$assets/$name.dmg"
 rm -rf "$stage" "$assets"
 mkdir -p "$assets"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin/postman" "$bin/postman-worker" "$bin/postman-viewer" "$bin/postman-plugins" "$bin/postman-plugins-telegram" "$bin/postman-plugins-matrix" "$app/Contents/MacOS/"
+cp "$bin/postman" "$bin/postman-worker" "$bin/postman-viewer" "$bin/postman-plugins" "$app/Contents/MacOS/"
 
 # Icon: the PNG frames of postman.ico -> iconset -> icns (iconutil takes a partial set; 512 and 1024 are absent).
 iconset="$(mktemp -d)/Postman.iconset"
@@ -143,9 +146,13 @@ if [ -n "$identity" ]; then
 else
   sign=(codesign --force --sign -)
 fi
-"${sign[@]}" "$app/Contents/MacOS/postman-worker" "$app/Contents/MacOS/postman-viewer" "$app/Contents/MacOS/postman-plugins" "$app/Contents/MacOS/postman-plugins-telegram" "$app/Contents/MacOS/postman-plugins-matrix"
+"${sign[@]}" "$app/Contents/MacOS/postman-worker" "$app/Contents/MacOS/postman-viewer" "$app/Contents/MacOS/postman-plugins"
 "${sign[@]}" "$app"
 codesign --verify --deep --strict "$app"
+# The channel components (PLG-17): signed like the helpers (where the build put them), packed as their own zips.
+for c in postman-plugins-telegram postman-plugins-matrix; do
+  "${sign[@]}" "$bin/$c"
+done
 
 # Notarization: the service checks the upload and issues a ticket; stapler puts it into the file, so Gatekeeper does
 # not need the network on the first launch. Apple ID with an app-specific password (appleid.apple.com).
@@ -164,6 +171,12 @@ fi
 cp "$root/scripts/macos/README.txt" "$stage/README.txt"
 # ditto keeps the bundle as Finder does (extended attributes, the signature); the zip holds Postman.app and README.txt.
 ditto -c -k --sequesterRsrc "$stage" "$zip"
+
+# The channel components (PLG-17): their own zips in the assets - what the app downloads (PLG-15) and what
+# --install-component takes offline (PLG-16); minisign in CI signs them like the rest.
+for c in postman-plugins-telegram postman-plugins-matrix; do
+  ditto -c -k --sequesterRsrc "$bin/$c" "$assets/$c-macos-arm64.zip"
+done
 
 # Disk image: Postman.app, README.txt and a shortcut to /Applications - the user drags the app onto it. hdiutil on
 # CI runners sometimes fails with "Resource busy" - three attempts.

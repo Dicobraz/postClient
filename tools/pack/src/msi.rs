@@ -35,9 +35,12 @@ const EVENT_MESSAGES: &str = r"#%%SystemRoot%\Microsoft.NET\Framework64\v4.0.303
 /// Компонент 64-битный: реестр и папки — без перенаправления WOW64.
 const COMPONENT_64BIT: i32 = 256;
 const FILE_VITAL: i32 = 512;
-/// 18 — exe из установленного файла (`Source` — ключ `File`), +64 — код возврата не важен: отказ не ломает удаление.
-/// Без флагов отложенного — immediate, от имени пользователя: профиль AppContainer в его HKCU, SYSTEM его не видит.
-const CA_EXE_IGNORE: i32 = 18 + 64;
+/// 34 — exe с командной строкой из формат-строки (`Target`), `Source` — ключ `Directory` (рабочая папка);
+/// +64 (msidbCustomActionTypeContinue) — код возврата не важен: отказ не ломает удаление. Без отложенного —
+/// immediate, от имени пользователя: профиль AppContainer в его HKCU, SYSTEM его не видит. Не Type 18: в
+/// сессии снятия старой версии (RemoveExistingProducts) exe из таблицы File «не помечен к установке» —
+/// фатальный 2753; формат-путь `[#worker.exe]` резолвится в установленный файл всегда.
+const CA_EXE_IGNORE: i32 = 34 + 64;
 /// Только полное удаление; при обновлении (старую версию снимает новая) профиль нужен дальше.
 const ON_REMOVE: &str = "REMOVE~=\"ALL\" AND NOT UPGRADINGPRODUCTCODE";
 /// Ключ-маркер состава каналов (PLG-13): значение с именем фичи — канал установлен; нет значения — канал не
@@ -386,10 +389,11 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
             Column::build("Type").int16(),
         ],
     )?;
-    // Root 2 — HKEY_LOCAL_MACHINE; тип 2 — сырое значение: свойство задаёт само наличие значения.
+    // Root 2 — HKLM; тип 18 = сырое значение (2) из 64-битного представления (16): маркеры пишут 64-битные
+    // компоненты, а без 16 движок читает WOW6432Node и на обновлении не находит их (KeepNo срабатывает зря).
     p.insert_rows(
         Insert::into("RegLocator")
-            .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("{name}PrevLoc")), i(2), s(CHANNELS_KEY), s(name), i(2)]).collect()),
+            .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("{name}PrevLoc")), i(2), s(CHANNELS_KEY), s(name), i(18)]).collect()),
     )?;
     p.create_table(
         "AppSearch",
@@ -400,6 +404,22 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
     p.insert_rows(
         Insert::into("AppSearch")
             .rows(CHANNELS.iter().map(|(name, _)| vec![s(&format!("PREV{}", name.to_uppercase())), s(&format!("{name}PrevLoc"))]).collect()),
+    )?;
+    // AppSearch зондирует таблицу `Signature` на каждом поиске: отсутствие самой таблицы — фатальные 2228 и
+    // 1603 даже для чисто реестровых поисков (go-msi SEARCH-03); пустой таблицы достаточно.
+    p.create_table(
+        "Signature",
+        vec![
+            Column::build("Signature").primary_key().id_string(72),
+            Column::build("FileName").nullable().category(Category::WildCardFilename).string(255),
+            Column::build("MinVersion").nullable().category(Category::Version).string(20),
+            Column::build("MaxVersion").nullable().category(Category::Version).string(20),
+            Column::build("MinSize").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("MaxSize").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("MinDate").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("MaxDate").nullable().category(Category::DoubleInteger).int16(),
+            Column::build("Languages").nullable().category(Category::Language).string(128),
+        ],
     )?;
 
     p.create_table(
@@ -416,30 +436,54 @@ fn tables<F: std::io::Read + std::io::Write + std::io::Seek>(p: &mut Package<F>,
     let mut action_rows = vec![
         vec![s("PreventDowngrade"), i(19), NULL, s("A newer version of Postman is already installed.")],
         vec![s("SetInstallLocation"), i(51), s("ARPINSTALLLOCATION"), s("[INSTALLDIR]")],
-        vec![s("RemoveAppContainer"), i(CA_EXE_IGNORE), s("worker.exe"), s("--remove-appcontainer")],
+        vec![s("RemoveAppContainer"), i(CA_EXE_IGNORE), s("INSTALLDIR"), s("\"[#worker.exe]\" --remove-appcontainer")],
     ];
-    for (name, _) in &CHANNELS {
-        action_rows.push(vec![s(&format!("No{name}")), i(51), s("REMOVE"), s(&format!("[REMOVE][~]{name}"))]);
-        action_rows.push(vec![s(&format!("KeepNo{name}")), i(51), s("REMOVE"), s(&format!("[REMOVE][~]{name}"))]);
+    // Состав каналов (PLG-13, пересмотр 2026-11-20): в свежей транзакции (новый код продукта, есть
+    // OLDERFOUND) REMOVE трогать нельзя — InstallValidate при большом обновлении переписывает непустой
+    // REMOVE в «ALL», транзакция вырождается в обслуживание («Skipping RemoveExistingProducts: maintenance
+    // mode or an uninstall»: старая версия не снимается, новая не регистрируется). Состав на обновлении
+    // задаёт ADDLOCAL — эксклюзивный список устанавливаемого: основа Main, названные в CHANNELS каналы
+    // дописываются; без CHANNELS состав берётся из маркеров прошлой установки (четыре взаимоисключающих
+    // варианта). REMOVE остаётся только для обслуживания того же кода (CHANNELS без OLDERFOUND), где он
+    // безопасен, — после CostFinalize (доступно состояние фичи) и до InstallValidate.
+    let mut channel_actions = Vec::new();
+    action_rows.push(vec![s("SetAddLocalMain"), i(51), s("ADDLOCAL"), s("Main")]);
+    channel_actions.push(("SetAddLocalMain".into(), "CHANNELS AND NOT ADDLOCAL".into(), 940));
+    for (n, (name, _)) in CHANNELS.iter().enumerate() {
+        let action = format!("AddLocal{name}");
+        action_rows.push(vec![s(&action), i(51), s("ADDLOCAL"), s(&format!("[ADDLOCAL],{name}"))]);
+        channel_actions.push((action, format!("CHANNELS AND (CHANNELS >< \"{name}\")"), 941 + n as i32));
+    }
+    let preserves = [
+        ("KeepMain", "NOT PREVTELEGRAM AND NOT PREVMATRIX", "Main"),
+        ("KeepTelegram", "PREVTELEGRAM AND NOT PREVMATRIX", "Main,Telegram"),
+        ("KeepMatrix", "NOT PREVTELEGRAM AND PREVMATRIX", "Main,Matrix"),
+        ("KeepBoth", "PREVTELEGRAM AND PREVMATRIX", "Main,Telegram,Matrix"),
+    ];
+    for (n, (name, markers, target)) in preserves.iter().enumerate() {
+        action_rows.push(vec![s(name), i(51), s("ADDLOCAL"), s(target)]);
+        channel_actions.push(((*name).into(), format!("OLDERFOUND AND NOT CHANNELS AND {markers} AND NOT ADDLOCAL"), 943 + n as i32));
+    }
+    // REMOVE — только обслуживание того же кода (свойство Installed задано, свежая транзакция исключена —
+    // см. выше), и строго ДО CostFinalize: после него состав уже посчитан, поздний REMOVE на выбор фич не
+    // влияет. Канал стоит ⟺ его маркер прошлой установки найден (PREV*). Список через запятую: пустое и
+    // непустое значения дописываются разными действиями, иначе пустой токен — отказ CostFinalize (2711);
+    // [~] для этого не годится — это NUL-разделитель REG_MULTI_SZ, не списков свойств.
+    for (n, (name, _)) in CHANNELS.iter().enumerate() {
+        let no = format!(
+            "CHANNELS AND NOT OLDERFOUND AND Installed AND PREV{} AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")",
+            name.to_uppercase()
+        );
+        let seq = 950 + 2 * n as i32;
+        for (m, (kind, extra, target)) in
+            [("Empty", "AND NOT REMOVE", name.to_string()), ("Join", "AND REMOVE", format!("[REMOVE],{name}"))].iter().enumerate()
+        {
+            let action = format!("No{name}{kind}");
+            action_rows.push(vec![s(&action), i(51), s("REMOVE"), s(target)]);
+            channel_actions.push((action, format!("{no} {extra}"), seq + m as i32));
+        }
     }
     p.insert_rows(Insert::into("CustomAction").rows(action_rows))?;
-
-    // Условия состава каналов (PLG-13): CHANNELS задаёт точный состав (не назван — в REMOVE); при обновлении без
-    // CHANNELS маркеры держат прошлый состав (не было — остаётся без). Явный REMOVE важнее всего.
-    let mut channel_actions = Vec::new();
-    for (n, (name, _)) in CHANNELS.iter().enumerate() {
-        let prev = format!("PREV{}", name.to_uppercase());
-        channel_actions.push((
-            format!("No{name}"),
-            format!("CHANNELS AND NOT (CHANNELS >< \"{name}\") AND NOT (REMOVE >< \"{name}\")"),
-            940 + 2 * n as i32,
-        ));
-        channel_actions.push((
-            format!("KeepNo{name}"),
-            format!("OLDERFOUND AND NOT CHANNELS AND NOT {prev} AND NOT (REMOVE >< \"{name}\")"),
-            941 + 2 * n as i32,
-        ));
-    }
     let mut ui = vec![
         ("FindRelatedProducts", None, 25),
         ("AppSearch", None, 100),
@@ -594,20 +638,53 @@ mod tests {
             .map(|r| (r[0].as_str().unwrap().to_owned(), r[1].as_str().unwrap().to_owned()))
             .collect();
         assert_eq!(search, vec![("PREVTELEGRAM".into(), "TelegramPrevLoc".into()), ("PREVMATRIX".into(), "MatrixPrevLoc".into())]);
+        // AppSearch требует саму таблицу `Signature` (даже пустую): без неё — 2228 и 1603 (go-msi SEARCH-03).
+        assert!(p.tables().any(|t| t.name() == "Signature"), "Signature table missing from the file");
         let secure = property(&mut p, "SecureCustomProperties");
         assert!(secure.contains("CHANNELS") && secure.contains("PREVTELEGRAM") && secure.contains("PREVMATRIX"), "{secure}");
-        for name in ["Telegram", "Matrix"] {
-            let no = format!("No{name}");
-            let target = format!("[REMOVE][~]{name}");
-            let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some(no.as_str())).unwrap();
-            assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("REMOVE"), Some(target.as_str())), "{name}");
-            let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(no.as_str())).unwrap();
+        // Локатор маркеров читает 64-битное представление: тип 18 = сырое значение (2) + 64-битный вид (16).
+        let loc = p.select_rows(Select::table("RegLocator")).unwrap().find(|r| r[0].as_str() == Some("TelegramPrevLoc")).unwrap();
+        assert_eq!(loc[4].as_int(), Some(18), "TelegramPrevLoc type");
+        // Состав каналов: ADDLOCAL — эксклюзивный состав на обновлении (непустой REMOVE в свежей транзакции
+        // InstallValidate переписывает в «ALL» и вырождает её в обслуживание); REMOVE — только в обслуживании
+        // (Installed + маркер PREV*), строго до CostFinalize (поздний REMOVE на состав не влияет). Пустой
+        // токен в списке — отказ 2711.
+        let expected = [
+            ("SetAddLocalMain", "Main", "CHANNELS AND NOT ADDLOCAL", 940),
+            ("AddLocalTelegram", "[ADDLOCAL],Telegram", "CHANNELS >< \"Telegram\"", 941),
+            ("AddLocalMatrix", "[ADDLOCAL],Matrix", "CHANNELS >< \"Matrix\"", 942),
+            ("KeepMain", "Main", "NOT PREVTELEGRAM AND NOT PREVMATRIX", 943),
+            ("KeepTelegram", "Main,Telegram", "PREVTELEGRAM AND NOT PREVMATRIX", 944),
+            ("KeepMatrix", "Main,Matrix", "NOT PREVTELEGRAM AND PREVMATRIX", 945),
+            ("KeepBoth", "Main,Telegram,Matrix", "PREVTELEGRAM AND PREVMATRIX", 946),
+        ];
+        for (action, target, cond_part, sequence) in expected {
+            let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some(action)).unwrap();
+            assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("ADDLOCAL"), Some(target)), "{action}");
+            let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(action)).unwrap();
             let cond = seq[1].as_str().unwrap();
-            assert!(cond.contains(&format!("NOT (CHANNELS >< \"{name}\")")) && cond.contains("NOT (REMOVE ><"), "{cond}");
-            assert!(seq[2].as_int().unwrap() < 1000, "after CostFinalize: {cond}");
+            assert!(cond.contains(cond_part), "{action}: {cond}");
+            assert_eq!(seq[2].as_int(), Some(sequence), "{action}");
         }
-        let keep = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("KeepNoTelegram")).unwrap();
-        assert!(keep[1].as_str().unwrap().starts_with("OLDERFOUND AND NOT CHANNELS AND NOT PREVTELEGRAM"), "{:?}", keep[1].as_str());
+        for name in ["Telegram", "Matrix"] {
+            for (kind, target) in [("Empty", name), ("Join", format!("[REMOVE],{name}").as_str())] {
+                let action = format!("No{name}{kind}");
+                let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some(action.as_str())).unwrap();
+                assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(51), Some("REMOVE"), Some(target)), "{action}");
+                let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some(action.as_str())).unwrap();
+                let cond = seq[1].as_str().unwrap();
+                assert!(
+                    cond.contains("NOT OLDERFOUND")
+                        && cond.contains("Installed")
+                        && cond.contains(&format!("PREV{}", name.to_uppercase()))
+                        && cond.contains(&format!("(REMOVE >< \"{name}\")")),
+                    "{action}: {cond}"
+                );
+                assert!((950..1000).contains(&seq[2].as_int().unwrap()), "before CostFinalize: {cond}");
+                let ends = if kind == "Empty" { "AND NOT REMOVE" } else { "AND REMOVE" };
+                assert!(cond.ends_with(ends), "{cond}");
+            }
+        }
 
         // Встроенный CAB читается и содержит файлы под ключами таблицы File.
         let mut cab_bytes = Vec::new();
@@ -620,7 +697,10 @@ mod tests {
 
         // PAR-05: при полном удалении воркер снимает профиль AppContainer; отказ не ломает удаление.
         let ca = p.select_rows(Select::table("CustomAction")).unwrap().find(|r| r[0].as_str() == Some("RemoveAppContainer")).unwrap();
-        assert_eq!((ca[1].as_int(), ca[2].as_str(), ca[3].as_str()), (Some(82), Some("worker.exe"), Some("--remove-appcontainer")));
+        assert_eq!(
+            (ca[1].as_int(), ca[2].as_str(), ca[3].as_str()),
+            (Some(CA_EXE_IGNORE), Some("INSTALLDIR"), Some("\"[#worker.exe]\" --remove-appcontainer"))
+        );
         let seq = p.select_rows(Select::table("InstallExecuteSequence")).unwrap().find(|r| r[0].as_str() == Some("RemoveAppContainer")).unwrap();
         assert_eq!((seq[1].as_str(), seq[2].as_int()), (Some(ON_REMOVE), Some(1450)));
     }
