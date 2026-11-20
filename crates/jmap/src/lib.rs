@@ -178,10 +178,12 @@ impl Client {
     pub async fn call(&self, using: &[&str], calls: &[Invocation]) -> Result<Vec<Invocation>> {
         // Все адреса сессии прижаты к origin соединения (`Session::resolve_urls`), а при https-учётке вход с
         // http-сессией отклонён ([`Client::connect`]): открытого текста нет — схему URL анализатор доказать
-        // не умеет.
+        // не умеет (подавление — над каждой строкой запроса: алерта вешается на любую из них).
         // codeql:disable rust/cleartext-transmission
         let resp: Response = authorize(self.http.post(&self.session.api_url), &self.auth)
+            // codeql:disable rust/cleartext-transmission
             .json(&Request { using, method_calls: calls })
+            // codeql:disable rust/cleartext-transmission
             .send()
             .await?
             .error_for_status()?
