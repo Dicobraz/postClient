@@ -101,7 +101,7 @@ static HOST: OnceLock<Host> = OnceLock::new();
 pub(crate) fn host() -> &'static Host {
     HOST.get_or_init(|| {
         let log = std::env::var("POSTMAN_LOG").unwrap_or_default();
-        Host::new(Arc::new(Beside), Settings { log, ..Settings::default() })
+        Host::new(Arc::new(Sets), Settings { log, ..Settings::default() })
     })
 }
 
@@ -161,17 +161,33 @@ pub(crate) fn fetch_changed(url: &str, max: usize, etag: Option<&str>) -> Result
     }
 }
 
-/// Набор — рядом с `postman.exe` (как воркер); namespaces Linux — по политике `SandboxNamespaces`.
-struct Beside;
+/// Набор — рядом с `postman.exe` (как воркер) или в каталоге компонентов (`<data>\Postman\Components`, PLG-14,
+/// решение владельца 2026-11-19 «components»: файлы каналов докачивает приложение); что нашлось — тем и запускаем,
+/// каталог программы важнее (файл установки той же сборки). Нет нигде — запускаем из каталога программы: отказ
+/// «нет файла» покажет учётке «компонент не установлен» ([`postman_core::channel::ChannelError::Missing`]).
+struct Sets;
 
-impl Launcher for Beside {
+impl Launcher for Sets {
     fn launch(&self, row: &Row) -> std::io::Result<Started> {
-        let dir = std::env::current_exe()?.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let install = std::env::current_exe()?.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let components = postman_core::paths::data_dir().join("Components");
+        let dir = choose_dir(row, &install, &components);
         #[cfg(target_os = "linux")]
         let namespaces = crate::security::sandbox_namespaces(crate::sys::shell::policy("SandboxNamespaces"));
         #[cfg(not(target_os = "linux"))]
         let namespaces = postman_core::backend::remote::Namespaces::Optional;
         ProcLauncher { dir, namespaces }.launch(row)
+    }
+}
+
+/// Каталог файла набора: где есть — там и запуск; нет нигде — каталог программы.
+fn choose_dir(row: &Row, install: &std::path::Path, components: &std::path::Path) -> std::path::PathBuf {
+    if row.exe(install).exists() {
+        install.to_path_buf()
+    } else if row.exe(components).exists() {
+        components.to_path_buf()
+    } else {
+        install.to_path_buf()
     }
 }
 
@@ -235,6 +251,26 @@ const LEAVE_LIMIT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests {
+    /// Каталог файла набора (PLG-14): где есть — там и запуск; нет нигде — каталог программы.
+    #[test]
+    fn set_dir_prefers_install_then_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let components = tmp.path().join("components");
+        std::fs::create_dir(&install).unwrap();
+        let row = super::TELEGRAM;
+        let exe = format!("postman-plugins-telegram{}", std::env::consts::EXE_SUFFIX);
+        // Нет нигде — каталог программы (старт даст «нет файла», учётка — «компонент не установлен»).
+        assert_eq!(super::choose_dir(&row, &install, &components), install);
+        // Докачан в компоненты — оттуда.
+        std::fs::create_dir(&components).unwrap();
+        std::fs::write(components.join(&exe), b"").unwrap();
+        assert_eq!(super::choose_dir(&row, &install, &components), components);
+        // Файл установки важнее докачанного.
+        std::fs::write(install.join(&exe), b"").unwrap();
+        assert_eq!(super::choose_dir(&row, &install, &components), install);
+    }
+
     /// Строка корня — та же, что у плагина в его наборе: вид, профиль, файл и адреса по мнению самого плагина; у каждого
     /// плагина набора есть строка.
     #[test]

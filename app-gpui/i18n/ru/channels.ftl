@@ -5,6 +5,7 @@ tg-channel-hint = Беседы Telegram рядом с почтой. Канал �
 tg-policy = Задано политикой организации.
 tg-add = Добавить учётку Telegram
 tg-no-key = В этой сборке нет ключа приложения Telegram: вход недоступен.
+comp-missing = Компонент канала не установлен.
 tg-sign-out = Выйти
 tg-state-online = В сети
 tg-state-connecting = Подключение…

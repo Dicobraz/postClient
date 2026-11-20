@@ -5,6 +5,7 @@ tg-channel-hint = Telegram conversations next to your mail. The channel is in de
 tg-policy = Set by your organization's policy.
 tg-add = Add Telegram account
 tg-no-key = This build has no Telegram application key: sign-in is unavailable.
+comp-missing = The channel component is not installed.
 tg-sign-out = Sign out
 tg-state-online = Online
 tg-state-connecting = Connecting…
