@@ -15,7 +15,7 @@ use postman_calendar::Owner;
 use postman_proc::link::Incoming;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::super::mail::{MailServer, MailServices, RemoteCache, RemoteWorker, WireSeal};
+use super::super::mail::{MailServer, MailServices, RemoteCache, RemoteIndex, RemoteWorker, WireSeal};
 use super::super::wire::{
     AreaLogin, Ask, Build, Call, DirectoryQuery, Fetched, FromPlugin, HostHello, Kind, MailLogin, Opened, PluginHello, Reply, Settings, SsoDone,
     SsoOp, StoreOp, TaskDone, TaskOp, ToPlugin,
@@ -498,6 +498,7 @@ impl ServedAreas {
             store: Box::new(RemoteCache::new(Arc::clone(&link), session)),
             worker: Box::new(RemoteWorker::new(Arc::clone(&link))),
             seal: Box::new(WireSeal::new(Arc::clone(&link))),
+            index: Box::new(RemoteIndex::new(Arc::clone(&link), session)),
         };
         let notify: Arc<dyn Fn(SyncEvent) + Send + Sync> = {
             let link = Arc::clone(&link);

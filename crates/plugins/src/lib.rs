@@ -64,6 +64,18 @@ pub const PLUGINS: &[SetEntry] = &[
         claim: Claim::Scheme("imap"),
         serve: postman_backend_imap::serve,
     },
+    // JMAP (PLG-10): основной путь (The Post) — последним в набор: почта, календарь, контакты, задачи,
+    // настройки и push одним процессом с остальным набором. Хранилище учётки (с задачами и связями бесед),
+    // воркер и S/MIME — услуги ядра; индекс поиска — у ядра ([`FromPlugin::Index`]); вход — логин с паролем или
+    // токен ([`MailLogin::bearer`]). Своего адреса у JMAP нет ([`Claim::None`]): узел отвечает
+    // `/.well-known/jmap` — путь по умолчанию, вид сервера — по сети (`Probe`).
+    SetEntry {
+        id: postman_backend_jmap::ID,
+        kind: Kind::Mail,
+        profile: Profile::Network { enterprise_auth: false },
+        claim: Claim::None,
+        serve: postman_backend_jmap::serve,
+    },
 ];
 
 /// Плагин набора по id.

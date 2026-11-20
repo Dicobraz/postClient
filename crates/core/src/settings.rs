@@ -43,6 +43,10 @@ pub enum Request {
     SaveRules { rules: Vec<Rule>, replace: bool },
 }
 
+/// Сервер не даёт записать свой скрипт `vacation`: разные тексты и круг адресатов не применены (PLG-10:
+/// интерфейс сверяет с этой константой — крейта плагина он не знает).
+pub const ONE_TEXT_ONLY: &str = "this server keeps one autoreply text for everyone: separate texts and audience are not applied";
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Reply {
     /// Автоответ на сервере (с учётом правил: [`effective`]).

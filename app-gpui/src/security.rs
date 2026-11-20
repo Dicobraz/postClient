@@ -137,9 +137,14 @@ pub(crate) fn effective(p: &Prefs) -> Effective {
     effective_with(p, policy())
 }
 
-/// Минимальная версия TLS — во все пути к серверам (новые подключения).
+/// Минимальная версия TLS — во все пути к серверам (новые подключения): слинкованным плагинам — реестром,
+/// процессам наборов — настройками хоста (`ToPlugin::Settings`, процессы читают их на входе).
 pub(crate) fn apply(p: &Prefs) {
-    crate::plugins::registry().set_tls13_only(effective(p).tls13);
+    let tls13 = effective(p).tls13;
+    crate::plugins::registry().set_tls13_only(tls13);
+    let mut settings = crate::plugins::host().settings();
+    settings.tls13_only = tls13;
+    crate::plugins::host().set_settings(settings);
 }
 
 /// Политика `SandboxNamespaces` (LIN-03, ADR 0010): `required` — воркер и хост модулей без user/net/ipc namespaces не

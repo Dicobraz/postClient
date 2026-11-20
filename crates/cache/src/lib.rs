@@ -105,6 +105,7 @@ pub use folder::{FolderId, FolderRow, Owner, Scope};
 pub use job::{JobRow, MigrationMode, MigrationState};
 #[cfg(feature = "store6")]
 pub use letter::{JobId, LetterId, LetterRow, MOVE_BATCH, MoveTicket, Outbound, Place, Refused, Step};
+
 #[cfg(feature = "store6")]
 pub use local::{LocalDoc, LocalPut};
 #[cfg(feature = "store6")]
@@ -544,6 +545,97 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         r => Ok(r?),
+    }
+}
+
+/// Задачи поверх хранилища (`postman_core::tasks::handle`): путь-процесс подставляет своё хранилище по обмену
+/// (PLG-10), ядро и пути в потоке — [`Cache`].
+pub trait TaskCache: Send + Sync {
+    fn tasks(&self) -> Result<Vec<TaskRow>>;
+    fn dirty_tasks(&self) -> Result<Vec<TaskRow>>;
+    fn task(&self, uid: &str) -> Result<Option<TaskRow>>;
+    fn task_uid(&self, server_id: &str) -> Result<Option<String>>;
+    fn put_tasks(&self, rows: &[TaskRow]) -> Result<()>;
+    fn remove_tasks(&self, uids: &[String]) -> Result<()>;
+    fn replace_tasks(&self, rows: &[TaskRow]) -> Result<()>;
+    fn set_state(&self, kind: &str, value: &str) -> Result<()>;
+    fn state(&self, kind: &str) -> Result<Option<String>>;
+    fn xref_set(&self, source: &str, targets: &[String]) -> Result<()>;
+    fn xref_drop(&self, sources: &[String]) -> Result<()>;
+    fn xref_sources(&self, target: &str) -> Result<Vec<String>>;
+    fn xref_targets(&self, source: &str) -> Result<Vec<String>>;
+    fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> Result<Vec<EmailRow>>;
+    #[cfg(feature = "store6")]
+    fn letter(&self, id: LetterId) -> Result<Option<LetterRow>>;
+    #[cfg(feature = "store6")]
+    fn rows_by_ids(&self, ids: &[String]) -> Result<Vec<EmailRow>>;
+}
+
+impl TaskCache for Cache {
+    fn tasks(&self) -> Result<Vec<TaskRow>> {
+        Cache::tasks(self)
+    }
+
+    fn dirty_tasks(&self) -> Result<Vec<TaskRow>> {
+        Cache::dirty_tasks(self)
+    }
+
+    fn task(&self, uid: &str) -> Result<Option<TaskRow>> {
+        Cache::task(self, uid)
+    }
+
+    fn task_uid(&self, server_id: &str) -> Result<Option<String>> {
+        Cache::task_uid(self, server_id)
+    }
+
+    fn put_tasks(&self, rows: &[TaskRow]) -> Result<()> {
+        Cache::put_tasks(self, rows)
+    }
+
+    fn remove_tasks(&self, uids: &[String]) -> Result<()> {
+        Cache::remove_tasks(self, uids)
+    }
+
+    fn replace_tasks(&self, rows: &[TaskRow]) -> Result<()> {
+        Cache::replace_tasks(self, rows)
+    }
+
+    fn set_state(&self, kind: &str, value: &str) -> Result<()> {
+        Cache::set_state(self, kind, value)
+    }
+
+    fn state(&self, kind: &str) -> Result<Option<String>> {
+        Cache::state(self, kind)
+    }
+
+    fn xref_set(&self, source: &str, targets: &[String]) -> Result<()> {
+        Cache::xref_set(self, source, targets)
+    }
+
+    fn xref_drop(&self, sources: &[String]) -> Result<()> {
+        Cache::xref_drop(self, sources)
+    }
+
+    fn xref_sources(&self, target: &str) -> Result<Vec<String>> {
+        Cache::xref_sources(self, target)
+    }
+
+    fn xref_targets(&self, source: &str) -> Result<Vec<String>> {
+        Cache::xref_targets(self, source)
+    }
+
+    fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> Result<Vec<EmailRow>> {
+        Cache::keyword_prefix(self, prefix, mailbox, limit)
+    }
+
+    #[cfg(feature = "store6")]
+    fn letter(&self, id: LetterId) -> Result<Option<LetterRow>> {
+        Cache::letter(self, id)
+    }
+
+    #[cfg(feature = "store6")]
+    fn rows_by_ids(&self, ids: &[String]) -> Result<Vec<EmailRow>> {
+        Cache::rows_by_ids(self, ids)
     }
 }
 

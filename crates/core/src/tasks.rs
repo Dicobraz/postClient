@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::model::{Error, ErrorKind, Result};
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use postman_cache::{Cache, TaskRow};
+use postman_cache::{TaskCache, TaskRow};
 use postman_calendar::Task;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -221,7 +221,7 @@ impl Request {
 /// Правка у себя: задача в кэше с пометкой «не отправлена» (уйдёт по [`Request::Flush`]); ответ — как её покажет
 /// список.
 /// Задача-письмо (`mailtask::is_letter`) не записывается: её срок — слова письма (`mailtask::letter_patch`).
-pub fn save_local(cache: &Cache, task: Task) -> postman_cache::Result<Task> {
+pub fn save_local(cache: &impl TaskCache, task: Task) -> postman_cache::Result<Task> {
     if crate::mailtask::is_letter(&task) {
         return Ok(task);
     }
@@ -242,7 +242,7 @@ pub fn save_local(cache: &Cache, task: Task) -> postman_cache::Result<Task> {
 }
 
 /// Удаление у себя: из списка сразу, на сервере — по [`Request::Flush`].
-pub fn delete_local(cache: &Cache, uid: &str) -> postman_cache::Result<()> {
+pub fn delete_local(cache: &impl TaskCache, uid: &str) -> postman_cache::Result<()> {
     if let Some(mut row) = cache.task(uid)? {
         if row.server_id.is_none() {
             // На сервер не уходила — удалять там нечего.
@@ -269,7 +269,7 @@ pub enum Reply {
 
 /// Ссылки из названия и заметок задач (`postman://`, `mid:`, ссылки каналов) — в `xref` (ADR 0012 п. 11): у
 /// сообщения видно, что на него ссылается задача. Сбой — в журнал, задаче не мешает.
-fn index_links(cache: &Cache, rows: &[TaskRow]) {
+fn index_links(cache: &impl TaskCache, rows: &[TaskRow]) {
     let links = crate::channel::Links::installed();
     for t in rows.iter().filter_map(from_row) {
         let text = format!(
@@ -303,7 +303,7 @@ fn server_row(v: &Value) -> Option<TaskRow> {
     Some(TaskRow { uid, server_id: v["id"].as_str().map(str::to_owned), json: v.to_string(), base: None, dirty: false, deleted: false })
 }
 
-fn cached(cache: &Cache) -> Vec<Task> {
+fn cached(cache: &impl TaskCache) -> Vec<Task> {
     cache.tasks().unwrap_or_default().iter().filter_map(from_row).collect()
 }
 
@@ -317,7 +317,7 @@ fn is_network(e: &Error) -> bool {
 
 /// Выполнить запрос. Сеть недоступна — `Err` (цикл синхронизации уходит «без связи», правки остаются в кэше и
 /// уйдут по [`Request::Flush`]); отказ сервера — [`Reply::Failed`].
-pub async fn handle(store: &impl TaskStore, cache: &Cache, request: Request, notify: &impl Fn(Reply)) -> Result<()> {
+pub async fn handle(store: &impl TaskStore, cache: &impl TaskCache, request: Request, notify: &impl Fn(Reply)) -> Result<()> {
     match request {
         Request::Load => {
             notify(Reply::Loaded(cached(cache)));
@@ -401,7 +401,7 @@ pub fn block_event(task: &Task, uid: &str, calendar: &str, start: i64, end: i64)
 }
 
 /// Задачи со ссылкой на письмо — по письмам кэша; `true` — что-то изменилось (записано у себя).
-fn reconcile(cache: &Cache, notify: &impl Fn(Reply)) -> postman_cache::Result<bool> {
+fn reconcile(cache: &impl TaskCache, notify: &impl Fn(Reply)) -> postman_cache::Result<bool> {
     let now = jiff::Timestamp::now().as_second();
     let fixed = crate::mailtask::reconcile_cache(cache, now, &TimeZone::system())?;
     if fixed.is_empty() {
@@ -417,7 +417,7 @@ fn reconcile(cache: &Cache, notify: &impl Fn(Reply)) -> postman_cache::Result<bo
 
 /// Сверка с сервером: дельта (или полная загрузка, если дельты нет). Правки, ещё не отправленные, не затираются.
 /// `true` — была полная загрузка (интерфейсу — весь список заново).
-async fn refresh(store: &impl TaskStore, cache: &Cache, notify: &impl Fn(Reply)) -> Result<bool> {
+async fn refresh(store: &impl TaskStore, cache: &impl TaskCache, notify: &impl Fn(Reply)) -> Result<bool> {
     let since = cache.state(STATE_KEY).map_err(db)?;
     let delta = match since {
         Some(s) => match store.changes(&s).await {
@@ -464,7 +464,7 @@ async fn refresh(store: &impl TaskStore, cache: &Cache, notify: &impl Fn(Reply))
 /// Отправить правки из кэша по одной. Изменение — патчем «своя версия против базы» (только поля, изменённые у
 /// себя; поля, которые тем временем правил другой клиент, остаются его); задачи на сервере уже нет — создаётся
 /// заново.
-async fn flush(store: &impl TaskStore, cache: &Cache, notify: &impl Fn(Reply)) -> Result<()> {
+async fn flush(store: &impl TaskStore, cache: &impl TaskCache, notify: &impl Fn(Reply)) -> Result<()> {
     for row in cache.dirty_tasks().map_err(db)? {
         match push(store, &row).await {
             Ok(Some(fresh)) => {
@@ -508,7 +508,7 @@ async fn flush(store: &impl TaskStore, cache: &Cache, notify: &impl Fn(Reply)) -
 
 /// Пока запись шла, задачу правили: кэш пишет и поток интерфейса (`save_local`), и строка с сервера затёрла бы новую
 /// правку молча. Правка остаётся неотправленной, её база — то, что теперь на сервере; уйдёт следующим `Flush`.
-fn edited_meanwhile(cache: &Cache, sent: &TaskRow, fresh: &TaskRow) -> postman_cache::Result<Option<TaskRow>> {
+fn edited_meanwhile(cache: &impl TaskCache, sent: &TaskRow, fresh: &TaskRow) -> postman_cache::Result<Option<TaskRow>> {
     Ok(cache.task(&sent.uid)?.filter(|now| now.json != sent.json || now.deleted != sent.deleted).map(|now| TaskRow {
         server_id: fresh.server_id.clone(),
         base: Some(fresh.json.clone()),
@@ -552,6 +552,7 @@ async fn push(store: &impl TaskStore, row: &TaskRow) -> Result<Option<TaskRow>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use postman_cache::Cache;
     use postman_calendar::{MailLink, Moment, Progress};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
