@@ -27,12 +27,15 @@ POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный
 cargo run --release -p postman-gpui                     # без окружения: сохранённый вход или строка входа; --sign-out — забыть
 ```
 
-Плагины отдельными процессами (ADR 0013): набор `postman-plugins` лежит рядом с `postman.exe` — с PLG-03 он в пакетах
-всех трёх ОС (архив и MSI, `Contents/MacOS`, deb/rpm/AppImage; состав наборов — решение 2026-11-16). Пока в нём только
-демо-канал: в отладочной сборке `--demo` поднимает его процессом после первого кадра — собрать набор вместе с
-программой: `cargo build -p postman-gpui -p postman-worker -p postman-plugins`. Нет файла набора — канал в «проблеме»,
-в журнале `plugin set postman-plugins not found`. Снимки и release-сборка без `POSTMAN_BENCH_PLUGINS` держат демо-канал
-в своём процессе, как прежде. Журнал плагина — в общем журнале с меткой `plugin=<id>`.
+Плагины отдельными процессами (ADR 0013): набор `postman-plugins` лежит рядом с `postman.exe` — он в пакетах
+всех трёх ОС (архив и MSI, `Contents/MacOS`, deb/rpm/AppImage; состав наборов — решение 2026-11-16). В наборе —
+все протоколы почты и каталога (JMAP, IMAP+SMTP, DAV, EWS, LDAP), каналы — своими файлами
+(`postman-plugins-telegram`, `postman-plugins-matrix`): в `postman.exe` протоколов и их сетевого стека нет.
+Собирать набор вместе с программой: `cargo build -p postman-gpui -p postman-worker -p postman-plugins`
+(и `-p postman-plugins-telegram` / `-p postman-plugins-matrix` для каналов). Нет файла набора — учётка и канал
+в «проблеме», в журнале `plugin set postman-plugins not found`. Демо-канал в отладочной сборке держится
+в своём процессе (`demo_remote`), снимки и release — как прежде; процесс набора — после первого кадра и по
+запросу, простой 5 минут его завершает. Журнал плагина — в общем журнале с меткой `plugin=<id>`.
 
 Release-сборка — без консоли (`windows_subsystem`): `--bench`, `--screens`, `--help` пишут в консоль родителя
 или в перенаправление (`> файл`, канал). Git Bash и `.cmd` ждут выхода сами; в интерактивном cmd — `start /wait`,
@@ -76,6 +79,14 @@ Actions — для разработки. Схема общая для Pets (ск
 | `postman-<версия>-linux-x64.deb`, `.rpm` | Linux x86_64: пакеты для Debian/Ubuntu и Fedora/openSUSE; с профилем AppArmor воркера |
 | `<файл .msi, .zip, .dmg, .AppImage, .deb или .rpm>.minisig` | Подпись minisign для самообновления (решение 2026-11-11 «self-update») |
 | `SHA256SUMS.txt` | Контрольные суммы всех файлов |
+
+Каналы Telegram и Matrix MSI ставит по умолчанию вместе со всем (PLG-13, решение 2026-11-19
+`docs/decisions/2026-11-19-components.md`): обычному пользователю выбирать ничего не надо, неиспользуемый канал не
+запускается. Состав каналов для сетевой раскатки — свойство `CHANNELS` в тихой установке (мастера в MSI нет):
+`msiexec /i postman.msi /qn` — всё; `CHANNELS=none` — только почта и каталог; `CHANNELS=Telegram,Matrix` — точный
+список. Выбор переживает обновления (маркеры в `HKLM\SOFTWARE\Pets\Postman\Channels`); снять канал —
+`msiexec /i postman.msi REMOVE=Telegram`. Автопроверка — `scripts\windows\msi-check.ps1` (только CI-раннер:
+скрипт меняет систему), сценарии для рук — `docs/manual-tests/PLG-13.md`.
 
 - Тег `v<версия>` — ровно `version` из `Cargo.toml` (CI сверяет). `v0.2.0` — стабильный выпуск, `v0.2.0-beta.1` —
   предварительный (канал «Предварительный» в настройках).

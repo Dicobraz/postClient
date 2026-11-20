@@ -241,6 +241,8 @@ pub(in crate::backend) struct MailScope {
     pub(in crate::backend) events: mpsc::Sender<crate::sync::Event>,
     pub(in crate::backend) repaint: Mutex<Box<dyn Fn() + Send>>,
     pub(in crate::backend) cache: Cache,
+    /// Поисковый индекс учётки (PLG-10): услуга `FromPlugin::Index` индексирует строки им.
+    pub(in crate::backend) index: crate::sync::Index,
     pub(in crate::backend) failed: Mutex<Option<String>>,
     /// Очередь отправки учётки (PLG-08): ответы пути на её билеты — сюда, интерфейсу — только её ошибки.
     pub(in crate::backend) queue: Arc<super::mail::MailQueue>,
@@ -338,6 +340,12 @@ impl Host {
     }
 
     /// Новые настройки — запущенным процессам сейчас, остальным — в `Hello`.
+    /// Текущие настройки политики у процессов ([`Settings`]): чтобы дописать свою и отослать
+    /// [`set_settings`](Self::set_settings) целиком.
+    pub fn settings(&self) -> Settings {
+        lock(&self.0.settings).clone()
+    }
+
     pub fn set_settings(&self, settings: Settings) {
         *lock(&self.0.settings) = settings.clone();
         for conn in self.0.running() {
@@ -816,6 +824,16 @@ impl Conn {
                 Incoming::Message(FromPlugin::CacheWrite { session, op }, _) => {
                     if let Err(e) = self.cache_write(session, &op) {
                         tracing::error!(plugin = plugin.row.id, session, "cache write failed: {e}; the error surfaces on the next read");
+                    }
+                }
+                // Поисковый индекс (PLG-10): строки писем — в индекс ядра; текст и база — у ядра, ответа нет.
+                // Нет сессии или индекса — молча: путь без поиска и не зовёт, а после падения сессии строка
+                // переиндексируется при следующем входе (письмо сохранено, поиск отстанет только на него).
+                Incoming::Message(FromPlugin::Index { session, op: super::wire::IndexOp::Rows(rows) }, _) => {
+                    let mails = lock(&self.mails);
+                    let scope = mails.get(&session);
+                    if let (Some(scope), Some(i)) = (scope, scope.and_then(|s| s.index.as_ref())) {
+                        crate::indexer::rows(i, &scope.cache, &rows);
                     }
                 }
                 Incoming::Call(call, FromPlugin::Store { scope, op }, _) => {

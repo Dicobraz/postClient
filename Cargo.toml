@@ -108,9 +108,10 @@ opt-level = "s"
 [profile.release.package.wasmparser]
 opt-level = "s"
 
-# Канал Matrix (CH-05, docs/SIZE.md №12): `matrix-sdk`, `ruma*`, `vodozemac` и зависимости, которые тянет только
-# Matrix, — холодный код канала, по размеру (`"z"`: −1,1 МиБ к `"s"`). Только точные имена (cargo без `*`); общие с остальным exe
-# крейты (`sha2`, `rand`, `digest`…) не трогаем. Без `matrix-release` код канала в exe не попадает — на размер не влияет.
+# Канал Matrix (CH-05, docs/SIZE.md №12 и №15): `matrix-sdk`, `ruma*`, `vodozemac` и зависимости, которые тянет
+# только Matrix, — холодный код канала, по размеру (`"z"`: −1,1 МиБ к `"s"`). Только точные имена (cargo без `*`);
+# общие с остальным кодом крейты (`sha2`, `rand`, `digest`…) не трогаем. С PLG-04 эти крейты собираются в файл
+# набора `postman-plugins-matrix` (в `postman.exe` их нет) — блок работает на его размер.
 [profile.release.package]
 anymap2 = { opt-level = "z" }
 archery = { opt-level = "z" }

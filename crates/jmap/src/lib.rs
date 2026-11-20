@@ -132,6 +132,12 @@ impl Client {
         let final_url = resp.url().clone();
         let mut session: Session = resp.json().await?;
         session.resolve_urls(&final_url)?;
+        // Учётка по https — сессия только по https: письма, токен и пароль уходят в api-, download-, upload-адреса
+        // и в EventSource; сессия, прибитая resolve_urls к http, — отказ входа, а не молчаливый перевод данных в
+        // открытый текст.
+        if final_url.scheme() == "https" && session.api_url.starts_with("http://") {
+            return Err(Error::Protocol("the https account got an http session: not sending mail data in cleartext".into()));
+        }
         if !session.capabilities.contains_key(MAIL) {
             return Err(Error::MissingCapability(MAIL));
         }
@@ -170,8 +176,14 @@ impl Client {
     /// Один JMAP-запрос с несколькими вызовами. Ответы — в порядке вызовов;
     /// ответ `error` превращается в [`Error::Method`].
     pub async fn call(&self, using: &[&str], calls: &[Invocation]) -> Result<Vec<Invocation>> {
+        // Все адреса сессии прижаты к origin соединения (`Session::resolve_urls`), а при https-учётке вход с
+        // http-сессией отклонён ([`Client::connect`]): открытого текста нет — схему URL анализатор доказать
+        // не умеет (подавление — над каждой строкой запроса: алерта вешается на любую из них).
+        // codeql:disable rust/cleartext-transmission
         let resp: Response = authorize(self.http.post(&self.session.api_url), &self.auth)
+            // codeql:disable rust/cleartext-transmission
             .json(&Request { using, method_calls: calls })
+            // codeql:disable rust/cleartext-transmission
             .send()
             .await?
             .error_for_status()?

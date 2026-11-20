@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, EmailRow, LetterId, MailboxRow, RemoteRef, Rights, in_profile, scoped, unscoped};
 use postman_compose::{Address, Attachment, Draft};
-use postman_core::backend::mail::{LocalCache, LocalSeal, LocalWorker, MailCache, MailSeal, MailServices, MailWorker};
+use postman_core::backend::mail::{LocalCache, LocalSeal, LocalWorker, MailCache, MailSeal, MailServices, MailWorker, NopIndex};
 use postman_core::backend::{AreaCtx, Spawn};
 use postman_core::model::{ImportError, JobId, Remote, Selector};
 use postman_core::sync::{Command, ErrorKind, Event, FOLDER_UNSUPPORTED, SendReceive, Sender, Stage, Status, SyncError};
@@ -296,6 +296,7 @@ pub(crate) fn spawn(s: Spawn, user: String, password: String) -> UnboundedSender
             store: Box::new(LocalCache(cache)),
             worker: Box::new(LocalWorker::new(postman_worker::Client::default_exe(), WORKER_TIMEOUT)),
             seal: Box::new(LocalSeal),
+            index: Box::new(NopIndex),
         };
         run(account.url, user, password, profile, services, rx, &|e| notify.send(e)).await;
     });
@@ -432,7 +433,7 @@ pub(crate) async fn run(
     mut rx: UnboundedReceiver<Command>,
     notify: &dyn Fn(Event),
 ) {
-    let MailServices { store, worker, seal } = services;
+    let MailServices { store, worker, seal, .. } = services;
     // Конкретное замыкание вместо `&dyn` — дальше договор как был (`&impl Fn`).
     let notify = &|e: Event| notify(e);
     notify(Event::Status(Status::Connecting { url: host_of(&url).unwrap_or_default() }));
