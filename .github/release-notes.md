@@ -2,19 +2,19 @@
 <!-- pre -->
 **Бета-версия.** Основное работает, но возможны ошибки. Нашли ошибку — «Настройки» → «Общие» → «Отчёт для поддержки» и приложите файл к сообщению.
 
-**Бета-тестерам.** Версии 0.1.0-beta.5 и новее предложат эту версию сами (канал «Предварительный»). Версии 0.1.0-beta.4 и старше обновить себя не умеют: один раз установите эту версию вручную (файлы ниже) — письма и вход сохранятся, — затем «Настройки» → «Общие» → «Обновления» → канал **«Предварительный»**.
+**Бета-тестерам.** Версии 0.1.0-beta.5 и новее предложат эту версию сами. Версии 0.1.0-beta.4 и старше обновить себя не умеют: один раз установите эту версию вручную (файлы ниже) — письма и вход сохранятся, — затем «Настройки» → «Общие» → «Обновления» → канал **«Предварительный»**.
 <!-- /pre -->
 
 ## Что нового
 
-- **Версия для Linux** (предварительно) — пакеты для Ubuntu и Debian, Fedora, RHEL и openSUSE и AppImage для любого дистрибутива. Файлы — ниже.
-- **На Mac — подпись и шифрование писем S/MIME** ключами из «Связки ключей», вход в Exchange и в адресную книгу компании без пароля — по билету Kerberos.
-- **Строка меню на Mac** и число непрочитанных на значке в Dock.
-- **«Свои сертификаты»** в «Настройки» → «Безопасность»: кому выдан, срок, годится ли для подписи; на Linux — добавить сертификат из файла .p12 или .pfx.
-- **Подпись S/MIME**: сертификат, срок которого ещё не начался, отмечается «ещё не действует»; промежуточные сертификаты Postman берёт из самих писем.
-- **Политики организации** — одни и те же ключи и значения на всех системах.
-- **Песочница строже**: письма и вложения разбираются в более закрытом процессе на всех системах.
-- **Исправлено**: в «Настройки» → «Чтение» предпросмотр показывает выбранный вид беседы; «Вид беседы» в меню письма выбирается мышью, даже когда рядом уведомление; «+ категория» в письме открывает список категорий, а не меню письма; адрес ссылки внизу письма пропадает, когда курсор уходит со ссылки, и сам через несколько секунд.
+- **Каналы — Telegram и Matrix**: беседы мессенджеров рядом с почтой, у каждого канала своя ветка в списке. Включаются в «Настройки» → «Каналы» (в разработке, по умолчанию выключены); установщик кладёт компоненты каналов сразу. Альбомы, кнопки ботов и опросы, умные папки.
+- **«Медиа беседы»** — фото, видео и файлы беседы отдельным экраном, вместо ленты; вложение можно перетащить прямо в поле ввода чата.
+- **Быстрее и легче**: протоколы почты и каталога работают отдельными процессами и поднимаются по требованию — основной файл Postman стал меньше, запуск не медленнее.
+- **Компоненты** — «Настройки» → «Каналы»: если компонент канала не установлен или устарел, Postman предложит «Скачать» или «Установить из файла…» (без интернета). Тихая установка компонента: `postman.exe --install-component <файл>`.
+- **Каналы в MSI**: ставятся все; для раскатки организации — свойство `CHANNELS` (`CHANNELS=none`, `CHANNELS=Telegram,Matrix`), снять канал — `REMOVE=Telegram`. Выбор переживает обновления.
+- **Кнопки окна** — по настройке ОС; на Windows можно включить раскладку macOS (кнопки слева).
+- **Выбор адресной книги** в форме контакта.
+- **Исправлено**: выделение фрагмента текста не терялось при коротком перетаскивании; кнопки окна на Windows следуют настройке ОС.
 <!-- stable -->
 **Стабильная версия** для повседневной работы.
 <!-- /stable -->
@@ -32,7 +32,7 @@
 Если Windows пишет «Система Windows защитила ваш компьютер», нажмите «Подробнее» → «Выполнить в любом случае».
 <!-- /unsigned -->
 
-Остальные файлы ниже (`postman-worker.exe`, `postman-viewer.exe`) нужны, только если Postman на Windows сам попросит скачать недостающий компонент.
+Остальные файлы ниже (`postman-worker.exe`, `postman-viewer.exe`, `postman-plugins-telegram.exe`, `postman-plugins-matrix.exe`) нужны, только если Postman сам попросит скачать недостающий компонент — вкладка «Каналы» в настройках предложит «Скачать» (или «Установить из файла…» без интернета).
 
 ## Скачать — macOS 13 и новее, Apple Silicon (M1 и новее)
 
@@ -68,7 +68,7 @@
 
 Пакеты .deb и .rpm лучше AppImage на Ubuntu 23.10 и новее: с ними вложения открываются в более строгой изоляции. Обновления: AppImage Postman обновляет сам; с пакетами .deb и .rpm он сообщит о новой версии и даст ссылку «Скачать» — поставьте её так же, как при установке, письма и вход сохранятся.
 
-*English:* New: a Linux version (preview), S/MIME and passwordless Kerberos sign-in on Mac. Fixed: the conversation view preview and menu, the "+ category" button, the link address line. Postman updates itself (Settings → General → Updates; from 0.1.0-beta.4 and older, install this version manually once and pick the "Preview" channel). Windows — the **.msi** installs Postman for all users (administrator rights required); the **.zip** installs it for you only, no administrator rights needed. macOS (Apple Silicon, 13+) — open the **.dmg** and drag Postman onto Applications. Linux (x86_64, preview) — the **.deb** (Ubuntu, Debian) or **.rpm** (Fedora, RHEL 9, openSUSE) package, or the **.AppImage** for any distribution; the AppImage updates itself; with .deb and .rpm Postman offers a download link for the new version.
+*English:* New: Telegram and Matrix channels next to your mail (in development, off by default — enable them in Settings → Channels; the installer ships their components), a conversation media view, components you can download or install from a file, and faster startup with a smaller main file — mail and directory protocols now run in separate on-demand processes. Fixed: text selection with a short drag; window buttons follow the OS setting. Postman updates itself (Settings → General → Updates). Windows — the **.msi** installs Postman for all users (administrator rights required); the **.zip** installs it for you only, no administrator rights needed. macOS (Apple Silicon, 13+) — open the **.dmg** and drag Postman onto Applications. Linux (x86_64) — the **.deb** (Ubuntu, Debian) or **.rpm** (Fedora, RHEL 9, openSUSE) package, or the **.AppImage** for any distribution.
 <!-- mac-unsigned -->
 The app is not signed by Apple yet: on first launch go to System Settings → Privacy & Security → "Open Anyway", or run `xattr -dr com.apple.quarantine /Applications/Postman.app`.
 <!-- /mac-unsigned -->

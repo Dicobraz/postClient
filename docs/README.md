@@ -33,7 +33,8 @@ Exchange (EWS) — совместимость по стандартам, чер�
 |---|---|
 | `crates/ir` | HTML (белый список) / text/plain → IR → Markdown-цитата / исходящий HTML. Без I/O, готов к запуску в песочнице. |
 | `crates/jmap`, `crates/imap`, `crates/dav`, `crates/ews` | Клиенты протоколов: JMAP (Mail, Calendars, Principals), IMAP + SMTP, CalDAV/CardDAV, Exchange Web Services. |
-| `crates/backend-*` | Плагины путей к серверам (`jmap`, `imap`, `dav`, `ews`) и каталога (`ldap` — Active Directory, сертификаты адресатов) поверх договора из `core`. |
+| `crates/backend-*` | Плагины путей к серверам (`jmap`, `imap`, `dav`, `ews`) и каталога (`ldap` — Active Directory, сертификаты адресатов) поверх договора из `core`; в `postman.exe` не входят. |
+| `crates/plugins`, `crates/plugins-telegram`, `crates/plugins-matrix` | Исполняемые файлы наборов процессов (ADR 0013): общий набор — почта и каталог, Telegram и Matrix — своими файлами; профиль песочницы «сеть без файлов» (`crates/proc` — каркас процесса). |
 | `crates/cache` | Хранилище на redb (ключ-значение, чистый Rust): папки, строки списка, порядок `(папка, -дата, id)` для окон виртуального скролла, тела, вложения, blob'ы, состояния синхронизации. |
 | `crates/search` | Полнотекстовый индекс (tantivy): словоформы (Snowball ru+en), опечатки (Левенштейн 1–2), префикс по мере набора, неверная раскладка, ё=е, свежие выше. 50 тыс. писем: 1–4 мс на запрос. |
 | `crates/compose` | Ответ/ответ всем/пересылка из IR (как в Outlook: RE:/FW:, ответ сверху), разбор полей адресов, сборка RFC 5322 multipart/alternative. Bcc — только в конверт. |
