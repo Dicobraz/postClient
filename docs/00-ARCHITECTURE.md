@@ -17,8 +17,9 @@ Windows и macOS. Приложение семейства «Pets»: общий �
 | L0 | `ir` | HTML → безопасный IR, без I/O |
 | L1 | `jmap`, `imap`, `dav`, `ews` (протоколы), `cache` (redb), `compose`, `calendar`, `search` (tantivy), `worker`, `smime` (CMS и проверка подписи S/MIME, без I/O), `export` (EML, mbox, Maildir, MSG, PST из байтов письма и свойств MAPI; без I/O, кроме `Write`; ни `core`, ни протоколов, ни `worker`) | без UI-зависимостей |
 | L2 | `core` (модель, договор путей к серверам и общий цикл синхронизации, рендер через воркер, адресная книга, приглашения, замеры) | без UI-зависимостей; **без протоколов** (ADR 0004) |
-| L2b | плагины путей: `backend-jmap`, `backend-imap`, `backend-dav`, `backend-ews` (ADR 0004) | `core` и только свой протокол L1; друг от друга не зависят |
-| L3 | `app-gpui` — интерфейс, исполняемый файл `postman.exe`; реестр плагинов — `app-gpui/src/plugins.rs` | только здесь gpui, winit, rfd (диалоги); протоколы — только через плагины |
+| L2b | плагины путей: `backend-jmap`, `backend-imap`, `backend-dav`, `backend-ews`, `backend-ldap`, `backend-telegram`, `backend-matrix` (ADR 0004) | `core` и только свой протокол L1; друг от друга не зависят; интерфейсом не линкуются (`LINKED_FOR_NOW` пуст) |
+| L3 | `app-gpui` — интерфейс, исполняемый файл `postman.exe`; реестр плагинов — `app-gpui/src/plugins.rs` (строки-заместители, ADR 0013) | только здесь gpui, winit, rfd (диалоги); протоколов и их сетевого стека (`reqwest`, `rustls`) в `postman.exe` нет — только через процессы плагинов |
+| — | наборы процессов: `plugins` (почта и каталог: JMAP, IMAP+SMTP, DAV, EWS, LDAP), `plugins-telegram`, `plugins-matrix` (ADR 0013) — запускаются хостом по строке, песочница «сеть без файлов» | набор зависит от `core` и своих плагинов; на наборы никто не зависит |
 | — | `demo` — синтетический ящик для демо и тестов | без UI; от него зависит только L3 |
 
 Слои проверяет тест `crates/core/tests/layers.rs` (таблица `LAYERS` — источник правды); новый крейт — сначала в
