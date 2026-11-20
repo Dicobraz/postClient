@@ -99,11 +99,6 @@ pub(crate) const ROWS: &[Row] = &[DEMO, MATRIX, TELEGRAM, LDAP, DAV, EWS, IMAP, 
 pub(crate) const TELEGRAM_SET: &str = TELEGRAM.set;
 pub(crate) const MATRIX_SET: &str = MATRIX.set;
 
-/// Файлы наборов каналов (PLG-15): ключ компонента — имя файла набора; экраны по нему спрашивают состояние
-/// и запускают докачку, хост по нему находит строку плагина ([`component_ready`]).
-pub(crate) const TELEGRAM_SET: &str = TELEGRAM.set;
-pub(crate) const MATRIX_SET: &str = MATRIX.set;
-
 static HOST: OnceLock<Host> = OnceLock::new();
 
 /// Хост плагинов процесса. Создание — без ввода-вывода и без процессов: каталог набора и политика namespaces читаются
