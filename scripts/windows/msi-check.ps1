@@ -39,7 +39,7 @@ function Msiexec([string]$what, [string]$name, [int[]]$ok = @(0, 3010)) {
 function Dump-Diag([string]$name) {
   $log = Join-Path $logs "$name.log"
   Get-Content $log -Tail 60
-  Select-String -Path $log -Pattern "value 3|error 1|error 2|CustomAction.*returned|Doing action: (No|KeepNo|RemoveExistingProducts|RemoveAppContainer)|Skipping action: (No|KeepNo|RemoveExistingProducts|RemoveAppContainer)|Removing older products|PROPERTY CHANGE.*(REMOVE|UPGRADING)" -Context 3 | ForEach-Object {
+  Select-String -Path $log -Pattern "value 3|error 1|error 2|CustomAction.*returned|Doing action: (No|Keep|AddLocal|SetAddLocal|RemoveExistingProducts|RemoveAppContainer)|Skipping action: (No|Keep|AddLocal|SetAddLocal|RemoveExistingProducts|RemoveAppContainer)|Removing older products|PROPERTY CHANGE.*(REMOVE|UPGRADING|ADDLOCAL)" -Context 3 | ForEach-Object {
     "--- $($_.LineNumber)"
     $_.Context.PreContext
     $_.Line
