@@ -7,9 +7,10 @@
 //! - `pm_view(ptr: i32, len: i32) -> i64` — просмотр входа; итог — указатель ответа в старших 32 битах и его длина в
 //!   младших; ответ — [`ViewerOutput`] в postcard, не длиннее [`MAX_OUTPUT`].
 //!
-//! Пределы — на запрос: модуль — [`MAX_MODULE`], вход — [`MAX_INPUT`], память модуля — [`MAX_MEMORY`], топливо —
-//! [`FUEL`], время процесса — сторож [`VIEW_LIMIT`]; Job Object процесса — [`JOB_MEMORY`]. Ответ — чужие данные:
-//! разделы и блоки — в пределах `.docx`, ссылки — через проверку IR, картинка — не больше [`MAX_SIDE`] по стороне.
+//! Пределы — на запрос: модуль — [`MAX_MODULE`], вход и память модуля, топливо и ответ — [`Limits`] (заявленные в
+//! описании, ужатые до общих констант), время процесса — сторож [`VIEW_LIMIT`]; Job Object процесса —
+//! [`JOB_MEMORY`]. Ответ — чужие данные: разделы и блоки — в пределах `.docx`, ссылки — через проверку IR,
+//! картинка — не больше [`MAX_SIDE`] по стороне.
 
 use std::time::Duration;
 
@@ -44,6 +45,148 @@ pub const VIEW_LIMIT: Duration = Duration::from_secs(10);
 pub const VIEW_TIMEOUT: Duration = Duration::from_secs(12);
 /// Предел памяти процесса-хоста (Windows — Job Object, macOS — распределитель с пределом).
 pub const JOB_MEMORY: usize = 512 * 1024 * 1024;
+
+/// Пределы просмотра модулем — заявленные в описании (ядро, `viewers.rs`, проверяет их против общих ещё на
+/// чтении реестра). Хост применяет ужатые до общих констант ([`Limits::clamped`]): модуль может только
+/// ужесточать песочницу. Клиент передаёт их хосту в [`Request::ViewModule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limits {
+    /// Вход больше — отказ до запуска модуля.
+    pub input: usize,
+    /// Память модуля (`StoreLimits`): рост сверх — отказ.
+    pub memory: usize,
+    /// Топливо на просмотр.
+    pub fuel: u64,
+    /// Ответ длиннее — отказ.
+    pub output: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { input: MAX_INPUT, memory: MAX_MEMORY, fuel: FUEL, output: MAX_OUTPUT }
+    }
+}
+
+impl Limits {
+    /// Общие константы — верхний потолок: заявленное больше общего или нулевое (не заявлено) заменяется общим.
+    pub fn clamped(self) -> Self {
+        let one = |own: usize, host: usize| if own == 0 || own > host { host } else { own };
+        Self {
+            input: one(self.input, MAX_INPUT),
+            memory: one(self.memory, MAX_MEMORY),
+            fuel: if self.fuel == 0 || self.fuel > FUEL { FUEL } else { self.fuel },
+            output: one(self.output, MAX_OUTPUT),
+        }
+    }
+}
+
+/// Есть ли у модуля импорты (раздел Import — просьба доступа к системе, у ABI v1 их нет). Реестр разобранного
+/// без интерпретатора модуля показывает отказ в настройках; не разобрался — `false`, полную проверку всё равно
+/// делает хост.
+pub fn has_imports(wasm: &[u8]) -> bool {
+    if !wasm.starts_with(b"\0asm\x01\0\0\0") {
+        return false;
+    }
+    let mut r = Reader(&wasm[8..]);
+    while let Some((id, body)) = r.section() {
+        if id != 2 {
+            continue;
+        }
+        let mut s = Reader(body);
+        let Some(count) = s.leb() else { return false };
+        if count == 0 {
+            return false;
+        }
+        for _ in 0..count {
+            if s.import().is_none() {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Читатель байт WASM: срезы и LEB128.
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    /// Раздел: номер и тело по длине из заголовка; не поместился — раздел не годится.
+    fn section(&mut self) -> Option<(u8, &'a [u8])> {
+        let id = self.byte()?;
+        let len = usize::try_from(self.leb()?).ok()?;
+        let body = self.take(len)?;
+        Some((id, body))
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        let (&b, rest) = self.0.split_first()?;
+        self.0 = rest;
+        Some(b)
+    }
+
+    /// LEB128 без знака (до 10 байт).
+    fn leb(&mut self) -> Option<u64> {
+        let mut n = 0u64;
+        for shift in (0..64).step_by(7) {
+            let b = self.byte()?;
+            n |= u64::from(b & 0x7F) << shift;
+            if b & 0x80 == 0 {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        if len > self.0.len() {
+            return None;
+        }
+        let (body, rest) = self.0.split_at(len);
+        self.0 = rest;
+        Some(body)
+    }
+
+    /// Импорт: два имени и дескриптор (функция, таблица, память или глобальная переменная).
+    fn import(&mut self) -> Option<()> {
+        let name = usize::try_from(self.leb()?).ok()?;
+        self.take(name)?;
+        let field = usize::try_from(self.leb()?).ok()?;
+        self.take(field)?;
+        match self.byte()? {
+            // Функция: индекс типа.
+            0 => {
+                self.leb()?;
+            }
+            // Таблица: тип элемента и пределы.
+            1 => {
+                self.byte()?;
+                self.limits()?;
+            }
+            // Память: пределы.
+            2 => {
+                self.limits()?;
+            }
+            // Глобальная переменная: тип и изменяемость.
+            3 => {
+                self.byte()?;
+                self.byte()?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// Пределы: минимум и, с флагом 1, максимум (флаг 2 — общая у потоков, дескриптор тот же).
+    fn limits(&mut self) -> Option<()> {
+        let flags = self.byte()?;
+        self.leb()?;
+        if flags & 1 != 0 {
+            self.leb()?;
+        }
+        Some(())
+    }
+}
 
 /// Ответ модуля (ABI v1, postcard). Типы — общие с SDK модулей (`viewers/sdk`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,19 +348,19 @@ mod host {
     use wasmi::errors::{ErrorKind, InstantiationError};
     use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode};
 
-    use super::{ABI, FUEL, MAX_INPUT, MAX_MEMORY, MAX_MODULE, MAX_OUTPUT, Refusal, VIEW_LIMIT, ViewerOutput, checked};
+    use super::{ABI, Limits, MAX_MODULE, Refusal, VIEW_LIMIT, ViewerOutput, checked};
     use crate::{Request, Response};
 
     /// Точка входа `postman-viewer.exe`: та же песочница и тот же обмен, что у воркера; запрос — только
     /// [`Request::ViewModule`].
     pub fn serve() -> ! {
         crate::run(VIEW_LIMIT, |req, bin| match req {
-            Ok(Request::ViewModule { wasm }) => {
+            Ok(Request::ViewModule { wasm, limits }) => {
                 let Some((module, input)) = bin.split_at_checked(wasm as usize) else {
                     return (Response::View(Err(Refusal::Invalid)), Vec::new());
                 };
                 // Сбой интерпретатора на чужом модуле — отказ этого просмотра, а не смерть процесса.
-                let r = std::panic::catch_unwind(|| run(module, input, FUEL)).unwrap_or(Err(Refusal::Trap));
+                let r = std::panic::catch_unwind(move || run(module, input, limits)).unwrap_or(Err(Refusal::Trap));
                 match r {
                     Ok(ViewerOutput::Image { width, height, rgba }) => {
                         (Response::View(Ok(ViewerOutput::Image { width, height, rgba: Vec::new() })), rgba)
@@ -233,11 +376,13 @@ mod host {
         })
     }
 
-    /// Модуль `module` смотрит вход `input` с топливом `fuel` (в процессе-хосте — [`FUEL`]); ответ проверен
-    /// ([`checked`]). Глубину вложенности postcard не ограничивает: переполнение стека на разборе — падение процесса
-    /// хоста, клиент поднимает новый.
-    pub fn run(module: &[u8], input: &[u8], fuel: u64) -> Result<ViewerOutput, Refusal> {
-        if module.len() > MAX_MODULE || input.len() > MAX_INPUT {
+    /// Модуль `module` смотрит вход `input` с пределами `limits` (заявленные в описании модуля; применяются ужатые
+    /// до общих констант — [`Limits::clamped`], в процессе-хосте без заявленных — [`Limits::default`]); ответ
+    /// проверен ([`checked`]). Глубину вложенности postcard не ограничивает: переполнение стека на разборе — падение
+    /// процесса хоста, клиент поднимает новый.
+    pub fn run(module: &[u8], input: &[u8], limits: Limits) -> Result<ViewerOutput, Refusal> {
+        let limits = limits.clamped();
+        if module.len() > MAX_MODULE || input.len() > limits.input {
             return Err(Refusal::TooLarge);
         }
         let mut config = Config::default();
@@ -247,11 +392,11 @@ mod host {
         if module.imports().len() != 0 {
             return Err(Refusal::Imports);
         }
-        let limits =
-            StoreLimitsBuilder::new().memory_size(MAX_MEMORY).memories(1).tables(1).table_elements(1 << 20).trap_on_grow_failure(true).build();
-        let mut store = Store::new(&engine, limits);
+        let store_limits =
+            StoreLimitsBuilder::new().memory_size(limits.memory).memories(1).tables(1).table_elements(1 << 20).trap_on_grow_failure(true).build();
+        let mut store = Store::new(&engine, store_limits);
         store.limiter(|l: &mut StoreLimits| l);
-        store.set_fuel(fuel).map_err(|_| Refusal::Fuel)?;
+        store.set_fuel(limits.fuel).map_err(|_| Refusal::Fuel)?;
         let instance = Linker::new(&engine).instantiate_and_start(&mut store, &module).map_err(refusal)?;
         let abi = instance.get_typed_func::<(), u32>(&store, "pm_abi").map_err(|_| Refusal::Abi)?;
         let alloc = instance.get_typed_func::<u32, u32>(&store, "pm_alloc").map_err(|_| Refusal::Abi)?;
@@ -265,7 +410,7 @@ mod host {
         memory.write(&mut store, ptr as usize, input).map_err(|_| Refusal::Abi)?;
         let packed = view.call(&mut store, (ptr, len)).map_err(refusal)?;
         let (at, n) = ((packed >> 32) as usize, (packed & 0xFFFF_FFFF) as usize);
-        if n > MAX_OUTPUT {
+        if n > limits.output {
             return Err(Refusal::Output);
         }
         let mut out = vec![0; n];
@@ -282,5 +427,52 @@ mod host {
             | (_, ErrorKind::Memory(_) | ErrorKind::Instantiation(InstantiationError::FailedToInstantiateMemory(_))) => Refusal::Memory,
             _ => Refusal::Trap,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Пределы модуля ужимаются до общих констант: меньшее заявленное — своё, большее и нулевое — общее.
+    #[test]
+    fn declared_limits_are_clamped_to_the_host() {
+        let own = Limits { input: 1, memory: 2, fuel: 3, output: 4 };
+        assert_eq!(own.clamped(), own, "меньше общего — своё");
+        let over = Limits { input: MAX_INPUT * 2, memory: MAX_MEMORY * 2, fuel: FUEL * 2, output: MAX_OUTPUT * 2 };
+        assert_eq!(over.clamped(), Limits::default(), "больше общего — общий");
+        assert_eq!(Limits { input: 0, memory: 0, fuel: 0, output: 0 }.clamped(), Limits::default(), "нулевое — общее");
+        assert_eq!(Limits::default().clamped(), Limits::default());
+    }
+
+    /// Модуль из разделов `(номер, тело)`.
+    fn module_of(sections: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut m = b"\0asm\x01\0\0\0".to_vec();
+        for (id, body) in sections {
+            m.push(*id);
+            m.push(body.len() as u8);
+            m.extend_from_slice(body);
+        }
+        m
+    }
+
+    /// Импорт функции `env.f` (номер типа 0): количество, два имени, вид, индекс.
+    const IMPORT_FUNC: &[u8] = &[1, 3, b'e', b'n', b'v', 1, b'f', 0, 0];
+    /// Импорт памяти `env.mem` с максимальной страницей: количество, два имени, вид, флаг, минимум, максимум.
+    const IMPORT_MEMORY: &[u8] = &[1, 3, b'e', b'n', b'v', 3, b'm', b'e', b'm', 2, 1, 1, 2];
+
+    /// Раздел Import разобран без интерпретатора: импорты видны, пустой раздел и не разобранный — нет.
+    #[test]
+    fn imports_are_seen_without_an_interpreter() {
+        assert!(has_imports(&module_of(&[(2, IMPORT_FUNC)])));
+        assert!(has_imports(&module_of(&[(2, IMPORT_MEMORY)])));
+        assert!(has_imports(&module_of(&[(2, IMPORT_FUNC), (3, &[0])])), "и после других разделов");
+        assert!(!has_imports(&module_of(&[(2, &[0])])), "ни одного импорта");
+        assert!(!has_imports(&module_of(&[(3, &[0])])), "без раздела Import");
+        assert!(!has_imports(&module_of(&[(2, &[1, 3])])), "импорт обрезан");
+        assert!(!has_imports(&module_of(&[(2, &[0x80])])), "длина не кончается");
+        assert!(!has_imports(&module_of(&[(2, &[1, 3, b'e', b'n', b'v', 1, b'f', 9, 0])])), "чужой вид импорта");
+        assert!(!has_imports(b"not wasm"));
+        assert!(!has_imports(b"\0asm\x02\0\0\0"), "чужая версия");
     }
 }

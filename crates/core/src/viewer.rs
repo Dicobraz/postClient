@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 
 use postman_worker::Client;
-use postman_worker::wasm::{Refusal, ViewerOutput};
+use postman_worker::wasm::{Limits, Refusal, ViewerOutput};
 
 /// Итог просмотра `key`: ответ модуля (проверен хостом), отказ хоста или `Err` — хост не ответил.
 pub struct Viewed {
@@ -18,6 +18,7 @@ struct Job {
     key: String,
     module: Arc<Vec<u8>>,
     input: Arc<Vec<u8>>,
+    limits: Limits,
 }
 
 pub struct Viewer {
@@ -37,7 +38,7 @@ impl Viewer {
         let started = std::thread::Builder::new().name("viewer".into()).spawn(move || {
             let mut client = Client::viewer(exe);
             while let Ok(job) = jobs.recv() {
-                let result = client.view_module(&job.module, &job.input);
+                let result = client.view_module(&job.module, &job.input, job.limits);
                 if let Err(e) = &result {
                     tracing::error!("viewer: viewer host failed: {e}");
                 }
@@ -54,9 +55,10 @@ impl Viewer {
         Self { tx, rx }
     }
 
-    /// Показать `input` модулем `module`; ответ — в [`Viewer::rx`] с тем же `key`.
-    pub fn view(&self, key: String, module: Arc<Vec<u8>>, input: Arc<Vec<u8>>) {
-        let _ = self.tx.send(Job { key, module, input });
+    /// Показать `input` модулем `module` с заявленными пределами `limits` (описание модуля; хост ужмёт их до
+    /// общих); ответ — в [`Viewer::rx`] с тем же `key`.
+    pub fn view(&self, key: String, module: Arc<Vec<u8>>, input: Arc<Vec<u8>>, limits: Limits) {
+        let _ = self.tx.send(Job { key, module, input, limits });
     }
 }
 
@@ -65,12 +67,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use super::Limits;
+
     /// Нет `postman-viewer` — ошибка в ответе, без падения; следующий запрос — снова попытка запуска.
     #[test]
     fn missing_host_is_an_error() {
         let v = super::Viewer::with_exe("no-such-postman-viewer".into(), || {});
         for key in ["a", "b"] {
-            v.view(key.into(), Arc::new(b"\0asm".to_vec()), Arc::new(Vec::new()));
+            v.view(key.into(), Arc::new(b"\0asm".to_vec()), Arc::new(Vec::new()), Limits::default());
             let got = v.rx.recv_timeout(Duration::from_secs(10)).unwrap();
             assert_eq!(got.key, key);
             assert!(got.result.is_err());

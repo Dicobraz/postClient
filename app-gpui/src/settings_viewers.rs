@@ -5,8 +5,9 @@
 //! показывает хост `postman-viewer` в песочнице (процесс — по первому просмотру); ответ — разделами, как документ.
 //!
 //! Раздел настроек: встроенные форматы справкой, модули — по одному в строке (имя и версия, «сторонний» или «от
-//! администратора», форматы и папка, выключатель), «Открыть папку модулей». Модули без описания или с импортами в
-//! реестр не попадают (журнал).
+//! администратора», форматы и папка, выключатель), «Открыть папку модулей». Модуль, который не загружается
+//! (импорты — доступ к системе, плохой файл, пределы сверх общих, плохое описание), — строкой «Не загружается: …»
+//! без выключателя; подробности — в журнале.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -16,7 +17,7 @@ use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::Metric;
 use postman_core::attach::{self, Viewer};
-use postman_core::viewers::{ModuleId, Registry};
+use postman_core::viewers::{ModuleId, Reason, Registry};
 use postman_worker::Client;
 use postman_worker::wasm::ViewerOutput;
 
@@ -119,16 +120,18 @@ impl ReadingPane {
         let Some(r) = &self.reading else { return };
         let Some(p) = &r.preview else { return };
         let (Viewer::Module { id }, Some(data)) = (p.viewer, p.data.clone()) else { return };
-        let Some((wasm, name, version, third)) =
-            with(|s| s.registry.get(id).map(|m| (m.wasm.clone(), m.description.name.clone(), m.description.version.clone(), m.third_party)))
-        else {
+        let Some((wasm, limits, name, version, third)) = with(|s| {
+            s.registry
+                .get(id)
+                .map(|m| (m.wasm.clone(), m.description.limits, m.description.name.clone(), m.description.version.clone(), m.third_party))
+        }) else {
             return;
         };
         let (letter, blob) = (r.row.id.clone(), p.row.blob_id.clone());
         let task = cx.background_spawn(async move {
             let mut host = HOST.lock().unwrap_or_else(PoisonError::into_inner);
             let client = host.get_or_insert_with(|| Client::viewer(Client::default_viewer_exe()));
-            client.view_module(&wasm, &data)
+            client.view_module(&wasm, &data, limits.into())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -199,9 +202,10 @@ impl SettingsView {
                 .child(div().w(px(140.)).flex_none().text_color(l.text2()).child(tr!(*key)))
                 .child(div().flex_1().min_w_0().child(formats))
         }));
-        let (modules, off) = with(|s| (s.registry.modules().map(|(_, m)| m.clone()).collect::<Vec<_>>(), s.off.clone()));
+        let (modules, broken, off) =
+            with(|s| (s.registry.modules().map(|(_, m)| m.clone()).collect::<Vec<_>>(), s.registry.broken().to_vec(), s.off.clone()));
         let dirs = postman_core::viewers::dirs();
-        let list = if modules.is_empty() {
+        let list = if modules.is_empty() && broken.is_empty() {
             div().py_3().text_color(l.text2()).child(tr!("settings-viewers-none")).into_any_element()
         } else {
             div()
@@ -252,6 +256,51 @@ impl SettingsView {
                             cx.notify();
                         })))
                 }))
+                .children(broken.into_iter().map(|b| {
+                    let title = match &b.description {
+                        Some(d) => format!("{} · {}", d.name, d.version),
+                        None => b.id.clone(),
+                    };
+                    let mark = if b.third_party { tr!("settings-viewers-third") } else { tr!("settings-viewers-admin") };
+                    let reason = match b.reason {
+                        Reason::Imports => tr!("settings-viewers-broken-imports"),
+                        Reason::Wasm => tr!("settings-viewers-broken-wasm"),
+                        Reason::Limits => tr!("settings-viewers-broken-limits"),
+                        Reason::Description => tr!("settings-viewers-broken-desc"),
+                    };
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(l.border())
+                        .child(crate::chrome::icon(PUZZLE, 16.).text_color(l.text2()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(title)
+                                        .child(div().px(px(6.)).rounded(px(4.)).bg(l.fill()).text_size(px(11.)).text_color(l.text2()).child(mark)),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(l.px(Metric::TypeCaption))
+                                        .text_color(l.text2())
+                                        .child(tr!("settings-viewers-broken", reason = reason)),
+                                ),
+                        )
+                    // Выключателя нет: модуль не загружается, включать нечего.
+                }))
                 .into_any_element()
         };
         let folder = crate::buttons::button("settings-viewers-open", tr!("settings-viewers-open"), false, l).on_click(cx.listener(|_, _, _, cx| {
@@ -296,6 +345,8 @@ pub(crate) mod scenes {
         Scene::new("settings-viewers", settings, settings_ready),
         // Книга FB2 модулем: подпись «Просмотр: модуль «FB2» 1.0 (сторонний) · в песочнице».
         Scene::new("preview-module", module, module_ready).wait(module_wait),
+        // «Не загружается»: модуль с импортами (доступ к системе) и без файла модуля.
+        Scene::new("settings-viewers-broken", broken, settings_ready),
     ];
 
     /// Реестр снимков: FB2 (сторонний) и DjVu (от администратора) — описания и заголовок WASM.
@@ -315,6 +366,31 @@ pub(crate) mod scenes {
 
     fn settings(_: &Scene, m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) -> Result<(), String> {
         super::set_registry(registry()?);
+        m.open_settings(Some(S::Viewers), window, cx);
+        Ok(())
+    }
+
+    /// Реестр снимка «Не загружается»: DjVu с импортом функции (доступ к системе) и описание без файла модуля —
+    /// в своей папке, без следов в других снимках.
+    fn broken_registry() -> Result<postman_core::viewers::Registry, String> {
+        let user = postman_demo::testdata_dir().join("screens-viewers").join("broken");
+        let locked = r#"{"name": "DjVu", "version": "0.3", "abi": 1, "extensions": ["djvu"], "mime": ["image/vnd.djvu"]}"#;
+        std::fs::create_dir_all(&user).map_err(|e| e.to_string())?;
+        std::fs::write(user.join("locked.json"), locked).map_err(|e| e.to_string())?;
+        // Раздел Import: один импорт функции `env.f` (номер типа 0).
+        let body = [[1u8].as_slice(), [3].as_slice(), b"env", [1].as_slice(), b"f", &[0, 0]].concat();
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        wasm.push(2);
+        wasm.push(body.len() as u8);
+        wasm.extend(body);
+        std::fs::write(user.join("locked.wasm"), wasm).map_err(|e| e.to_string())?;
+        // Описание есть, файла модуля нет.
+        std::fs::write(user.join("empty.json"), locked).map_err(|e| e.to_string())?;
+        Ok(postman_core::viewers::Registry::load(&[postman_core::viewers::Dir { path: user, third_party: true }]))
+    }
+
+    fn broken(_: &Scene, m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) -> Result<(), String> {
+        super::set_registry(broken_registry()?);
         m.open_settings(Some(S::Viewers), window, cx);
         Ok(())
     }

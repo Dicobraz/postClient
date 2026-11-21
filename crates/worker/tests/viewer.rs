@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use postman_ir::{Block, Inline, Marks};
-use postman_worker::wasm::{self, Refusal, ViewerOutput};
+use postman_worker::wasm::{self, Limits, Refusal, ViewerOutput};
 use postman_worker::{Client, Level, Section, SectionTitle};
 
 fn leb(mut n: u64, out: &mut Vec<u8>) {
@@ -133,7 +133,7 @@ fn sections(blocks: Vec<Block>) -> ViewerOutput {
 }
 
 fn view(module: &[u8]) -> Result<ViewerOutput, Refusal> {
-    wasm::run(module, "вход".as_bytes(), wasm::FUEL)
+    wasm::run(module, "вход".as_bytes(), Limits::default())
 }
 
 #[test]
@@ -145,11 +145,50 @@ fn module_with_an_import_is_refused_before_start() {
     assert_eq!(view(b"not wasm"), Err(Refusal::Invalid));
 }
 
+/// Заявленные пределы модуля хост применяет: топливо, вход, ответ и память — свои, а не только общие; сверх
+/// общих констант (и нулевые) хост заявленное не поднимает.
+#[test]
+fn declared_limits_are_applied_by_the_host() {
+    let answer = postcard::to_allocvec(&sections(vec![Block::Rule])).unwrap();
+    let view = |module: &[u8], limits: Limits| wasm::run(module, "вход".as_bytes(), limits);
+    // Топливо — заявленное меньше общего: вечный цикл не делает и тысячи шагов.
+    let endless = module(&[0x03, 0x40, 0x0C, 0, 0x0B, 0x00], 1, &[], false);
+    assert_eq!(view(&endless, Limits { fuel: 1_000_000, ..Limits::default() }), Err(Refusal::Fuel));
+    // Ответ — заявленный предел меньше общего: короткий ответ проходит, длиннее заявленного — отказ, хоть
+    // общий и позволяет.
+    assert!(view(&answering(&answer), Limits { output: 1000, ..Limits::default() }).is_ok());
+    assert_eq!(view(&answering(&answer), Limits { output: answer.len() - 1, ..Limits::default() }), Err(Refusal::Output));
+    // Вход — заявленный меньше общего: короткий вход проходит, длиннее заявленного — отказ.
+    assert!(view(&answering(&answer), Limits { input: 1000, ..Limits::default() }).is_ok());
+    assert_eq!(view(&answering(&answer), Limits { input: 2, ..Limits::default() }), Err(Refusal::TooLarge));
+    // Память — заявленная меньше общего: рост в пределах общего, но за заявленным — отказ. Ответ — годный,
+    // чтобы отказ был именно по памяти.
+    let grow = |pages: i64| {
+        let mut v = vec![0x41];
+        sleb(pages, &mut v);
+        v.extend([0x40, 0, 0x1A]);
+        v.extend(packed(DATA, answer.len() as u32));
+        module(&v, 1, &answer, false)
+    };
+    let little = Limits { memory: 1 << 20, ..Limits::default() }; // 1 МиБ — 16 страниц по 64 КиБ
+    assert_eq!(view(&grow(32), little), Err(Refusal::Memory), "32 страницы — за заявленной");
+    assert!(view(&grow(2), little).is_ok(), "2 страницы — в заявленной");
+    // Сверх общих констант заявленное не поднимает: рост за 256 МиБ — отказ и с большим заявленным.
+    assert_eq!(view(&grow(5000), Limits { memory: wasm::MAX_MEMORY * 2, ..Limits::default() }), Err(Refusal::Memory));
+    assert_eq!(
+        view(&answering(&answer), Limits { output: wasm::MAX_OUTPUT * 2, ..Limits::default() }),
+        view(&answering(&answer), Limits::default()),
+        "потолок — общий"
+    );
+    // Нулевые пределы — как общие, не как «ни одного байта».
+    assert!(view(&answering(&answer), Limits { input: 0, memory: 0, fuel: 0, output: 0 }).is_ok());
+}
+
 #[test]
 fn endless_loop_runs_out_of_fuel() {
     // loop { br 0 } unreachable
     let endless = module(&[0x03, 0x40, 0x0C, 0, 0x0B, 0x00], 1, &[], false);
-    assert_eq!(wasm::run(&endless, b"", 1_000_000), Err(Refusal::Fuel));
+    assert_eq!(wasm::run(&endless, b"", Limits { fuel: 1_000_000, ..Limits::default() }), Err(Refusal::Fuel));
 }
 
 #[test]
@@ -218,7 +257,7 @@ fn viewer_runs_in_the_sandbox() {
     let mut c = Client::viewer(PathBuf::from(env!("CARGO_BIN_EXE_postman-viewer")));
     let out =
         sections(vec![Block::Paragraph { align: Default::default(), content: vec![text("Глава 1"), link("javascript:x", " — далее")] }]);
-    let got = c.view_module(&answering(&postcard::to_allocvec(&out).unwrap()), b"FB2").unwrap().unwrap();
+    let got = c.view_module(&answering(&postcard::to_allocvec(&out).unwrap()), b"FB2", Limits::default()).unwrap().unwrap();
     assert_eq!(got, sections(vec![Block::Paragraph { align: Default::default(), content: vec![text("Глава 1"), text(" — далее")] }]));
     if cfg!(windows) && std::env::var_os("POSTMAN_REQUIRE_FULL_SANDBOX").is_none() {
         assert!(matches!(c.level(), Level::Full | Level::Partial));
@@ -226,12 +265,14 @@ fn viewer_runs_in_the_sandbox() {
         assert_eq!(c.level(), Level::Full, "{:?}", c.fallback());
     }
     let image = ViewerOutput::Image { width: 2, height: 1, rgba: vec![1, 2, 3, 4, 5, 6, 7, 8] };
-    assert_eq!(c.view_module(&answering(&postcard::to_allocvec(&image).unwrap()), b"").unwrap(), Ok(image));
+    assert_eq!(c.view_module(&answering(&postcard::to_allocvec(&image).unwrap()), b"", Limits::default()).unwrap(), Ok(image));
     let answer = postcard::to_allocvec(&out).unwrap();
-    assert_eq!(c.view_module(&module(&packed(DATA, answer.len() as u32), 1, &answer, true), b""), Ok(Err(Refusal::Imports)));
-    assert!(c.view_module(&answering(&answer), b"").unwrap().is_ok(), "после отказа хост жив");
+    assert_eq!(c.view_module(&module(&packed(DATA, answer.len() as u32), 1, &answer, true), b"", Limits::default()), Ok(Err(Refusal::Imports)));
+    // Заявленный предел ответа действует и в песочнице: клиент передаёт его в запросе.
+    assert_eq!(c.view_module(&answering(&answer), b"", Limits { output: 8, ..Limits::default() }), Ok(Err(Refusal::Output)));
+    assert!(c.view_module(&answering(&answer), b"", Limits::default()).unwrap().is_ok(), "после отказа хост жив");
 
     let mut worker = Client::new(PathBuf::from(env!("CARGO_BIN_EXE_postman-worker")), wasm::VIEW_TIMEOUT);
-    let e = worker.view_module(&answering(&[]), b"").unwrap_err();
+    let e = worker.view_module(&answering(&[]), b"", Limits::default()).unwrap_err();
     assert!(e.contains("postman-viewer"), "{e}");
 }
