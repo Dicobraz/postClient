@@ -214,12 +214,29 @@ pub fn insecure_tls() -> bool {
     std::env::var("POSTMAN_INSECURE_TLS").is_ok_and(|v| v == "1")
 }
 
+/// Только TLS 1.3 («Настройки → Безопасность», S5-30; как `postman_jmap::set_tls13_only` и
+/// `postman_ews::set_tls13_only`); иначе — 1.2 и выше.
+static TLS13_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Версии TLS при политике «только 1.3» — одна 1.3.
+static ONLY_TLS13: &[&tokio_rustls::rustls::SupportedProtocolVersion] = &[&tokio_rustls::rustls::version::TLS13];
+
+/// Минимальная версия TLS для новых соединений IMAP и SMTP: `true` — только 1.3.
+pub fn set_tls13_only(on: bool) {
+    TLS13_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Версии TLS для новых соединений: по политике — одна 1.3, иначе — 1.2 и 1.3 (безопасные по умолчанию).
+fn tls_versions() -> &'static [&'static tokio_rustls::rustls::SupportedProtocolVersion] {
+    if TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed) { ONLY_TLS13 } else { tokio_rustls::rustls::ALL_VERSIONS }
+}
+
 /// TLS с проверкой сертификата Windows (как у JMAP); провайдер — aws-lc-rs, как у reqwest.
 pub(crate) fn tls_connector() -> Result<TlsConnector> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
     let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
     let builder = tokio_rustls::rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(tls_versions())
         .map_err(|e| Error::Tls(e.to_string()))?;
     let config = if insecure_tls() {
         builder.dangerous().with_custom_certificate_verifier(Arc::new(stand::AnyCert(provider))).with_no_client_auth()
@@ -1019,5 +1036,22 @@ mod tests {
         assert_eq!(drain(ok).await.unwrap(), [1, 2, 3]);
         let cut = futures::stream::iter([Ok(1), Err(async_imap::error::Error::Io(std::io::Error::from_raw_os_error(10053)))]);
         assert!(drain(cut).await.is_err_and(|e| e.lost()));
+    }
+
+    /// Политика «только TLS 1.3» доходит до конфигурации соединения (S5-30, AUD-08): по ней — одна 1.3, без неё —
+    /// 1.2 и 1.3; коннектор собирается в обоих случаях (рукопожатие в юнит-тесте не гоняется).
+    #[test]
+    fn tls13_policy_picks_connector_versions() {
+        use tokio_rustls::rustls::ProtocolVersion::{TLSv1_2, TLSv1_3};
+        super::set_tls13_only(true);
+        let versions = super::tls_versions();
+        assert_eq!(versions.len(), 1, "по политике — только 1.3");
+        assert_eq!(versions[0].version, TLSv1_3);
+        assert!(super::tls_connector().is_ok(), "коннектор только с 1.3 собирается");
+        super::set_tls13_only(false);
+        let versions = super::tls_versions();
+        assert_eq!(versions.len(), 2, "без политики — 1.2 и 1.3");
+        assert!(versions.iter().any(|v| v.version == TLSv1_3) && versions.iter().any(|v| v.version == TLSv1_2));
+        assert!(super::tls_connector().is_ok(), "коннектор по умолчанию собирается");
     }
 }

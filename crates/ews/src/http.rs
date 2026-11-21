@@ -67,15 +67,24 @@ fn insecure_tls() -> bool {
 /// AES-CBC (`ECDHE-RSA-AES256-SHA384`), а GCM — только без ECDHE; rustls не умеет ни того ни другого, и SChannel
 /// сервера рвёт соединение на ClientHello (TCP RST) — так на боевом Exchange (S7-06б, `docs/EXCHANGE.md`).
 fn tls_connector() -> Result<tokio_native_tls::TlsConnector> {
+    Ok(tokio_native_tls::TlsConnector::from(tls_builder()?))
+}
+
+/// Настройки конструктора соединения: минимальная версия — по политике «только TLS 1.3», сертификат — хранилище
+/// Windows (стенд — без проверки).
+fn tls_builder() -> Result<native_tls::TlsConnector> {
     let mut b = native_tls::TlsConnector::builder();
-    let tls13 = TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed);
-    b.min_protocol_version(Some(if tls13 { native_tls::Protocol::Tlsv13 } else { native_tls::Protocol::Tlsv12 }));
+    b.min_protocol_version(Some(min_protocol()));
     if insecure_tls() {
         tracing::warn!("POSTMAN_INSECURE_TLS: server certificate is NOT verified (test stand only)");
         b.danger_accept_invalid_certs(true);
     }
-    let c = b.build().map_err(|e| Error::Tls(e.to_string()))?;
-    Ok(tokio_native_tls::TlsConnector::from(c))
+    b.build().map_err(|e| Error::Tls(e.to_string()))
+}
+
+/// Минимальная версия TLS новых соединений: политика «только 1.3» — 1.3, иначе — 1.2 (выше поднимает сервер).
+fn min_protocol() -> native_tls::Protocol {
+    if TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed) { native_tls::Protocol::Tlsv13 } else { native_tls::Protocol::Tlsv12 }
 }
 
 fn hyper_err(e: hyper::Error) -> Error {
@@ -456,5 +465,18 @@ mod tests {
         let same = Auth::password("vera@corp.example", "pw");
         remember(&same, &same, true);
         assert!(ACCEPTED.lock().unwrap().iter().all(|(f, ..)| f != "vera@corp.example"));
+    }
+
+    /// Политика «только TLS 1.3» доходит до конструктора соединения (S5-30, AUD-08): минимум — 1.3, без неё — 1.2.
+    /// Рукопожатие в юнит-тесте не гоняется: проверяется выбор версии.
+    #[test]
+    fn tls13_only_policy_sets_the_minimum_version() {
+        let minimum = |on: bool| {
+            TLS13_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
+            min_protocol()
+        };
+        assert!(matches!(minimum(true), native_tls::Protocol::Tlsv13));
+        assert!(matches!(minimum(false), native_tls::Protocol::Tlsv12));
+        assert!(tls_builder().is_ok(), "конструктор по политике собирается");
     }
 }

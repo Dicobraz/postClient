@@ -14,12 +14,13 @@ pub async fn submit(cfg: &Config, from: &str, to: &[String], raw: &[u8]) -> Resu
     }
     // Провайдер криптографии процесса — тот же, что у reqwest и IMAP (aws-lc-rs); второй вызов ничего не меняет.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let builder = SmtpClientBuilder::new(cfg.host.as_str(), cfg.port)
-        .map_err(Error::Smtp)?
+    // Коннектор IMAP (`crate::tls_connector`): политика «только TLS 1.3» и проверка сертификата Windows — те же,
+    // для стенда (`POSTMAN_INSECURE_TLS`) — тоже (`allow_invalid_certs` подменил бы коннектор).
+    let connector = crate::tls_connector()?;
+    let builder = SmtpClientBuilder::new_with_tls_connector(cfg.host.as_str(), cfg.port, connector)
         .implicit_tls(cfg.security == Security::Tls)
         .credentials((cfg.user.as_str(), cfg.password.as_str()))
         .timeout(crate::TIMEOUT);
-    let builder = if crate::insecure_tls() { builder.allow_invalid_certs() } else { builder };
     let message = Message::new(from, to.iter().map(String::as_str).collect::<Vec<_>>(), raw);
     let mut client = builder.connect().await.map_err(smtp_error)?;
     client.send(message).await.map_err(smtp_error)?;
