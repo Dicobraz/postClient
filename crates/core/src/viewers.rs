@@ -313,20 +313,20 @@ impl Registry {
                     continue;
                 }
                 match load_module(&path) {
-                    Ok((description, wasm)) => {
+                    Ok(Loaded { description, wasm }) => {
                         tracing::info!("viewer: module {id}: {} {}", description.name, description.version);
                         modules.push(Module { id, description, third_party: dir.third_party, wasm: Arc::new(wasm) });
                     }
-                    Err((description, e)) => {
+                    Err(NotLoaded(description, e)) => {
                         tracing::error!(path = %path.display(), "viewer: module not loaded: {e}");
-                        let reason = match (description.as_ref(), &e) {
+                        let reason = match (description.as_deref(), &e) {
                             (_, Error::Imports) => Reason::Imports,
                             (_, Error::Limit(_)) => Reason::Limits,
                             // Разобралось — не годится сам файл модуля; иначе — описание.
                             (Some(_), Error::Wasm | Error::Io(_)) => Reason::Wasm,
                             _ => Reason::Description,
                         };
-                        broken.push(Broken { id, description, third_party: dir.third_party, reason });
+                        broken.push(Broken { id, description: description.map(|b| *b), third_party: dir.third_party, reason });
                     }
                 }
             }
@@ -364,16 +364,25 @@ impl Registry {
     }
 }
 
-/// Описание `path` и модуль рядом (`<имя>.wasm`); при отказе — и разобранное описание, если успело (имя и версия
-/// для строки настроек).
-fn load_module(path: &Path) -> Result<(Description, Vec<u8>), (Option<Description>, Error)> {
+/// Итог чтения модуля: проверенное описание и сам файл.
+struct Loaded {
+    description: Description,
+    wasm: Vec<u8>,
+}
+
+/// Отказ чтения модуля: причина и разобранное описание, если успело (имя и версия для строки настроек).
+struct NotLoaded(Option<Box<Description>>, Error);
+
+/// Описание `path` и модуль рядом (`<имя>.wasm`).
+fn load_module(path: &Path) -> Result<Loaded, NotLoaded> {
     let io = |e: std::io::Error| Error::Io(e.to_string());
-    if std::fs::metadata(path).map_err(io).map_err(|e| (None, e))?.len() > MAX_MANIFEST {
-        return Err((None, Error::TooLarge));
+    let refused = |e: Error| NotLoaded(None, e);
+    if std::fs::metadata(path).map_err(io).map_err(refused)?.len() > MAX_MANIFEST {
+        return Err(NotLoaded(None, Error::TooLarge));
     }
-    let description = Description::parse(&std::fs::read_to_string(path).map_err(io).map_err(|e| (None, e))?).map_err(|e| (None, e))?;
-    let wasm = wasm_of(path).map_err(|e| (Some(description.clone()), e))?;
-    Ok((description, wasm))
+    let description = Description::parse(&std::fs::read_to_string(path).map_err(io).map_err(refused)?).map_err(refused)?;
+    let wasm = wasm_of(path).map_err(|e| NotLoaded(Some(Box::new(description.clone())), e))?;
+    Ok(Loaded { description, wasm })
 }
 
 /// Файл модуля рядом с описанием: двоичный WASM версии 1 без импортов (доступа к системе у него нет; полную
