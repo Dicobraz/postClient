@@ -38,6 +38,12 @@ impl Channels {
         self.lines.iter().any(|(a, tx)| a == account && !tx.is_closed())
     }
 
+    /// «Повторить» у проблемы канала (AUD-06): потоку учётки — [`Request::Reconnect`]; в «проблеме» процесс плагина
+    /// сам не повторяется, поток ждёт этот запрос (`channel::run`). `false` — потока нет.
+    fn retry(&self, account: &ChanAccount) -> bool {
+        self.send(account, Request::Reconnect)
+    }
+
     fn set_name(&mut self, account: &ChanAccount, name: String) {
         self.names.retain(|(a, _)| a != account);
         self.names.push((account.clone(), name));
@@ -312,6 +318,11 @@ impl Mailer {
                     tracing::warn!(channel = %account.channel, "channel: sign-out, account not running");
                 }
             }
+            PanelEvent::Reconnect(account) => {
+                if !self.channels.retry(&account) {
+                    tracing::warn!(channel = %account.channel, "channel: reconnect, account not running");
+                }
+            }
             PanelEvent::Signed { account, name, secret } => self.add_account(TELEGRAM, account, name, secret, cx),
         }
     }
@@ -367,6 +378,11 @@ impl Mailer {
                     tracing::warn!(channel = %account.channel, "channel: sign-out, account not running");
                 }
             }
+            PanelEvent::Reconnect(account) => {
+                if !self.channels.retry(&account) {
+                    tracing::warn!(channel = %account.channel, "channel: reconnect, account not running");
+                }
+            }
             PanelEvent::Signed { account, name, secret } => self.add_account(MATRIX, account, name, secret, cx),
             PanelEvent::Flow { account, kind } => {
                 if !self.channels.send(&account, Request::Flow { kind }) {
@@ -407,5 +423,18 @@ mod tests {
         assert_eq!(super::unhex(&super::hex(&b)), Some(b));
         assert_eq!(super::unhex("abc"), None);
         assert_eq!(super::unhex("zz"), None);
+    }
+
+    /// «Повторить» у проблемы канала (AUD-06): запрос потоку учётки — `Request::Reconnect`;
+    /// у учётки без потока (канал выключен) запрос не уходит.
+    #[test]
+    fn retry_sends_reconnect() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut channels = super::Channels::default();
+        let account = postman_core::channel::ChanAccount::new(crate::account_telegram::TELEGRAM, "+79000000000");
+        assert!(!channels.retry(&account), "потока нет — запрос не уходит");
+        channels.lines.push((account.clone(), tx));
+        assert!(channels.retry(&account));
+        assert_eq!(rx.try_recv().ok(), Some(postman_core::channel::Request::Reconnect));
     }
 }

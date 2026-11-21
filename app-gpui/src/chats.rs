@@ -413,7 +413,9 @@ pub(crate) fn error_text(e: &ChannelError) -> String {
         ChannelError::NotFound => tr!("chats-err-not-found"),
         ChannelError::TooLarge { .. } => tr!("chats-err-too-large"),
         ChannelError::Unsupported => tr!("chats-err-unsupported"),
-        ChannelError::Protocol(_) | ChannelError::Storage(_) | ChannelError::Plugin(_) => tr!("chats-err-other"),
+        ChannelError::Protocol(_) | ChannelError::Storage(_) => tr!("chats-err-other"),
+        // Процесс плагина не работает (ADR 0013): автоповторов нет — канал ждёт «Повторить» (AUD-06).
+        ChannelError::Plugin(_) => tr!("chats-err-plugin"),
         // Файла набора нет (PLG-14): канал не установлен.
         ChannelError::Missing(_) => tr!("comp-missing"),
     }
@@ -1160,11 +1162,11 @@ pub(crate) mod scenes {
 mod tests {
     use postman_cache::Cache;
     use postman_core::channel::{
-        AccountId, Body, ChannelEvent, ChannelFeatures, ChannelFolder, ChannelId, ChannelStore, Conversation, ConversationId, ConversationKind,
-        FolderRef, Limit, Message, MessageId, Participant, ParticipantId, Reactions, Role, outbox,
+        AccountId, Body, ChannelError, ChannelEvent, ChannelFeatures, ChannelFolder, ChannelId, ChannelStore, Conversation, ConversationId,
+        ConversationKind, FolderRef, Limit, Message, MessageId, Participant, ParticipantId, Reactions, Role, outbox,
     };
 
-    use super::{Scope, pending_client, shown, snapshot};
+    use super::{Scope, error_text, pending_client, shown, snapshot};
 
     fn message(id: &str, author: &str, sent: i64, text: &str) -> Message {
         Message { id: MessageId::new(id), author: ParticipantId::new(author), sent, body: Body::Plain(text.into()), ..Message::default() }
@@ -1301,5 +1303,19 @@ mod tests {
         assert!(!s.reply && !s.edit && !s.react && !s.delete_for_all, "ещё не отправлено");
         assert_eq!(pending_client(&pending.id), Some(7));
         assert_eq!(pending_client(&MessageId::new("12")), None);
+    }
+
+    /// Ошибки каналов словами; неработающий процесс плагина — своя строка, не общий отказ (AUD-06).
+    #[test]
+    fn plugin_error_has_its_own_text() {
+        for e in [
+            ChannelError::Plugin("crashed".into()),
+            ChannelError::Network("offline".into()),
+            ChannelError::SignedOut("expired".into()),
+            ChannelError::Missing("set".into()),
+        ] {
+            assert!(!error_text(&e).is_empty());
+        }
+        assert_ne!(error_text(&ChannelError::Plugin("crashed".into())), error_text(&ChannelError::Protocol("x".into())));
     }
 }

@@ -7,6 +7,7 @@ tg-add = Add Telegram account
 tg-no-key = This build has no Telegram application key: sign-in is unavailable.
 comp-missing = The channel component is not installed.
 comp-download = Download
+comp-retry = Retry
 comp-from-file = Install from file…
 comp-stale = The channel component changed with the update: download it again.
 comp-busy = Downloading the component…
@@ -46,6 +47,7 @@ tg-err-denied = Telegram refused the sign-in.
 tg-err-wait = Telegram asks to wait { $secs } s.
 tg-err-network = No connection to Telegram: check the network and try again.
 tg-err-signed-out = The sign-in has expired: sign in again.
+tg-err-plugin = The Telegram component is not working: choose Retry to connect again.
 tg-err-other = Could not sign in to Telegram.
 
 # Matrix (CH-05): sign-in, device verification, key backup, encrypted conversations.
@@ -94,6 +96,7 @@ mx-err-recovery = The key or passphrase did not fit.
 mx-err-denied = The Matrix server refused.
 mx-err-wait = The server asks to wait { $secs } s.
 mx-err-network = No connection to the Matrix server: check the network and try again.
+mx-err-plugin = The Matrix component is not working: choose Retry to connect again.
 mx-err-other = The Matrix action failed.
 tg-step-phone = Phone
 tg-step-code = Code

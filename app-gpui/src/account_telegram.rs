@@ -81,6 +81,8 @@ pub(crate) enum PanelEvent {
     Signed { account: AccountId, name: String, secret: Secret },
     /// «Выйти» из учётки канала.
     SignOut(ChanAccount),
+    /// «Повторить» у проблемы канала: подключиться сейчас (`Request::Reconnect`, AUD-06).
+    Reconnect(ChanAccount),
     /// Включатель канала.
     Toggled(bool),
 }
@@ -366,15 +368,23 @@ impl Render for Panel {
                 Some(ChannelState::Problem(e)) => error_text(e),
             };
             let name = if line.name.is_empty() { line.account.account.0.clone() } else { line.name.clone() };
-            let account = line.account.clone();
-            out = out.child(account_row(
-                line.state.as_ref(),
-                name,
-                state,
-                link(("tg-sign-out", n), tr!("tg-sign-out"), &l)
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(PanelEvent::SignOut(account.clone())))),
-                &l,
-            ));
+            let (account, retry) = (line.account.clone(), line.account.clone());
+            // У проблемы — «Повторить» (AUD-06): у процесса плагина автоповторов нет, поток ждёт запрос.
+            let actions = div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .when(matches!(line.state, Some(ChannelState::Problem(_))), |d| {
+                    d.child(
+                        link(("tg-retry", n), tr!("comp-retry"), &l)
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PanelEvent::Reconnect(retry.clone())))),
+                    )
+                })
+                .child(
+                    link(("tg-sign-out", n), tr!("tg-sign-out"), &l)
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(PanelEvent::SignOut(account.clone())))),
+                );
+            out = out.child(account_row(line.state.as_ref(), name, state, actions, &l));
         }
         // Компонент канала (PLG-15): файла набора нет или он после обновления — скачать из выпуска.
         let component = crate::components::state(crate::plugins::TELEGRAM_SET, cx);
@@ -432,6 +442,8 @@ pub(crate) fn error_text(e: &ChannelError) -> String {
         ChannelError::Wait { secs } => tr!("tg-err-wait", secs = secs.to_string()),
         ChannelError::Network(_) => tr!("tg-err-network"),
         ChannelError::SignedOut(_) => tr!("tg-err-signed-out"),
+        // Процесс плагина не работает (ADR 0013): автоповторов нет — поток ждёт «Повторить» (AUD-06).
+        ChannelError::Plugin(_) => tr!("tg-err-plugin"),
         // Файла набора нет (PLG-14): канал не установлен; установка компонента приходит с докачкой (PLG-15).
         ChannelError::Missing(_) => tr!("comp-missing"),
         _ => tr!("tg-err-other"),
@@ -558,6 +570,8 @@ mod tests {
     fn errors_are_words() {
         assert_eq!(error_code(&ChannelError::Network("+99912345678".into())), "network");
         assert!(!error_text(&ChannelError::Denied("code-invalid".into())).is_empty());
+        // Неработающий процесс плагина — своя строка, не общий отказ (AUD-06).
+        assert_ne!(error_text(&ChannelError::Plugin("crashed".into())), error_text(&ChannelError::Protocol("x".into())));
     }
 
     #[test]

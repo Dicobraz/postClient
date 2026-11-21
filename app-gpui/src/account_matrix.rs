@@ -62,6 +62,8 @@ pub(crate) enum PanelEvent {
         secret: Secret,
     },
     SignOut(ChanAccount),
+    /// «Повторить» у проблемы канала: подключиться сейчас (`Request::Reconnect`, AUD-06).
+    Reconnect(ChanAccount),
     Toggled(bool),
     /// Начать проверку устройства или восстановление ключей учётки.
     Flow {
@@ -447,7 +449,8 @@ impl Render for Panel {
             };
             let name = if line.name.is_empty() { line.account.account.0.clone() } else { line.name.clone() };
             let online = matches!(line.state, Some(ChannelState::Online));
-            let (a1, a2, a3) = (line.account.clone(), line.account.clone(), line.account.clone());
+            let problem = matches!(line.state, Some(ChannelState::Problem(_)));
+            let (a1, a2, a3, a4) = (line.account.clone(), line.account.clone(), line.account.clone(), line.account.clone());
             let actions = div()
                 .flex()
                 .items_center()
@@ -460,6 +463,13 @@ impl Render for Panel {
                     .child(
                         link(("mx-recovery", n), tr!("mx-recovery"), &l)
                             .on_click(cx.listener(move |p, _, window, cx| p.start_flow(a2.clone(), FlowKind::Recovery, window, cx))),
+                    )
+                })
+                // У проблемы — «Повторить» (AUD-06): у процесса плагина автоповторов нет, поток ждёт запрос.
+                .when(problem, |d| {
+                    d.child(
+                        link(("mx-retry", n), tr!("comp-retry"), &l)
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PanelEvent::Reconnect(a4.clone())))),
                     )
                 })
                 .child(
@@ -518,6 +528,8 @@ pub(crate) fn error_text(e: &ChannelError) -> String {
         ChannelError::Wait { secs } => tr!("mx-err-wait", secs = secs.to_string()),
         ChannelError::Network(_) => tr!("mx-err-network"),
         ChannelError::SignedOut(_) => tr!("tg-err-signed-out"),
+        // Процесс плагина не работает (ADR 0013): автоповторов нет — поток ждёт «Повторить» (AUD-06).
+        ChannelError::Plugin(_) => tr!("mx-err-plugin"),
         // Файла набора нет (PLG-14): канал не установлен; установка компонента приходит с докачкой (PLG-15).
         ChannelError::Missing(_) => tr!("comp-missing"),
         _ => tr!("mx-err-other"),
@@ -548,5 +560,7 @@ mod tests {
         for code in ["server-invalid", "password-invalid", "recovery-key-invalid", "no-cross-signing"] {
             assert!(!error_text(&ChannelError::Denied(code.into())).is_empty());
         }
+        // Неработающий процесс плагина — своя строка, не общий отказ (AUD-06).
+        assert_ne!(error_text(&ChannelError::Plugin("crashed".into())), error_text(&ChannelError::Protocol("x".into())));
     }
 }
