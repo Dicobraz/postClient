@@ -4,7 +4,7 @@ lane: x/aud-core
 status: done
 deps: []
 class: A                   # в карточке PLG-10 заявлено («Отправить позже» сервером), а обойдено очередью ядра
-files: [crates/core/src/backend/mail.rs, crates/core/src/backend/remote.rs, crates/core/src/model.rs, crates/backend-jmap/src/convert.rs]
+files: [crates/core/src/backend/mail.rs, crates/core/src/backend/remote.rs, crates/core/src/model.rs, crates/backend-jmap/src/convert.rs, crates/demo/src/lib.rs, app-gpui/src/features.rs]
 read: [docs/adr/0013-plugins-on-demand.md, docs/specs/S5.md, docs/STALWART.md]
 checks: [nextest]
 manual: no                 # тесты: фича объявлена — команда уходит пути; не объявлена — локальная очередь
@@ -20,6 +20,8 @@ manual: no                 # тесты: фича объявлена — ком�
 ## Сделано
 - `Feature::ServerSchedule` в `model::Feature::ALL` (ядро); JMAP объявляет по `maxDelayedSend` сервера
   (`convert::features` — нет FUTURERELEASE, нет фичи); IMAP и EWS не объявляют.
+- Демо — один к одному с `Feature` (`postman_demo::Has.server_schedule`: Stalwart — да, IMAP и EWS — нет),
+  перевод в интерфейсе (`of_demo`) — тем же списком.
 - Сессия хоста запоминает возможности пути: `MailScope.features` (remote.rs) из `Event::Features`; до первого
   события — `NONE` (консервативно: держим локально).
 - `command()`: с фичей `Send` с `Release::After/At` и `Command::Scheduled` уходят пути как есть; без фичи —

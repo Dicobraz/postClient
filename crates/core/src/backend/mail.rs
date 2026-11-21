@@ -1457,9 +1457,9 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::backend::{AreaPlugin, Login, Registry};
     use crate::backend::remote::{AreaServer, AreaSession, FetchedBody, Host, Launcher, Started, serve_mail_area};
     use crate::backend::wire::{Kind, Settings};
+    use crate::backend::{AreaPlugin, Login, Registry};
     use crate::model::{Auth, Error as ModelError};
     use crate::sync::{Account, Command, Event};
     use postman_proc::link::Link;
@@ -1785,7 +1785,12 @@ mod tests {
             Box::pin(async move { Some(format!("https://{host}/dav")) })
         }
 
-        fn connect<'a>(&'a self, _url: &'a str, _login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn crate::backend::Areas>, ModelError>> {
+        fn connect<'a>(
+            &'a self,
+            _url: &'a str,
+            _login: &'a Login,
+            _profile: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Box<dyn crate::backend::Areas>, ModelError>> {
             Box::pin(async { Err(ModelError::Protocol("mock: no areas".into())) })
         }
     }

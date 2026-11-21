@@ -444,7 +444,8 @@ pub enum Kind {
 
 /// Что дал сервер учётной записи демо — те же функции, что `postman_core::model::Feature` (демо от ядра не
 /// зависит, слои): интерфейс переводит их в `Features` один к одному. `keywords` — сервер хранит ключевые слова
-/// (категории, сроки, «Ждём»; у IMAP — `PERMANENTFLAGS \*`).
+/// (категории, сроки, «Ждём»; у IMAP — `PERMANENTFLAGS \*`). `server_schedule` — сервер сам держит письмо до
+/// срока (FUTURERELEASE; у Stalwart есть, у IMAP и EWS нет).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Has {
     pub calendar: bool,
@@ -456,6 +457,7 @@ pub struct Has {
     pub autoreply: bool,
     pub quota: bool,
     pub keywords: bool,
+    pub server_schedule: bool,
 }
 
 /// Учётная запись демо: префикс ключей в кэше (`None` — основная), адрес, вид и узел сервера, функции.
@@ -484,6 +486,7 @@ pub const MAIN: Account = Account {
         autoreply: true,
         quota: true,
         keywords: true,
+        server_schedule: true,
     },
 };
 
@@ -504,6 +507,7 @@ pub const STANDARDS: Account = Account {
         autoreply: false,
         quota: false,
         keywords: true,
+        server_schedule: false,
     },
 };
 
@@ -524,6 +528,7 @@ pub const EXCHANGE: Account = Account {
         autoreply: false,
         quota: false,
         keywords: false,
+        server_schedule: false,
     },
 };
 
