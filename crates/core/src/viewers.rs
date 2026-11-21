@@ -4,8 +4,9 @@
 //! Модуль — пара `<имя>.json` (описание) + `<имя>.wasm` в каталоге модулей ([`dirs`], по ОС — `crate::paths`): сначала системный
 //! (`%ProgramFiles%\Postman\viewers`, ставит администратор), затем пользовательский (`%LOCALAPPDATA%\Postman\viewers`,
 //! в просмотре — «сторонний»). Реестр читается один раз при старте в своём потоке ([`Registry::spawn`]); плохое
-//! описание или модуль — пропуск с записью в журнал. Модуль с тем же именем у пользователя, что и у системы, —
-//! пропуск: системный главнее.
+//! описание или модуль (включая модули с импортами — доступом к системе) — пропуск с записью в журнал, а сам
+//! модуль остаётся в списке настроек с причиной ([`Registry::broken`]). Модуль с тем же именем у пользователя, что
+//! и у системы, — пропуск: системный главнее.
 //!
 //! Описание (JSON): `name`, `version`, `abi` (= [`wasm::ABI`]), `extensions` (без точки), `mime` (без параметров),
 //! `signatures` (`prefix` — с начала файла, `contains` — в первых [`HEAD`] байтах; текстом UTF-8 или массивом байтов),
@@ -53,6 +54,8 @@ pub enum Error {
     Limit(&'static str),
     #[error("module is not WebAssembly or larger than the host limit")]
     Wasm,
+    #[error("module asks for system access (imports)")]
+    Imports,
 }
 
 /// Пределы модуля: не больше общих пределов хоста ([`postman_worker::wasm`]).
@@ -85,6 +88,13 @@ impl Limits {
             Some((name, ..)) => Err(Error::Limit(name)),
             None => Ok(self),
         }
+    }
+}
+
+/// Пределы модуля — хосту ([`wasm::Limits`]): те же числа, применяет их хост ужатыми до общих констант.
+impl From<Limits> for wasm::Limits {
+    fn from(l: Limits) -> Self {
+        wasm::Limits { input: l.input, memory: l.memory, fuel: l.fuel, output: l.output }
     }
 }
 
@@ -213,6 +223,31 @@ pub struct Module {
     pub wasm: Arc<Vec<u8>>,
 }
 
+/// Почему модуль не загружается — строкой в настройках ([`Registry::broken`]); подробности — в журнале.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// Модуль просит доступ к системе (есть импорты, у ABI v1 их нет).
+    Imports,
+    /// Файл модуля — не WASM или не читается.
+    Wasm,
+    /// Заявленные пределы сверх общих хоста (или нулевые).
+    Limits,
+    /// Описание не годится (не разобрано, чужой ABI, нет форматов).
+    Description,
+}
+
+/// Модуль, который не загрузился: остаётся в списке настроек строкой «Не загружается: …», без выключателя.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broken {
+    /// Имя файла без `.json`, строчными.
+    pub id: String,
+    /// Описание, если разобралось, — имя и версия для строки настроек.
+    pub description: Option<Description>,
+    /// Из пользовательского каталога: подпись «сторонний».
+    pub third_party: bool,
+    pub reason: Reason,
+}
+
 /// Модуль в реестре по номеру: реестр после чтения не меняется.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModuleId(u32);
@@ -233,10 +268,11 @@ pub fn dirs() -> Vec<Dir> {
     [system, user].into_iter().flatten().collect()
 }
 
-/// Найденные модули: сначала системные, по имени файла.
+/// Найденные модули: сначала системные, по имени файла; не загрузившиеся — отдельно, с причиной.
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     modules: Vec<Module>,
+    broken: Vec<Broken>,
 }
 
 impl Registry {
@@ -258,6 +294,7 @@ impl Registry {
     /// Прочитать каталоги по порядку (блокирует: файлы).
     pub fn load(dirs: &[Dir]) -> Self {
         let mut modules: Vec<Module> = Vec::new();
+        let mut broken: Vec<Broken> = Vec::new();
         for dir in dirs {
             let Ok(entries) = std::fs::read_dir(&dir.path) else { continue };
             let mut manifests: Vec<PathBuf> = entries
@@ -280,15 +317,30 @@ impl Registry {
                         tracing::info!("viewer: module {id}: {} {}", description.name, description.version);
                         modules.push(Module { id, description, third_party: dir.third_party, wasm: Arc::new(wasm) });
                     }
-                    Err(e) => tracing::error!(path = %path.display(), "viewer: module not loaded: {e}"),
+                    Err((description, e)) => {
+                        tracing::error!(path = %path.display(), "viewer: module not loaded: {e}");
+                        let reason = match (description.as_ref(), &e) {
+                            (_, Error::Imports) => Reason::Imports,
+                            (_, Error::Limit(_)) => Reason::Limits,
+                            // Разобралось — не годится сам файл модуля; иначе — описание.
+                            (Some(_), Error::Wasm | Error::Io(_)) => Reason::Wasm,
+                            _ => Reason::Description,
+                        };
+                        broken.push(Broken { id, description, third_party: dir.third_party, reason });
+                    }
                 }
             }
         }
-        Self { modules }
+        Self { modules, broken }
     }
 
     pub fn get(&self, id: ModuleId) -> Option<&Module> {
         self.modules.get(id.0 as usize)
+    }
+
+    /// Модули, которые не загрузились, по порядку каталогов (список в «Настройках → Просмотр вложений»).
+    pub fn broken(&self) -> &[Broken] {
+        &self.broken
     }
 
     /// Все модули по порядку (список в «Настройках → Просмотр вложений»).
@@ -312,23 +364,35 @@ impl Registry {
     }
 }
 
-/// Описание `path` и модуль рядом (`<имя>.wasm`).
-fn load_module(path: &Path) -> Result<(Description, Vec<u8>), Error> {
+/// Описание `path` и модуль рядом (`<имя>.wasm`); при отказе — и разобранное описание, если успело (имя и версия
+/// для строки настроек).
+fn load_module(path: &Path) -> Result<(Description, Vec<u8>), (Option<Description>, Error)> {
     let io = |e: std::io::Error| Error::Io(e.to_string());
-    if std::fs::metadata(path).map_err(io)?.len() > MAX_MANIFEST {
-        return Err(Error::TooLarge);
+    if std::fs::metadata(path).map_err(io).map_err(|e| (None, e))?.len() > MAX_MANIFEST {
+        return Err((None, Error::TooLarge));
     }
-    let description = Description::parse(&std::fs::read_to_string(path).map_err(io)?)?;
+    let description = Description::parse(&std::fs::read_to_string(path).map_err(io).map_err(|e| (None, e))?).map_err(|e| (None, e))?;
+    let wasm = wasm_of(path).map_err(|e| (Some(description.clone()), e))?;
+    Ok((description, wasm))
+}
+
+/// Файл модуля рядом с описанием: двоичный WASM версии 1 без импортов (доступа к системе у него нет; полную
+/// проверку делает хост на просмотре).
+fn wasm_of(path: &Path) -> Result<Vec<u8>, Error> {
+    let io = |e: std::io::Error| Error::Io(e.to_string());
     let wasm_path = path.with_extension("wasm");
     if std::fs::metadata(&wasm_path).map_err(io)?.len() > wasm::MAX_MODULE as u64 {
         return Err(Error::Wasm);
     }
     let wasm = std::fs::read(&wasm_path).map_err(io)?;
-    // Двоичный модуль WASM версии 1; полную проверку делает хост.
+    // Двоичный модуль WASM версии 1.
     if !wasm.starts_with(b"\0asm\x01\0\0\0") || wasm.len() > wasm::MAX_MODULE {
         return Err(Error::Wasm);
     }
-    Ok((description, wasm))
+    if wasm::has_imports(&wasm) {
+        return Err(Error::Imports);
+    }
+    Ok(wasm)
 }
 
 #[cfg(test)]
@@ -381,6 +445,55 @@ mod tests {
         assert_eq!(limits(&format!(r#"{{"input": {}}}"#, wasm::MAX_INPUT + 1)), Err(Error::Limit("input")));
         assert_eq!(limits(r#"{"output": 0}"#), Err(Error::Limit("output")));
         assert_eq!(limits(&format!(r#"{{"output": {}}}"#, wasm::MAX_OUTPUT)).unwrap().limits, Limits::default());
+    }
+
+    /// Пределы модуля — те же числа хосту ([`wasm::Limits`]): хост применяет их ужатыми до общих.
+    #[test]
+    fn limits_go_to_the_host() {
+        let d = Description::parse(FB2).unwrap();
+        assert_eq!(
+            wasm::Limits::from(d.limits),
+            wasm::Limits { input: wasm::MAX_INPUT, memory: 128 * 1024 * 1024, fuel: wasm::FUEL, output: wasm::MAX_OUTPUT }
+        );
+    }
+
+    /// Модуль с импортом (доступ к системе) — двоичный WASM без интерпретатора.
+    fn wasm_with_import() -> Vec<u8> {
+        let mut m = b"\0asm\x01\0\0\0".to_vec();
+        // Раздел Import: один импорт функции `env.f` (номер типа 0).
+        let body = [[1u8].as_slice(), [3].as_slice(), b"env", [1].as_slice(), b"f", &[0, 0]].concat();
+        m.push(2);
+        m.push(body.len() as u8);
+        m.extend(body);
+        m
+    }
+
+    /// Модуль, который не загрузился, остаётся в списке настроек с причиной: импорты, плохой wasm, пределы,
+    /// описание; в выбор просмотра он не попадает.
+    #[test]
+    fn broken_modules_are_kept_with_a_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("user");
+        put(&dir, "imports", FB2, &wasm_with_import());
+        put(&dir, "notwasm", FB2, b"MZ");
+        let over = format!(r#"{{"name": "Big", "version": "1", "abi": 1, "extensions": ["x"], "limits": {{"memory": {}}}}}"#, wasm::MAX_MEMORY + 1);
+        put(&dir, "over", &over, WASM);
+        put(&dir, "baddesc", "{", WASM);
+        std::fs::write(dir.join("nowasm.json"), FB2).unwrap();
+        let r = Registry::load(&[Dir { path: dir, third_party: true }]);
+        let got: Vec<_> = r.broken().iter().map(|b| (b.id.as_str(), b.reason, b.description.is_some(), b.third_party)).collect();
+        assert_eq!(
+            got,
+            [
+                ("baddesc", Reason::Description, false, true),
+                ("imports", Reason::Imports, true, true),
+                ("notwasm", Reason::Wasm, true, true),
+                ("nowasm", Reason::Wasm, true, true),
+                // Пределы проверяются при разборе описания — имя и версия не дошли.
+                ("over", Reason::Limits, false, true),
+            ]
+        );
+        assert!(r.modules().next().is_none(), "нерабочие модули не смотрят файлы");
     }
 
     fn put(dir: &Path, name: &str, json: &str, wasm: &[u8]) {

@@ -932,6 +932,12 @@ settings-viewers-admin = от администратора
 settings-viewers-none = Модулей нет. Положите файл .wasm в папку модулей.
 settings-viewers-open = Открыть папку модулей
 settings-viewers-tip = Модуль — файл .wasm с описанием .json. Сторонние — без подписи; видят только открытый файл.
+# Модуль, который не загрузился (AUD-09): причина — в «Настройках → Просмотр вложений».
+settings-viewers-broken = Не загружается: { $reason }
+settings-viewers-broken-imports = модуль просит доступ к системе
+settings-viewers-broken-wasm = файл модуля не годится
+settings-viewers-broken-limits = пределы заявлены сверх общих
+settings-viewers-broken-desc = описание не годится
 # Шифрование диска с базой (S8-35, макет S8-D «Настройки»).
 settings-bitlocker-off = Диск { $drive } с данными Postman не зашифрован
 settings-bitlocker-off-hint = Письма «На этом компьютере» хранятся только здесь. Включите шифрование диска или обратитесь к администратору.

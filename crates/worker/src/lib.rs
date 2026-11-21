@@ -151,9 +151,12 @@ pub enum Request {
     /// Документ OOXML с макросами в бинарной части → копия без макросов там же (T2-29, «Открыть без макросов»).
     StripMacros,
     /// Модуль просмотра (только `postman-viewer`, S8-24): в бинарной части — модуль (`wasm` байт), за ним вход.
+    /// `limits` — заявленные в описании модуля пределы ([`wasm::Limits`]); хост применяет ужатые до общих констант.
     /// Ответ — [`wasm::ViewerOutput`] или [`wasm::Refusal`]; пиксели картинки — в бинарной части.
     ViewModule {
         wasm: u32,
+        #[serde(default)]
+        limits: wasm::Limits,
     },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
@@ -1283,15 +1286,16 @@ impl Client {
         }
     }
 
-    /// Показать файл `input` модулем просмотра `module` (клиент [`Client::viewer`]): ответ модуля, проверенный хостом,
-    /// или почему не показан; `Err` — хост не ответил.
-    pub fn view_module(&mut self, module: &[u8], input: &[u8]) -> Result<Result<wasm::ViewerOutput, wasm::Refusal>, String> {
+    /// Показать файл `input` модулем просмотра `module` (клиент [`Client::viewer`]) с заявленными пределами `limits`
+    /// (описание модуля; хост ужмёт их до общих констант): ответ модуля, проверенный хостом, или почему не показан;
+    /// `Err` — хост не ответил.
+    pub fn view_module(&mut self, module: &[u8], input: &[u8], limits: wasm::Limits) -> Result<Result<wasm::ViewerOutput, wasm::Refusal>, String> {
         if module.len() > wasm::MAX_MODULE || input.len() > wasm::MAX_INPUT {
             return Ok(Err(wasm::Refusal::TooLarge));
         }
         let wasm = u32::try_from(module.len()).map_err(|e| e.to_string())?;
         let bin = [module, input].concat();
-        match self.call(&Request::ViewModule { wasm }, &bin)? {
+        match self.call(&Request::ViewModule { wasm, limits }, &bin)? {
             (Response::View(Ok(wasm::ViewerOutput::Image { width, height, .. })), rgba) => {
                 Ok(wasm::checked(wasm::ViewerOutput::Image { width, height, rgba }))
             }

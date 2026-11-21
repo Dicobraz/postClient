@@ -924,6 +924,12 @@ settings-viewers-admin = from administrator
 settings-viewers-none = No modules. Put a .wasm file into the modules folder.
 settings-viewers-open = Open modules folder
 settings-viewers-tip = A module is a .wasm file with a .json description. Third-party modules are unsigned and see only the opened file.
+# A module that didn't load (AUD-09): the reason is in Settings → Attachments viewing.
+settings-viewers-broken = Not loaded: { $reason }
+settings-viewers-broken-imports = the module asks for system access
+settings-viewers-broken-wasm = the module file is not usable
+settings-viewers-broken-limits = declared limits are above the host limits
+settings-viewers-broken-desc = the description is not usable
 # Disk encryption of the database (S8-35, mockup S8-D "Settings").
 settings-bitlocker-off = Drive { $drive } with Postman data isn’t encrypted
 settings-bitlocker-off-hint = Messages “On this computer” are stored only here. Turn on disk encryption or contact your administrator.
