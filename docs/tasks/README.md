@@ -280,3 +280,25 @@ x86_64; с 2026-11-13 — обычная платформа (`docs/decisions/202
 | [FAST-1](FAST-1.md) | Опыт — ядро gpui-fast + наша платформа на базе gpui-fast-windows | deps | B | todo | — |
 | [FAST-2](FAST-2.md) | Замер gpui-pre против gpui-fast на стенде (Intel iGPU) | deps | B | todo | FAST-1 |
 | [FAST-3](FAST-3.md) | Ручная проверка сборки gpui-fast | deps | B | todo | FAST-1 |
+
+## AUD — аудит бет 0.2 к 0.3.0-beta.1
+
+Регрессы и разрывы, найденные аудитом 2026-11-21 (01…10 — сделаны в бете 0.3.0-beta.1, 11…15 — задел).
+
+| Задача | Суть | Полоса | Класс | Статус | Зависит |
+|---|---|---|---|---|---|
+| [AUD-01](AUD-01.md) | Дискавери CalDAV/CardDAV у IMAP-учётки потерян (регресс PLG-09) | aud-core | A | done | — |
+| [AUD-02](AUD-02.md) | «Отправить позже» у JMAP — сервером (FUTURERELEASE), не локальной очередью | aud-core | A | done | — |
+| [AUD-03](AUD-03.md) | Окно «Отменить» у писем-шагов поручения (Delegate) исчезло | aud-core | A | done | — |
+| [AUD-04](AUD-04.md) | Пониженный приоритет процесса плагина не возвращается у почты, DAV и LDAP | aud-core | A | done | — |
+| [AUD-05](AUD-05.md) | Экспорт — mbox Apple Mail в интерфейсе, MSG включён | aud-export | A | done | — |
+| [AUD-06](AUD-06.md) | У проблемы канала — «Повторить» | aud-ui | A | done | — |
+| [AUD-07](AUD-07.md) | `Settings.proxy` объявлен, но не используется — убрать поле | aud-core | A | done | — |
+| [AUD-08](AUD-08.md) | Политика «только TLS 1.3» — почтовый путь EWS и IMAP/SMTP в процессах плагинов | aud-tls | A | done | — |
+| [AUD-09](AUD-09.md) | Пределы wasm-модулей применяются хостом; «Не загружается» в настройках | aud-viewers | A | done | — |
+| [AUD-10](AUD-10.md) | Генератор PARITY — обработчики через алиас `mod act` | aud-ui | A | done | — |
+| [AUD-11](AUD-11.md) | Перетаскивание задач и подзадач (S6-05, S6-06) | aud-backlog | A | todo | — |
+| [AUD-12](AUD-12.md) | Связка «блок в календаре ↔ задача» (S6-08, хвост) | aud-backlog | A | todo | — |
+| [AUD-13](AUD-13.md) | «Отложить» напоминания задачи — варианты срока (S6-07, хвост) | aud-backlog | A | todo | — |
+| [AUD-14](AUD-14.md) | Бенч «Задачи» на 5 000 записей (S6-05, хвост) | aud-backlog | A | todo | — |
+| [AUD-15](AUD-15.md) | Флейк NTLM-теста EWS под голым `cargo test` (глобальное состояние) | aud-flake | A | todo | — |

@@ -477,3 +477,28 @@ Linux-замер 12,73 (Windows-замер решения №9 оставляе�
 на коммите перед PLG-02 (шум общей машины, исторический разброс 194–772); с процессом набора
 (`POSTMAN_BENCH_PLUGINS=1`) — первый кадр 231, старт набора 12–16 мс, память набора 8 МиБ. Пары — в
 `docs/MEMORY.md` (PLG-12).
+
+## Волна AUD (0.3.0-beta.1, замер на school-99, release)
+
+Замер всех файлов после волны аудита (`b9f3e0b` + PR выпуска: PR #39–#44 и правки документации; сборка
+`cargo build --release --workspace --locked --features postman-worker/viewer`, Linux x86_64, school-99). Сравнение —
+с фактом после PLG-11 (2026-11-20) и бюджетами решения 2026-11-20.
+
+| Файл | 0.3.0-beta.1 (school-99, release) | 2026-11-20 (после PLG-11) | Бюджет |
+|---|---|---|---|
+| `postman` | `<<SIZE-postman>>` | 72,89 | ≤ 74 |
+| `postman-worker` | `<<SIZE-worker>>` | 12,73 | ≤ 12 |
+| `postman-viewer` | `<<SIZE-viewer>>` | 1,97 | ≤ 2 |
+| `postman-plugins` | `<<SIZE-plugins>>` | 17,92 | ≤ 19 |
+| `postman-plugins-telegram` | `<<SIZE-plugins-telegram>>` | 4,27 | ≤ 5 |
+| `postman-plugins-matrix` | `<<SIZE-plugins-matrix>>` | 23,24 | ≤ 24 |
+
+Словами (числа подставит дирижёр перед мержем): `postman` — `<<SIZE-postman>>` против 72,89 на 2026-11-20, бюджет
+≤ 74; волна AUD код интерфейса не растила (правки ядра и плагинов), ожидание — в пределах разброса сборки.
+`postman-worker` — `<<SIZE-worker>>` против 12,73 (Linux-замер исторически выше Windows-бюджета ≤ 12, решение №9);
+`postman-viewer` — `<<SIZE-viewer>>` против 1,97 при бюджете ≤ 2 (применение пределов модулей хостом, AUD-09, на
+размер воркера не влияет). Общий набор `postman-plugins` — `<<SIZE-plugins>>` против 17,92 при бюджете ≤ 19: TLS-
+политика у IMAP/SMTP и EWS (AUD-08) добавляет клиентам выбор набора шифров, ожидание — малый запас от 17,92.
+`postman-plugins-telegram` — `<<SIZE-plugins-telegram>>` против 4,27 при бюджете ≤ 5; `postman-plugins-matrix` —
+`<<SIZE-plugins-matrix>>` против 23,24 при бюджете ≤ 24 (его opt-level «z» из №12). Превышение любого бюджета —
+словами в этой секции и строкой в «Решениях для владельца» (№ выше 21).
