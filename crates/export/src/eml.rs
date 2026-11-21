@@ -5,12 +5,12 @@ use std::io::{self, Write};
 use crate::{Civil, Letter};
 
 /// Имя файла `ГГГГ-ММ-ДД ЧЧММ — Тема.eml` по местному времени письма; без темы — `ГГГГ-ММ-ДД ЧЧММ.eml`.
-/// Через `safe_name`; повторы в каталоге — `Tree::unique`.
-pub fn file_name(letter: &Letter) -> String {
+/// Через `safe_name`; повторы в каталоге — `Tree::unique`. MSG — то же имя с расширением `.msg`.
+pub fn file_name(letter: &Letter, ext: &str) -> String {
     let c = Civil::from_unix(letter.date.saturating_add(i64::from(letter.offset)));
     let date = format!("{:04}-{:02}-{:02} {:02}{:02}", c.year, c.month, c.day, c.hour, c.minute);
     let subject = letter.subject.split_whitespace().collect::<Vec<_>>().join(" ");
-    let name = if subject.is_empty() { format!("{date}.eml") } else { format!("{date} — {subject}.eml") };
+    let name = if subject.is_empty() { format!("{date}{ext}") } else { format!("{date} — {subject}{ext}") };
     crate::safe_name(&name)
 }
 
@@ -33,14 +33,15 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(file_name(&letter("Отчёт за октябрь", b"")), "2026-10-29 1405 — Отчёт за октябрь.eml");
-        assert_eq!(file_name(&letter("Re: план?\r\n\tвторой", b"")), "2026-10-29 1405 — Re_ план_ второй.eml");
-        assert_eq!(file_name(&letter("  ", b"")), "2026-10-29 1405.eml");
+        assert_eq!(file_name(&letter("Отчёт за октябрь", b""), ".eml"), "2026-10-29 1405 — Отчёт за октябрь.eml");
+        assert_eq!(file_name(&letter("Re: план?\r\n\tвторой", b""), ".eml"), "2026-10-29 1405 — Re_ план_ второй.eml");
+        assert_eq!(file_name(&letter("  ", b""), ".eml"), "2026-10-29 1405.eml");
         let utc = Letter { offset: 0, ..letter("x", b"") };
-        assert_eq!(file_name(&utc), "2026-10-29 1105 — x.eml");
+        assert_eq!(file_name(&utc, ".eml"), "2026-10-29 1105 — x.eml");
+        assert_eq!(file_name(&letter("Отчёт за октябрь", b""), ".msg"), "2026-10-29 1405 — Отчёт за октябрь.msg");
         let mut tree = Tree::new(Layout::Dirs);
-        let a = tree.unique(Path::new(""), &file_name(&letter("Тема", b"")));
-        let b = tree.unique(Path::new(""), &file_name(&letter("тема", b"")));
+        let a = tree.unique(Path::new(""), &file_name(&letter("Тема", b""), ".eml"));
+        let b = tree.unique(Path::new(""), &file_name(&letter("тема", b""), ".eml"));
         assert_eq!((a.as_str(), b.as_str()), ("2026-10-29 1405 — Тема.eml", "2026-10-29 1405 — тема (2).eml"));
     }
 

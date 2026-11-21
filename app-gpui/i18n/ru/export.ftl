@@ -26,6 +26,7 @@ export-cancel = Отмена
 export-eml = Файл на письмо · Outlook, Thunderbird, Apple Mail
 export-mbox = Файл на папку · Thunderbird, Apple Mail
 export-maildir = Каталог на папку · mutt, Dovecot
+export-applembox = Пакет «Папка.mbox» · импорт в Apple Mail
 export-msg = Файл на письмо · Outlook: перетащить в папку
 export-pst = Файл данных Outlook · «Импорт и экспорт»
 export-running = Экспорт в { $format }

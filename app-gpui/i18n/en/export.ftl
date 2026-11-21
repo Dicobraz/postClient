@@ -22,6 +22,7 @@ export-cancel = Cancel
 export-eml = One file per message · Outlook, Thunderbird, Apple Mail
 export-mbox = One file per folder · Thunderbird, Apple Mail
 export-maildir = One directory per folder · mutt, Dovecot
+export-applembox = “Folder.mbox” package · import into Apple Mail
 export-msg = One file per message · Outlook: drag into a folder
 export-pst = Outlook data file · “Import and Export”
 export-running = Exporting to { $format }
