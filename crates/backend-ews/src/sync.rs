@@ -437,6 +437,9 @@ pub(crate) async fn run(
     // Конкретное замыкание вместо `&dyn` — дальше договор как был (`&impl Fn`).
     let notify = &|e: Event| notify(e);
     notify(Event::Status(Status::Connecting { url: host_of(&url).unwrap_or_default() }));
+    // Политика TLS — перед входом: процесс берёт её из настроек ядра (`Hello` и смены), как у пути JMAP (PLG-10).
+    // Клиенты ниже (почта, подписка, области) читают её при каждом новом соединении.
+    postman_ews::set_tls13_only(postman_core::backend::remote::settings().tls13_only);
     let (mut client, ews_url, roles) = match sign_in(&url, &user, &password).await {
         Ok(x) => x,
         // Отказ входа — один раз, без повторов по кругу (не блокировать учётку).

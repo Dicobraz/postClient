@@ -237,6 +237,8 @@ impl MailServer for EwsServer {
         let user = login.user;
         let password = String::from_utf8_lossy(login.password.expose()).into_owned();
         let spawned = std::thread::Builder::new().name(format!("sync-{ID}")).spawn(move || {
+            // Политику TLS процесс берёт из настроек ядра (`Hello` и смены), как у пути JMAP (PLG-10) и областей (PLG-07).
+            postman_ews::set_tls13_only(postman_core::backend::remote::settings().tls13_only);
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => return notify(Event::Error(SyncError::internal(format!("tokio runtime: {e}")))),

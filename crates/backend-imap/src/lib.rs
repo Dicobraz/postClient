@@ -226,6 +226,8 @@ impl MailServer for ImapServer {
             return Box::pin(async move { Err(format!("not an IMAP account: {url}")) });
         };
         let spawned = std::thread::Builder::new().name(format!("sync-{ID}")).spawn(move || {
+            // Политику TLS процесс берёт из настроек ядра (`Hello` и смены), как у пути JMAP (PLG-10) и областей (PLG-07).
+            postman_imap::set_tls13_only(postman_core::backend::remote::settings().tls13_only);
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => return notify(Event::Error(SyncError::internal(format!("tokio runtime: {e}")))),
@@ -504,6 +506,8 @@ struct Imap {
 async fn run(account: ImapAccount, profile: Option<String>, services: MailServices, mut rx: UnboundedReceiver<Command>, notify: &dyn Fn(Event)) {
     let MailServices { store, worker, seal, .. } = services;
     notify(Event::Status(Status::Connecting { url: format!("{}:{}", account.imap.host, account.imap.port) }));
+    // Политика TLS — перед соединением: процесс берёт её из настроек ядра (`Hello` и смены), как у пути JMAP (PLG-10).
+    postman_imap::set_tls13_only(postman_core::backend::remote::settings().tls13_only);
     let session = match Session::connect(&account.imap).await {
         Ok(s) => s,
         Err(e) => return notify(Event::Error(error(Stage::Connect, &e))),
