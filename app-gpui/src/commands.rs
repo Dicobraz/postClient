@@ -279,16 +279,7 @@ mod tests {
     fn parity_doc_is_current() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PARITY.md");
         let old = std::fs::read_to_string(&path).unwrap_or_default();
-        // Обработчики `on_action` — в любом модуле экрана: читаем все исходники интерфейса.
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut sources = String::new();
-        for entry in std::fs::read_dir(&src).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "commands.rs") {
-                sources += std::fs::read_to_string(&path).unwrap().as_str();
-            }
-        }
-        let (doc, done) = super::parity::document(&sources);
+        let (doc, done) = super::parity::document(&super::parity::screen_sources());
         if let Some(was) = super::parity::done_count(&old) {
             assert!(done >= was, "сделанных функций стало меньше: было {was}, стало {done}");
         }
@@ -296,6 +287,24 @@ mod tests {
             std::fs::write(&path, &doc).expect("запись docs/PARITY.md");
         } else if old.replace("\r\n", "\n") != doc {
             eprintln!("docs/PARITY.md устарел — обновит полоса docs-gen: POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity");
+        }
+    }
+
+    /// Сопоставление по имени типа (алиасы `mod act` — comfort.rs, update.rs) однозначно: у команд без прямого
+    /// совпадения имена типов действий не повторяются. Будущая коллизия — две новые команды с одним именем типа
+    /// без прямых обработчиков — громкий отказ здесь, а не молчаливое «нет» в документе или чужое «есть».
+    #[test]
+    fn aliased_action_names_do_not_collide() {
+        let handled = super::parity::handled(&super::parity::screen_sources());
+        let unmatched: Vec<String> = all().iter().map(|c| c.action_name()).filter(|n| !handled.contains(n)).collect();
+        for (i, a) in unmatched.iter().enumerate() {
+            for b in unmatched.iter().skip(i + 1) {
+                assert_ne!(
+                    super::parity::type_name(a),
+                    super::parity::type_name(b),
+                    "{a} и {b}: одно имя типа — алиас обработчика сопоставить нечем"
+                );
+            }
         }
     }
 
@@ -457,6 +466,7 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod parity {
     use super::all;
+    use pets_commands::Command;
 
     pub const RU_FTL: &str = include_str!("../i18n/ru/commands.ftl");
 
@@ -471,7 +481,7 @@ pub(crate) mod parity {
 
     /// Действия, у которых в коде экрана есть обработчик: `on_action(… _: &mail::Next …)` или с данными
     /// (`a: &mail::Categorize`). Прочие `x: &Тип` с именами действий не совпадают.
-    fn handled(source: &str) -> Vec<String> {
+    pub fn handled(source: &str) -> Vec<String> {
         source
             .split(": &")
             .skip(1)
@@ -481,6 +491,25 @@ pub(crate) mod parity {
                 parts[parts.len().saturating_sub(2)..].join("::")
             })
             .collect()
+    }
+
+    /// Имя типа действия — последний сегмент пути (`mail::Mute` → `Mute`): обработчики, объявленные алиасом
+    /// (`pub(crate) mod act` с `actions!(…)` внутри — comfort.rs, update.rs), в исходниках пишутся `act::Mute`.
+    pub fn type_name(action: &str) -> &str {
+        action.rsplit("::").next().unwrap_or(action)
+    }
+
+    /// Исходники экранов: обработчики `on_action` — в любом модуле, кроме самого реестра (`commands.rs`).
+    pub fn screen_sources() -> String {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = String::new();
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "commands.rs") {
+                sources += std::fs::read_to_string(&path).unwrap().as_str();
+            }
+        }
+        sources
     }
 
     /// Число сделанных функций из прошлой версии документа (`Сделано: N из M`).
@@ -493,7 +522,19 @@ pub(crate) mod parity {
     pub fn document(screen_source: &str) -> (String, usize) {
         let names = ftl_names(RU_FTL);
         let handled = handled(screen_source);
-        let done = all().iter().filter(|c| handled.contains(&c.action_name())).count();
+        let direct = |c: &Command| handled.contains(&c.action_name());
+        // Команды без прямого совпадения: их обработчик может быть объявлен алиасом (`act::Mute` вместо
+        // `mail::Mute`). Совпадаем по имени типа, пока оно у таких команд одно — иначе алиас мог бы указывать
+        // на чужое действие (тест `aliased_action_names_do_not_collide` ловит коллизию громко).
+        let unmatched: Vec<String> = all().iter().map(|c| c.action_name()).filter(|n| !handled.contains(n)).collect();
+        let aliased = |c: &Command| {
+            let name = c.action_name();
+            !handled.contains(&name)
+                && unmatched.iter().filter(|n| type_name(n) == type_name(&name)).count() == 1
+                && handled.iter().any(|h| type_name(h) == type_name(&name))
+        };
+        let is_done = |c: &Command| direct(c) || aliased(c);
+        let done = all().iter().filter(|c| is_done(c)).count();
         let mut s = String::new();
         s.push_str("# Соответствие classic Outlook\n\n");
         s.push_str("> Генерируется из реестра команд (`app-gpui/src/commands.rs`) тестом `parity_doc_is_current`.\n");
@@ -508,7 +549,7 @@ pub(crate) mod parity {
             let keys: Vec<String> = c.keys.iter().map(|k| format!("`{k}`")).collect();
             let single: Vec<String> =
                 super::SINGLE.keys.iter().filter(|k| k.command == c.id).flat_map(|k| k.keys).map(|k| format!("`{k}`")).collect();
-            let status = if handled.contains(&c.action_name()) { "есть" } else { "нет" };
+            let status = if is_done(c) { "есть" } else { "нет" };
             s.push_str(&format!("| {name} | `{}` | {} | {} | {status} |\n", c.id, keys.join(", "), single.join(", ")));
         }
         (s, done)
