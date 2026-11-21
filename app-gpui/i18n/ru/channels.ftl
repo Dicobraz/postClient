@@ -7,6 +7,7 @@ tg-add = Добавить учётку Telegram
 tg-no-key = В этой сборке нет ключа приложения Telegram: вход недоступен.
 comp-missing = Компонент канала не установлен.
 comp-download = Скачать
+comp-retry = Повторить
 comp-from-file = Установить из файла…
 comp-stale = Компонент канала обновился вместе с программой: скачайте его заново.
 comp-busy = Скачивается компонент…
@@ -46,6 +47,7 @@ tg-err-denied = Telegram отказал во входе.
 tg-err-wait = Telegram просит подождать { $secs } с.
 tg-err-network = Нет связи с Telegram: проверьте сеть и повторите.
 tg-err-signed-out = Вход истёк: войдите снова.
+tg-err-plugin = Компонент Telegram не работает: нажмите «Повторить», чтобы подключиться снова.
 tg-err-other = Не удалось войти в Telegram.
 
 # Matrix (CH-05): вход, проверка устройства, резервная копия ключей, шифрованные беседы.
@@ -94,6 +96,7 @@ mx-err-recovery = Ключ или фраза не подошли.
 mx-err-denied = Сервер Matrix отказал.
 mx-err-wait = Сервер просит подождать { $secs } с.
 mx-err-network = Нет связи с сервером Matrix: проверьте сеть и повторите.
+mx-err-plugin = Компонент Matrix не работает: нажмите «Повторить», чтобы подключиться снова.
 mx-err-other = Не удалось выполнить действие Matrix.
 tg-step-phone = Телефон
 tg-step-code = Код

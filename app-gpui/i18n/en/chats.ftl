@@ -76,6 +76,7 @@ chats-err-not-found = The conversation or message is gone.
 chats-err-too-large = Too large for this channel.
 chats-err-unsupported = The channel cannot do this.
 chats-err-other = The channel action failed.
+chats-err-plugin = The channel component is not working: choose Retry to connect again.
 chats-err-not-running = The channel is off or the account is not connected: turn it on in Settings.
 chats-pick-first = Select a conversation first.
 chat-bar-pin = Pin
