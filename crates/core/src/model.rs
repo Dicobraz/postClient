@@ -441,10 +441,14 @@ pub enum Feature {
     Quota,
     /// Сервер хранит ключевые слова писем: категории, сроки, «Ждём» (JMAP — всегда; IMAP — `PERMANENTFLAGS \*`).
     Keywords,
+    /// Сервер сам держит письмо до срока (FUTURERELEASE, RFC 4865): «Отправить позже» и окно «Отменить» уходят ему
+    /// сразу, ядро ничего не держит у себя (AUD-02; JMAP — по `maxDelayedSend`). У кого фичи нет, письма до срока
+    /// держит очередь ядра.
+    ServerSchedule,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 9] = [
+    pub const ALL: [Feature; 10] = [
         Feature::Calendar,
         Feature::Tasks,
         Feature::Contacts,
@@ -454,6 +458,7 @@ impl Feature {
         Feature::Autoreply,
         Feature::Quota,
         Feature::Keywords,
+        Feature::ServerSchedule,
     ];
 
     const fn bit(self) -> u16 {

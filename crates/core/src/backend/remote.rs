@@ -8,8 +8,9 @@
 //!   плагина, и только после [`Host::first_frame`]. Процесс нужен, когда заместителя позвали (`connect`, `sign_in`):
 //!   есть учётка вида или идёт вход. Первым — плагин с приоритетом [`Priority::First`] (активная учётка, исходящее),
 //!   не больше [`MAX_STARTS`] стартов сразу; остальные — с пониженным приоритетом процессора и ввода-вывода до первой
-//!   синхронизации (`ChannelEvent::Cursor`). Пока плагин поднимается, `connect` ждёт, поток учётки — «подключение»,
-//!   запросы интерфейса копятся в его канале.
+//!   синхронизации: у каналов — первый курсор (`ChannelEvent::Cursor`), у почты — первый пакет событий синка
+//!   ([`mail_sync_packet`]), у областей — первое событие команды. Пока плагин поднимается, `connect` ждёт, поток
+//!   учётки — «подключение», запросы интерфейса копятся в его канале.
 //! - **Договор:** `Hello` со сверкой сборки ([`Build`]), уровнем журнала, политикой и сетью; секрет учётки — в `Open`;
 //!   хранилище плагина — услуга ядра по обмену (`PluginStore` учётки или входа, вызовом связи). Журнал процесса — в
 //!   `tracing` с меткой плагина и его уровнем.
@@ -244,8 +245,23 @@ pub(in crate::backend) struct MailScope {
     /// Поисковый индекс учётки (PLG-10): услуга `FromPlugin::Index` индексирует строки им.
     pub(in crate::backend) index: crate::sync::Index,
     pub(in crate::backend) failed: Mutex<Option<String>>,
+    /// Возможности пути (`Event::Features`, AUD-02): по ним ядро решает, что держать у себя (например, «Отправить
+    /// позже» — только у путей без `Feature::ServerSchedule`). До первого события — [`crate::model::Features::NONE`].
+    pub(in crate::backend) features: Mutex<crate::model::Features>,
     /// Очередь отправки учётки (PLG-08): ответы пути на её билеты — сюда, интерфейсу — только её ошибки.
     pub(in crate::backend) queue: Arc<super::mail::MailQueue>,
+}
+
+/// Пакет событий синхронизации почтового пути (AUD-04): папки или письма дошли до ядра — либо сверка кончилась.
+/// Статусы входа («подключение», «вошли», «загрузка») пакетом не считаются: по ним возвращать приоритет рано.
+fn mail_sync_packet(event: &crate::sync::Event) -> bool {
+    matches!(
+        event,
+        crate::sync::Event::MailboxesChanged
+            | crate::sync::Event::EmailsChanged
+            | crate::sync::Event::BodiesStored(_)
+            | crate::sync::Event::Status(crate::sync::Status::Synced)
+    )
 }
 
 fn gone() -> ChannelError {
@@ -727,6 +743,16 @@ impl Conn {
         (lock(&self.exit_code))().map(|c| format!(", exit code {}", postman_proc::exit_name(c))).unwrap_or_default()
     }
 
+    /// Первая синхронизация — приоритет процесса обратно ([`Conn::lowered`]): у каналов — первый курсор, у почты —
+    /// первый пакет событий синхронизации, у областей — любое событие команды (AUD-04).
+    fn restore_priority(&self, plugin: &Plugin) {
+        if self.lowered.swap(false, Ordering::SeqCst)
+            && let Err(e) = (lock(&self.background))(false)
+        {
+            tracing::debug!(plugin = plugin.row.id, "plugin priority not restored: {e}");
+        }
+    }
+
     pub(in crate::backend) fn id(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
@@ -785,11 +811,8 @@ impl Conn {
                 },
                 Incoming::Message(FromPlugin::Event { session, event }, _) => {
                     // Первая синхронизация — приоритет процесса обратно.
-                    if matches!(event, ChannelEvent::Cursor(_))
-                        && self.lowered.swap(false, Ordering::SeqCst)
-                        && let Err(e) = (lock(&self.background))(false)
-                    {
-                        tracing::debug!(plugin = plugin.row.id, "plugin priority not restored: {e}");
+                    if matches!(event, ChannelEvent::Cursor(_)) {
+                        self.restore_priority(plugin);
                     }
                     if let Some(tx) = lock(&self.sessions).get(&session) {
                         let _ = tx.send(event);
@@ -797,11 +820,22 @@ impl Conn {
                 }
                 // События команды области (PLG-07) ждёт заместитель в потоке учётки — до ответа.
                 Incoming::Message(FromPlugin::AreaEvent { session, event }, _) => {
+                    // Области статусов входа не шлют: любое событие — работа синхронизации, приоритет обратно (AUD-04).
+                    self.restore_priority(plugin);
                     lock(&self.areas_events).entry(session).or_default().push_back(event);
                 }
                 // Событие потока синхронизации учётки (PLG-08) — в её канал, интерфейсу.
                 Incoming::Message(FromPlugin::MailEvent { session, event }, _) => {
+                    // Первый пакет событий синхронизации почты — приоритет обратно (AUD-04, как курсор у каналов).
+                    if mail_sync_packet(&event) {
+                        self.restore_priority(plugin);
+                    }
                     if let Some(scope) = lock(&self.mails).get(&session) {
+                        // Возможности пути (`Event::Features`, AUD-02): запомнить до конца сессии — по ним ядро
+                        // решает, что держать в очереди.
+                        if let crate::sync::Event::Features(f) = &event {
+                            *lock(&scope.features) = *f;
+                        }
                         // Ответы пути на билеты очереди ядра — очереди; интерфейсу — только её ошибки.
                         let internal = match &event {
                             crate::sync::Event::Sent { ticket, .. } | crate::sync::Event::ComposeFailed { ticket, .. } => {

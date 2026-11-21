@@ -1161,6 +1161,26 @@ impl MailPlugin for RemoteMail {
         // Политику процесс получает с `Hello` и сменой ([`super::wire::Settings`]), путь применяет её сам.
     }
 
+    /// Узел адреса учётки у пути со своей схемой (AUD-01, регресс PLG-09): такой путь (IMAP) своих областей не ведёт —
+    /// календарь и контакты ищут пути областей на том же узле (RFC 6764). Путь без схемы (JMAP, EWS) ведёт области
+    /// сам — искать нечего. Процесса не требует: детект работает и без поднятого набора.
+    fn area_host(&self, url: &str) -> Option<String> {
+        match self.plugin.row.claim {
+            super::remote::Claim::Scheme(_) => host_of(url),
+            _ => None,
+        }
+    }
+
+    /// Адрес области с ключом `key` уже в адресе учётки (`?dav=…` — последнее значение).
+    fn has_area(&self, url: &str, key: &str) -> bool {
+        super::area_address(url, key).is_some()
+    }
+
+    /// Адрес учётки с дописанным адресом области `key`.
+    fn with_area(&self, url: &str, key: &str, area: &str) -> String {
+        format!("{url}{}{key}={area}", if url.contains('?') { '&' } else { '?' })
+    }
+
     /// Синхронизация учётки — сессия процесса (PLG-08): команды интерфейса — по обмену, события — обратно. Ответ —
     /// канал команд сразу (процесс поднимается в фоне, как поток учётки в ядре).
     fn spawn(&self, s: Spawn) -> UnboundedSender<Command> {
@@ -1254,6 +1274,7 @@ async fn session(host: &Arc<super::remote::Inner>, plugin: &Arc<super::remote::P
                     cache: cache.clone(),
                     index: index.clone(),
                     failed: Mutex::new(None),
+                    features: Mutex::new(crate::model::Features::NONE),
                     queue: Arc::clone(&queue),
                 },
             );
@@ -1317,8 +1338,8 @@ async fn session(host: &Arc<super::remote::Inner>, plugin: &Arc<super::remote::P
     }
 }
 
-/// Команда интерфейса: отправку с окном «Отменить» и отмены держит очередь ядра, остальное — в путь.
-/// `false` — синхронизация кончилась.
+/// Команда интерфейса: отправку и шаг поручения с окном «Отменить» держит очередь ядра — если путь не объявил
+/// серверную отложку ([`server_schedule`], AUD-02); остальное — в путь. `false` — синхронизация кончилась.
 async fn command(
     conn: &Arc<super::remote::Conn>,
     session: u64,
@@ -1328,9 +1349,16 @@ async fn command(
     cmd: Command,
 ) -> bool {
     let reply = |event: Event| iface(events, repaint, event);
+    // Фичу пути читаем один раз на команду: сессия у пути одна, `Event::Features` приходит сразу после входа.
+    let server_holds = server_schedule(conn, session);
     match cmd {
         Command::Send { draft, replace, ticket, release: crate::model::Release::Now } => {
             forward(conn, session, Command::Send { draft, replace, ticket, release: crate::model::Release::Now }).await
+        }
+        // Сервер сам держит письмо до срока (FUTURERELEASE): команда уходит пути как есть, «Отменить» придёт
+        // `Unsend`/`Withhold` мимо очереди — она пуста (AUD-02).
+        Command::Send { draft, replace, ticket, release } if server_holds => {
+            forward(conn, session, Command::Send { draft, replace, ticket, release }).await
         }
         Command::Send { draft, replace, ticket, release: crate::model::Release::After(secs) } => {
             let scheduled = queue.hold(*draft, replace, secs);
@@ -1341,6 +1369,22 @@ async fn command(
             let secs = u32::try_from(at.saturating_sub(jiff::Timestamp::now().as_second())).unwrap_or(u32::MAX);
             let scheduled = queue.hold(*draft, replace, secs);
             reply(Event::Sent { ticket, scheduled: Some(scheduled) });
+            true
+        }
+        // Шаг поручения с окном «Отменить» (AUD-03): письма шага — в очередь ядра, интерфейсу — «шаг ушёл» со
+        // списком отложенных («Отменить» — `Withhold`); по сроку уйдут обычной отправкой ([`release`]).
+        Command::Delegate { uid, drafts, ticket, release } if server_holds => {
+            forward(conn, session, Command::Delegate { uid, drafts, ticket, release }).await
+        }
+        Command::Delegate { uid, drafts, ticket, release: crate::model::Release::After(secs) } => {
+            let scheduled = drafts.iter().map(|d| queue.hold(d.clone(), None, secs)).collect();
+            reply(Event::Delegated { ticket, uid, error: None, scheduled });
+            true
+        }
+        Command::Delegate { uid, drafts, ticket, release: crate::model::Release::At(at) } => {
+            let secs = u32::try_from(at.saturating_sub(jiff::Timestamp::now().as_second())).unwrap_or(u32::MAX);
+            let scheduled = drafts.iter().map(|d| queue.hold(d.clone(), None, secs)).collect();
+            reply(Event::Delegated { ticket, uid, error: None, scheduled });
             true
         }
         Command::Unsend { scheduled, ticket } => {
@@ -1360,12 +1404,20 @@ async fn command(
                 true
             }
         }
+        // Список ждущих: у пути с серверной отложкой — его (сервер держит, AUD-02), иначе — очередь ядра.
+        Command::Scheduled if server_holds => forward(conn, session, Command::Scheduled).await,
         Command::Scheduled => {
             reply(Event::Scheduled { list: queue.scheduled(), max_delay: 0 });
             true
         }
         cmd => forward(conn, session, cmd).await,
     }
+}
+
+/// Путь объявил `Feature::ServerSchedule` (`Event::Features`, AUD-02): «Отправить позже» и окно «Отменить» держит
+/// сервер (FUTURERELEASE) — ядру в очереди держать нечего. Фичи ещё нет — ядро держит сам (как у IMAP и EWS).
+fn server_schedule(conn: &Arc<super::remote::Conn>, session: u64) -> bool {
+    lock(&conn.mails).get(&session).is_some_and(|s| lock(&s.features).has(crate::model::Feature::ServerSchedule))
 }
 
 /// Команда — в путь; `false` — синхронизация кончилась (ответ пути) или связи нет (вход заново).
@@ -1376,6 +1428,14 @@ async fn forward(conn: &Arc<super::remote::Conn>, session: u64, cmd: Command) ->
         Ok(_) => true,
         Err(_) => false,
     }
+}
+
+/// Узел адреса учётки со своей схемой (`imaps://узел[:порт][?…]` → `узел`) — там ищут пути областей (AUD-01).
+fn host_of(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let server = rest.split('?').next().unwrap_or_default().trim_end_matches('/');
+    let host = server.rsplit_once(':').map_or(server, |(h, _)| h);
+    (!host.is_empty()).then(|| host.to_owned())
 }
 
 /// Письма очереди с вышедшим сроком (`all` — все, интерфейс закрылся) — в путь своими билетами; путь не принял —
@@ -1397,7 +1457,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::backend::Login;
+    use crate::backend::{AreaPlugin, Login, Registry};
     use crate::backend::remote::{AreaServer, AreaSession, FetchedBody, Host, Launcher, Started, serve_mail_area};
     use crate::backend::wire::{Kind, Settings};
     use crate::model::{Auth, Error as ModelError};
@@ -1415,10 +1475,21 @@ mod tests {
         profile: crate::backend::remote::Profile::Network { enterprise_auth: true },
     };
 
+    /// Строка пути IMAP для детекта (AUD-01): своя схема — `imap` (обе, `imaps://` и `imap://`).
+    const IMAP_ROW: super::super::remote::Row = super::super::remote::Row {
+        id: "imap",
+        kind: Kind::Mail,
+        claim: crate::backend::remote::Claim::Scheme("imap"),
+        set: "postman-plugins",
+        profile: crate::backend::remote::Profile::Network { enterprise_auth: false },
+    };
+
     /// Общее состояние подменного пути: команды собирает в поток своей «синхронизации».
     struct MockState {
         opens: AtomicUsize,
         sent: Mutex<Vec<Command>>,
+        /// Возможности, которые путь объявляет при входе (`Event::Features`); по умолчанию — никаких (AUD-02).
+        features: crate::model::Features,
     }
 
     /// Подменный путь: команды молча собирает, отправку подтверждает («отправлено» с тем же билетом).
@@ -1426,7 +1497,12 @@ mod tests {
 
     impl MockMail {
         fn new() -> Arc<Self> {
-            Arc::new(Self(Arc::new(MockState { opens: AtomicUsize::new(0), sent: Mutex::new(Vec::new()) })))
+            Self::with_features(crate::model::Features::NONE)
+        }
+
+        /// Путь с объявленными возможностями (`Event::Features` при входе — до ответа на вход, AUD-02).
+        fn with_features(features: crate::model::Features) -> Arc<Self> {
+            Arc::new(Self(Arc::new(MockState { opens: AtomicUsize::new(0), sent: Mutex::new(Vec::new()), features })))
         }
 
         fn state(&self) -> Arc<MockState> {
@@ -1462,6 +1538,10 @@ mod tests {
         ) -> BoxFuture<'_, Result<(), String>> {
             let state = self.state();
             state.opens.fetch_add(1, Ordering::Relaxed);
+            // Возможности и первый пакет синхронизации — до ответа на вход: хост обработает их до команд (как у
+            // JMAP фичи приходят сразу после входа, AUD-02; пакет — возврат приоритета, AUD-04).
+            notify(Event::Features(state.features));
+            notify(Event::MailboxesChanged);
             let spawned = std::thread::Builder::new().name("mock-mail-sync".into()).spawn(move || {
                 let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
                 rt.block_on(async move {
@@ -1502,14 +1582,23 @@ mod tests {
         }
     }
 
-    /// Сторона процесса — поток теста с точкой входа набора ([`serve_mail_area`]).
-    struct InThread(Arc<MockMail>);
+    /// Сторона процесса — поток теста с точкой входа набора ([`serve_mail_area`]); второй элемент — журнал вызовов
+    /// понижения/возврата приоритета процесса (`background`, AUD-04).
+    struct InThread(Arc<MockMail>, Arc<Mutex<Vec<bool>>>);
+
+    impl InThread {
+        fn new(mail: Arc<MockMail>) -> (Arc<Self>, Arc<Mutex<Vec<bool>>>) {
+            let priority = Arc::new(Mutex::new(Vec::new()));
+            (Arc::new(Self(mail, Arc::clone(&priority))), priority)
+        }
+    }
 
     impl Launcher for InThread {
         fn launch(&self, _row: &crate::backend::remote::Row) -> std::io::Result<Started> {
             let (from_plugin, plugin_out) = pipe()?;
             let (plugin_in, to_plugin) = pipe()?;
             let mock = Arc::clone(&self.0);
+            let priority = Arc::clone(&self.1);
             std::thread::spawn(move || {
                 let link = Link::new(plugin_in, plugin_out, crate::backend::remote::MAX_BIN).unwrap();
                 serve_mail_area(link, "ews", Some(mock), || Arc::new(MockAreas));
@@ -1518,7 +1607,10 @@ mod tests {
                 link: Link::new(from_plugin, to_plugin, crate::backend::remote::MAX_BIN)?,
                 kill: Box::new(|| {}),
                 exit_code: Box::new(|| None),
-                background: Box::new(|_| Ok(())),
+                background: Box::new(move |on| {
+                    lock(&priority).push(on);
+                    Ok(())
+                }),
             })
         }
     }
@@ -1554,7 +1646,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         MAIL_LEAVING.store(false, Ordering::Relaxed);
         let mock = MockMail::new();
-        let host = Host::new(Arc::new(InThread(Arc::clone(&mock))), Settings::default());
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
         host.first_frame();
         let cache = postman_cache::Cache::open_in_memory().unwrap();
         // Письмо, оставшееся от не дошедшей отправки (срок вышел: процесс упал в окне «Отменить»).
@@ -1622,7 +1715,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         MAIL_LEAVING.store(false, Ordering::Relaxed);
         let mock = MockMail::new();
-        let host = Host::new(Arc::new(InThread(Arc::clone(&mock))), Settings::default());
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
         host.first_frame();
         let (commands, rx) = spawn_at(&host, postman_cache::Cache::open_in_memory().unwrap());
         commands.send(Command::Send { draft: Box::new(draft()), replace: None, ticket: 1, release: crate::model::Release::After(60) }).unwrap();
@@ -1656,7 +1750,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         MAIL_LEAVING.store(false, Ordering::Relaxed);
         let mock = MockMail::new();
-        let host = Host::new(Arc::new(InThread(Arc::clone(&mock))), Settings::default());
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
         host.first_frame();
         let cache = postman_cache::Cache::open_in_memory().unwrap();
         let (commands, _rx) = spawn_at(&host, cache.clone());
@@ -1675,5 +1770,215 @@ mod tests {
         }
         assert_eq!(mail_holding(), 0, "выход дождался подтверждения");
         assert!(cache.local_prefix(&queue_key("")).unwrap().is_empty(), "письмо из базы ушло");
+    }
+
+    /// Область для детекта: «есть» на любом узле; сеть не проверяется — путь со своей схемой отвечает claims без
+    /// процесса (AUD-01).
+    struct MockArea;
+
+    impl AreaPlugin for MockArea {
+        fn key(&self) -> &'static str {
+            "dav"
+        }
+
+        fn probe<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async move { Some(format!("https://{host}/dav")) })
+        }
+
+        fn connect<'a>(&'a self, _url: &'a str, _login: &'a Login, _profile: Option<&'a str>) -> BoxFuture<'a, Result<Box<dyn crate::backend::Areas>, ModelError>> {
+            Box::pin(async { Err(ModelError::Protocol("mock: no areas".into())) })
+        }
+    }
+
+    /// Детект имап-учётки (AUD-01, регресс PLG-09): у `imaps://` области DAV ищутся на узле адреса и дописываются в
+    /// него; у пути со своими областями (EWS — адрес путём) адрес не меняется.
+    #[test]
+    fn detect_of_an_imap_account_finds_dav_areas() {
+        let mock = MockMail::new();
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
+        // Оба пути реестра отвечают по claims без процесса: детект не поднимает набор и ничего не ждёт.
+        let registry = Registry::default().with_mail(host.mail(IMAP_ROW)).with_mail(host.mail(ROW)).with_area(MockArea);
+        assert_eq!(
+            registry.detect_blocking("imaps://mail.example.test"),
+            "imaps://mail.example.test?dav=https://mail.example.test/dav",
+            "области DAV — на узле адреса учётки"
+        );
+        assert_eq!(
+            registry.detect_blocking("imaps://mail.example.test:993"),
+            "imaps://mail.example.test:993?dav=https://mail.example.test/dav",
+            "порт в адрес области не попадает"
+        );
+        assert_eq!(
+            registry.detect_blocking("imaps://mail.example.test?dav=https://other.test/dav"),
+            "imaps://mail.example.test?dav=https://other.test/dav",
+            "адрес области уже есть — не трогаем"
+        );
+        assert_eq!(
+            registry.detect_blocking("https://mail.example.test/ews/exchange.asmx"),
+            "https://mail.example.test/ews/exchange.asmx",
+            "путь со своими областями — адрес как был"
+        );
+    }
+
+    /// Путь объявил серверную отложку (`Feature::ServerSchedule`, AUD-02): «Отправить позже» и список отложенных
+    /// уходят пути как есть — ядро ничего не держит.
+    #[test]
+    fn server_schedule_sends_go_to_the_path() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let features = crate::model::Features::NONE.with(crate::model::Feature::ServerSchedule, true);
+        let mock = MockMail::with_features(features);
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
+        host.first_frame();
+        let (commands, rx) = spawn_at(&host, postman_cache::Cache::open_in_memory().unwrap());
+        commands
+            .send(Command::Send { draft: Box::new(draft()), replace: Some("old".into()), ticket: 1, release: crate::model::Release::After(3600) })
+            .unwrap();
+        mock.wait_sent(1);
+        let sent = mock.sent();
+        assert!(
+            matches!(&sent[0], Command::Send { ticket: 1, replace, release: crate::model::Release::After(3600), .. } if replace.as_deref() == Some("old")),
+            "команда ушла пути как есть: {sent:?}"
+        );
+        assert_eq!(mail_holding(), 0, "очередь ядра письмо не держит");
+        // Ответ пути интерфейсу проходит («отправлено», окно — забота сервера).
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Sent { ticket: 1, .. }) => break,
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на отправку: {e}"),
+            }
+        }
+        // Список ждущих — тоже путь (сервер держит их, не очередь ядра).
+        commands.send(Command::Scheduled).unwrap();
+        mock.wait_sent(2);
+        assert!(mock.sent().iter().any(|c| matches!(c, Command::Scheduled)), "запрос списка ушёл пути: {:?}", mock.sent());
+    }
+
+    /// Фичи нет (как у IMAP и EWS): письмо до срока держит очередь ядра, список отложенных — свой, предел — 0 (AUD-02).
+    #[test]
+    fn without_server_schedule_the_letter_is_queued_locally() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let mock = MockMail::new();
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
+        host.first_frame();
+        let (commands, rx) = spawn_at(&host, postman_cache::Cache::open_in_memory().unwrap());
+        commands.send(Command::Send { draft: Box::new(draft()), replace: None, ticket: 1, release: crate::model::Release::After(60) }).unwrap();
+        let scheduled = loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Sent { ticket: 1, scheduled: Some(s) }) => break s,
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на отправку: {e}"),
+            }
+        };
+        assert_eq!(mail_holding(), 1, "письмо держит очередь ядра");
+        assert!(mock.sent().is_empty(), "путь письма не получил");
+        commands.send(Command::Scheduled).unwrap();
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Event::Scheduled { list, max_delay: 0 }) => assert_eq!(list.len(), 1, "список — из очереди ядра"),
+            Ok(e) => panic!("не тот ответ на список: {e:?}"),
+            Err(e) => panic!("нет ответа на список: {e}"),
+        }
+        // Убрать за собой: счётчик держащих общий на программу.
+        commands.send(Command::Unsend { scheduled, ticket: 2 }).unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Unsent { ticket: 2, .. }) => break,
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на отмену: {e}"),
+            }
+        }
+        assert_eq!(mail_holding(), 0);
+    }
+
+    /// Окно «Отменить» у писем шага поручения (AUD-03): письма шага держит очередь ядра, «Отменить» убирает их до
+    /// срока — путь их не получает.
+    #[test]
+    fn delegate_steps_wait_in_the_undo_window() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let mock = MockMail::new();
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
+        host.first_frame();
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        let (commands, rx) = spawn_at(&host, cache.clone());
+        commands
+            .send(Command::Delegate { uid: "t-1@postman".into(), drafts: vec![draft()], ticket: 1, release: crate::model::Release::After(60) })
+            .unwrap();
+        let scheduled = loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Delegated { ticket: 1, uid, error: None, scheduled }) => {
+                    assert_eq!(uid, "t-1@postman");
+                    assert_eq!(scheduled.len(), 1, "окно «Отменить» предложено");
+                    break scheduled;
+                }
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на шаг поручения: {e}"),
+            }
+        };
+        assert_eq!(mail_holding(), 1, "письмо шага держит очередь ядра");
+        assert!(mock.sent().is_empty(), "путь письмо шага ещё не получил");
+        // «Отменить» шага: письма убраны из очереди и из базы, путь не звали.
+        commands.send(Command::Withhold { scheduled, ticket: 2 }).unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Withheld { ticket: 2, too_late: false, error: None }) => break,
+                Ok(_) => {}
+                Err(e) => panic!("нет ответа на отмену шага: {e}"),
+            }
+        }
+        assert_eq!(mail_holding(), 0, "письма шага убраны из очереди");
+        assert!(mock.sent().is_empty(), "отменённые письма путь не получил");
+        assert!(cache.local_prefix(&queue_key("")).unwrap().is_empty(), "письма шага из базы убраны");
+    }
+
+    /// Срок окна вышел: письма шага уходят пути обычной отправкой (по тику), подтверждение разметило очередь (AUD-03).
+    #[test]
+    fn delegate_steps_leave_when_the_window_is_over() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        MAIL_LEAVING.store(false, Ordering::Relaxed);
+        let mock = MockMail::new();
+        let (launcher, _priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
+        host.first_frame();
+        let cache = postman_cache::Cache::open_in_memory().unwrap();
+        let (commands, _rx) = spawn_at(&host, cache.clone());
+        // Срок в ноль: очередь выпускает письмо на ближайшем тике.
+        commands
+            .send(Command::Delegate { uid: "t-1@postman".into(), drafts: vec![draft()], ticket: 1, release: crate::model::Release::After(0) })
+            .unwrap();
+        mock.wait_sent(1);
+        let sent = mock.sent();
+        assert!(
+            matches!(&sent[0], Command::Send { release: crate::model::Release::Now, replace: None, .. }),
+            "по сроку шаг ушёл обычной отправкой: {sent:?}"
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        while mail_holding() > 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(mail_holding(), 0, "подтверждение пути разметило очередь");
+        assert!(cache.local_prefix(&queue_key("")).unwrap().is_empty(), "письмо из базы ушло");
+    }
+
+    /// Первый пакет событий синхронизации почты возвращает приоритет процесса (AUD-04, как курсор у каналов):
+    /// запуск — понижен, папки дошли до ядра — обратно.
+    #[test]
+    fn first_mail_sync_packet_restores_the_process_priority() {
+        let mock = MockMail::new();
+        let (launcher, priority) = InThread::new(Arc::clone(&mock));
+        let host = Host::new(launcher, Settings::default());
+        host.first_frame();
+        let (_commands, _rx) = spawn_at(&host, postman_cache::Cache::open_in_memory().unwrap());
+        let until = Instant::now() + Duration::from_secs(10);
+        while (*lock(&priority) != vec![true, false]) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(*lock(&priority), vec![true, false], "запуск понизил приоритет, первый пакет событий синка вернул");
     }
 }
