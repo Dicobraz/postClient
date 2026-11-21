@@ -5,7 +5,8 @@
 //! (`Cache::letter_content_reader`); нет — `Command::FetchRaw` у учётки письма (не больше [`FETCHES`] сразу), ответ
 //! (`Event::Raw`) — в [`Exporter::event`]. Ошибка сервера или нет ответа за [`FETCH_WAIT`] (нет связи: без связи путь
 //! команду не ждёт) — письмо в итог «не загрузилось» по учётке, экспорт идёт дальше; учётка без ответа больше не
-//! спрашивается. MSG — после его выгрузки письмами (S8-30): пока [`Format::available`] — нет, задание кончается отказом.
+//! спрашивается. MSG — файл на письмо в каталоге папки: свойства MAPI — воркер ([`Mapi`], как у PST), файл —
+//! `postman_export::msg`; не разобралось — письмо исходником вложением, как у PST.
 //!
 //! PST (S8-33б) — один файл на задание (`Имя.pst`, больше 50 ГиБ — `Имя (2).pst`…) в каталоге выгрузки: письмо
 //! разбирает в свойства MAPI воркер ([`Mapi`], песочница), файл пишет `postman_export::pst::Writer` потоком; не
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 use jiff::tz::TimeZone;
 use postman_cache::{Cache, FolderRow, LetterRow, Owner};
 use postman_export::mapi::{self, MapiMessage, Value};
-use postman_export::{Flags, Layout, Tree, eml, maildir, mbox, pst};
+use postman_export::{Flags, Layout, Tree, eml, maildir, mbox, msg, pst};
 
 use crate::migrate::Output;
 pub use crate::migrate::PROGRESS_EVERY;
@@ -59,7 +60,8 @@ pub enum Scope {
     All(Vec<(Home, String)>),
 }
 
-/// Формат файлов (S8-D, `export.ftl`: `export-eml`, `export-mbox`, `export-maildir`, `export-msg`, `export-pst`).
+/// Формат файлов (S8-D, `export.ftl`: `export-eml`, `export-mbox`, `export-applembox`, `export-maildir`,
+/// `export-msg`, `export-pst`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Format {
     /// Файл на письмо, каталог на папку.
@@ -77,18 +79,19 @@ pub enum Format {
 }
 
 impl Format {
-    /// Писатель формата есть: MSG — ещё нет, интерфейс его не предлагает.
+    /// Писатель формата есть у каждого (MSG — S8-30, вложения и подписанные — S8-41, проверка Outlook 2026-11-03):
+    /// интерфейс показывает весь список.
     pub fn available(self) -> bool {
-        !matches!(self, Format::Msg)
+        true
     }
 
     fn layout(self) -> Option<Layout> {
         match self {
-            Format::Eml => Some(Layout::Dirs),
+            Format::Eml | Format::Msg => Some(Layout::Dirs),
             Format::Mbox => Some(Layout::Thunderbird),
             Format::AppleMbox => Some(Layout::AppleMail),
             Format::Maildir => Some(Layout::Maildir),
-            Format::Msg | Format::Pst => None,
+            Format::Pst => None,
         }
     }
 }
@@ -243,7 +246,7 @@ impl Exporter {
             fetching: 0,
             unfetched: Vec::new(),
             unreachable: Vec::new(),
-            end: if format.available() { None } else { Some(State::Failed("format is not available yet".into())) },
+            end: None,
             dirty: true,
             forced: true,
             shown: None,
@@ -593,17 +596,26 @@ impl Job {
                     let _ = fs::remove_file(&tmp);
                 })?
             }
+            Format::Msg => {
+                // Свойства MAPI — воркером (как у PST); не разобралось — письмо исходником вложением.
+                let mut raw = Vec::new();
+                src.read_to_end(&mut raw)?;
+                let m = mapi(&raw, row.seen).unwrap_or_else(|e| {
+                    tracing::warn!(letter = id.0, "export: letter not parsed for MSG, stored as attachment: {e}");
+                    unparsed(&row, &raw)
+                });
+                // Имя как у EML, но `.msg`; файл с тем же именем на диске (прежняя выгрузка) — «(2)», не поверх.
+                let name = eml::file_name(&letter, ".msg");
+                let (path, mut file) = unique_file(&mut self.tree, &self.root, &c.rel, &name)?;
+                msg::write(&mut file, &m).inspect_err(|_| {
+                    let _ = fs::remove_file(&path);
+                })?;
+                raw.len() as u64
+            }
             _ => {
                 // Имя «ГГГГ-ММ-ДД ЧЧММ — Тема.eml»; файл с тем же именем на диске (прежняя выгрузка) — «(2)», не поверх.
-                let name = eml::file_name(&letter);
-                let (path, mut file) = loop {
-                    let path = self.root.join(&c.rel).join(self.tree.unique(&c.rel, &name));
-                    match OpenOptions::new().write(true).create_new(true).open(&path) {
-                        Ok(f) => break (path, f),
-                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-                        Err(e) => return Err(e.into()),
-                    }
-                };
+                let name = eml::file_name(&letter, ".eml");
+                let (path, mut file) = unique_file(&mut self.tree, &self.root, &c.rel, &name)?;
                 copy(src, &mut file).inspect_err(|_| {
                     let _ = fs::remove_file(&path);
                 })?
@@ -622,6 +634,19 @@ fn copy(src: &mut dyn Read, file: &mut File) -> io::Result<u64> {
     let n = io::copy(src, &mut w)?;
     w.flush()?;
     Ok(n)
+}
+
+/// Новый файл с именем `name` в каталоге письма `rel` (от корня выгрузки); имя занято (прежняя выгрузка) — «(2)»,
+/// не поверх. Повторы имён запоминает `tree`.
+fn unique_file(tree: &mut Tree, root: &std::path::Path, rel: &std::path::Path, name: &str) -> io::Result<(PathBuf, File)> {
+    loop {
+        let path = root.join(rel).join(tree.unique(rel, name));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Имя файла PST и хранилища: папка — её имя, учётка — её ключ, иначе «Postman»; файл с таким именем уже есть —
@@ -1081,9 +1106,9 @@ mod tests {
         assert_eq!(m.attachments[0].props.last(), Some(&(mapi::PR_ATTACH_DATA_BIN, Value::Binary(b"raw".to_vec()))));
     }
 
-    /// Выделение — в каталог своей папки; всё — каталог на учётку с именем от интерфейса; MSG — пока отказ.
+    /// Выделение — в каталог своей папки (EML, MSG); всё — каталог на учётку с именем от интерфейса.
     #[test]
-    fn letters_all_and_unavailable_formats() {
+    fn letters_all_and_msg() {
         let (dir, cache) = demo();
         let inbox = folder(&cache, "", "Входящие");
         let sales = folder(&cache, "sales", "Входящие");
@@ -1128,11 +1153,16 @@ mod tests {
             assert!(root.join(d).is_dir(), "{d}");
         }
 
-        assert!(Format::Pst.available());
-        assert!(!Format::Msg.available());
-        let job = e.start(Scope::Account(Home::Local), Format::Msg, dir.path().join("msg"));
-        let out = e.poll(&cache, Instant::now());
-        assert!(matches!(&out.events[..], [Event::Export { job: j, state: State::Failed(_), .. }] if *j == job));
-        assert!(!dir.path().join("msg").exists());
+        // MSG: письмо — файл `.msg` в каталоге своей папки (разбор — тем же кодом, что в воркере), файл — MS-CFB.
+        let root = dir.path().join("msg");
+        let mut e = Exporter::new(TimeZone::UTC).with_mapi(Box::new(postman_worker::mapi::mapi));
+        e.start(Scope::Letters(picked.to_vec()), Format::Msg, root.clone());
+        let (events, asked) = run(&mut e, &cache, &|_| None, Duration::from_millis(10));
+        assert!(asked.is_empty(), "содержимое в базе");
+        assert_eq!(last(&events).3, State::Done { unfetched: vec![] });
+        let got = files(&root);
+        assert_eq!(got.len(), 2, "по файлу на письмо");
+        assert!(got.iter().all(|(p, _)| p.starts_with("Входящие/") && p.ends_with(".msg")));
+        assert!(got.iter().all(|(_, b)| b.starts_with(&[0xD0, 0xCF, 0x11, 0xE0])), "составной файл MS-CFB");
     }
 }

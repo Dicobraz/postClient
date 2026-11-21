@@ -4,7 +4,7 @@
 //! конец — тост с «Открыть папку».
 //!
 //! Задание ведёт поток ядра (`export::Exporter`, `migration::Core`): `Command::Export` → `Event::Export`. Форматы —
-//! те, у которых есть писатель (`Format::available`): PST — с S8-33б, MSG появится в списке сам.
+//! все с писателями (PST — с S8-33б, MSG — с S8-30/S8-41).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,15 +27,16 @@ use crate::roles::Look;
 pub(crate) const EXPORT: char = '\u{EDE1}';
 
 /// Форматы в порядке списка (макет): имя и строка подсказки.
-pub(crate) const FORMATS: [(Format, &str, &str); 5] = [
+pub(crate) const FORMATS: [(Format, &str, &str); 6] = [
     (Format::Eml, "EML", "export-eml"),
     (Format::Mbox, "mbox", "export-mbox"),
+    (Format::AppleMbox, "Apple mbox", "export-applembox"),
     (Format::Maildir, "Maildir", "export-maildir"),
     (Format::Msg, "MSG", "export-msg"),
     (Format::Pst, "PST", "export-pst"),
 ];
 
-/// Форматы, которые можно выбрать: есть писатель (MSG — ещё нет).
+/// Форматы, которые можно выбрать: у всех есть писатель (`Format::available`).
 pub(crate) fn formats() -> impl Iterator<Item = (Format, &'static str, &'static str)> {
     FORMATS.into_iter().filter(|(f, ..)| f.available())
 }
@@ -608,14 +609,14 @@ mod tests {
         assert!(descendants(&all, "d").is_empty());
     }
 
-    /// Форматы списка — только с писателем: PST виден (S8-33б), MSG — нет; подписи — у каждого.
+    /// Форматы списка — все с писателями (MSG — S8-30/S8-41, AppleMbox — S8-28): 6 позиций; подписи — у каждого.
     #[test]
     fn formats_listed() {
         let _ = pets_i18n::init(&crate::parts::texts(), "ru");
         let listed: Vec<Format> = formats().map(|(f, ..)| f).collect();
-        assert!(listed.contains(&Format::Eml) && listed.contains(&Format::Mbox) && listed.contains(&Format::Maildir));
-        assert_eq!(listed, [Format::Eml, Format::Mbox, Format::Maildir, Format::Pst]);
+        assert_eq!(listed, [Format::Eml, Format::Mbox, Format::AppleMbox, Format::Maildir, Format::Msg, Format::Pst]);
         assert_eq!(format_name(Format::Mbox), "mbox");
+        assert_eq!(format_name(Format::AppleMbox), "Apple mbox");
         for (_, _, hint) in FORMATS {
             assert!(!pets_i18n::tr!(hint).starts_with("export-"), "{hint}");
         }
