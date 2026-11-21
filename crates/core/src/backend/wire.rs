@@ -32,8 +32,9 @@ use crate::tasks::Delta;
 /// (`Ask::Area*`, `Ask::Fetch`, PLG-07: CalDAV и CardDAV — процессом, задачи поверх кэша — услугой ядра); №5 —
 /// почтовый путь и услуги ядра ([`Ask::MailOpen`], [`FromPlugin::MailEvent`], [`FromPlugin::Cache`], [`FromPlugin::Worker`],
 /// [`FromPlugin::Smime`], PLG-08: EWS — процессом, хранилище учётки, разбор письма и S/MIME — услугами); №6 — JMAP
-/// процессом ([`FromPlugin::Index`], операции хранилища JMAP, вход по токену в [`MailLogin`], PLG-10).
-pub const WIRE: u32 = 6;
+/// процессом ([`FromPlugin::Index`], операции хранилища JMAP, вход по токену в [`MailLogin`], PLG-10); №7 — из
+/// [`Settings`] убрано не использованное поле прокси (настоящая поддержка прокси — отдельная волна, AUD-07).
+pub const WIRE: u32 = 7;
 
 /// `serde_json::Value` и `Map` в сообщениях обмена (задачи областей, PLG-07): кодек postcard — формат без
 /// самоописания, `Value` он не разбирает (`deserialize_any` не поддержан), поэтому значение едет байтами JSON — тем
@@ -116,8 +117,6 @@ pub struct Settings {
     pub log: String,
     /// Только TLS 1.3 для новых подключений (политика и «Настройки → Безопасность», S5-30).
     pub tls13_only: bool,
-    /// Прокси сети (`http://узел:порт`); `None` — напрямую.
-    pub proxy: Option<String>,
 }
 
 /// Приветствие хоста.
@@ -918,7 +917,7 @@ mod tests {
 
     fn asks() -> Vec<Ask> {
         let all = vec![
-            Ask::Hello(HostHello { build: Build::current(), settings: Settings { log: "info".into(), tls13_only: true, proxy: None } }),
+            Ask::Hello(HostHello { build: Build::current(), settings: Settings { log: "info".into(), tls13_only: true } }),
             Ask::Stats,
             Ask::Features,
             Ask::ParseLink("https://chat.example.test/g-team/m7".into()),

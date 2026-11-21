@@ -15,9 +15,10 @@ pub trait FromJmap<T> {
 }
 
 /// Что умеет сервер JMAP — по capabilities сессии. Задачи живут в календаре (S6-01), поэтому идут за ним; ключевые
-/// слова (`Email.keywords`) — часть почты JMAP.
+/// слова (`Email.keywords`) — часть почты JMAP. Отложенная отправка (FUTURERELEASE, «Отправить позже» и окно
+/// «Отменить» без очереди у ядра) — по `maxDelayedSend` (AUD-02).
 pub fn features(client: &postman_jmap::Client) -> Features {
-    features_of(&|c| client.has(c))
+    features_of(&|c| client.has(c)).with(Feature::ServerSchedule, client.max_delayed_send() > 0)
 }
 
 fn features_of(has: &dyn Fn(&str) -> bool) -> Features {
@@ -187,7 +188,9 @@ mod tests {
 
     #[test]
     fn features_follow_capabilities() {
-        assert_eq!(features_of(&|_| true), Features::ALL);
+        // Отложенная отправка (`ServerSchedule`, AUD-02) в `features_of` не входит: она не по наличию capability,
+        // а по значению `maxDelayedSend` — её добавляет `features` поверх.
+        assert_eq!(features_of(&|_| true).with(Feature::ServerSchedule, true), Features::ALL);
         assert_eq!(features_of(&|_| false), Features::NONE);
         let mail_only = features_of(&|c| c == postman_jmap::CORE || c == postman_jmap::MAIL);
         assert_eq!(mail_only, Features::NONE.with(Feature::Keywords, true));
